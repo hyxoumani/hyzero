@@ -2,6 +2,15 @@ use hyzero::*;
 use hyzero::pawn::*;
 
 fn main() {
+    
+
+
+
+
+}
+
+fn test_hello(){
+
     println!("Hello, world!");
 
     let test_var = Test::new(Test{attribute:5,attribute1:8});
@@ -9,10 +18,4 @@ fn main() {
     test_fn(test_var);
 
     test_hello();
-
-
-
-
-
-
 }
