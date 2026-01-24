@@ -71,4 +71,22 @@ pub struct Move {
     pub promotion_piece_type: Option<PieceType>,
 }
 
+
+pub struct GameState{
+    game_state: GameBoard
+}
+
+impl GameState{
+    pub fn init_game() -> Self{
+        Self{
+            game_state: GameBoard::start_game()
+        }
+    }
+}
+
+
+
+
+pub mod game;
 pub mod pieces;
+
