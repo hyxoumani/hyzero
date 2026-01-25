@@ -1,8 +1,8 @@
 use crate::game::Player;
-
+#[derive(Debug)]
 pub struct GameBoard {
-    player1: Player,
-    player2: Player
+    pub(crate) player1: Player,
+    pub(crate) player2: Player
 }
 
 impl GameBoard{

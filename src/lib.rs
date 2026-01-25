@@ -26,6 +26,18 @@ impl From<Square> for u8 {
     }
 }
 
+impl From<Square> for usize {
+    fn from (s:Square) -> Self {
+        s as usize
+    }
+}
+
+impl From<PieceType> for usize {
+    fn from (p: PieceType) -> Self {
+        p as usize
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum File {
@@ -69,19 +81,6 @@ pub struct Move {
     pub is_castle: bool,
     pub is_en_passant: bool,
     pub promotion_piece_type: Option<PieceType>,
-}
-
-
-pub struct GameState{
-    game_state: GameBoard
-}
-
-impl GameState{
-    pub fn init_game() -> Self{
-        Self{
-            game_state: GameBoard::start_game()
-        }
-    }
 }
 
 

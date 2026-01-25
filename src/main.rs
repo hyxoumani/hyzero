@@ -1,8 +1,10 @@
-use hyzero::init_game;
+use hyzero::game::GameState;
 
 fn main() {
 
-    init_game();
+    let game_state : GameState = GameState::init_game();
+
+    println!("{:?}", game_state.get_game_board());
     
     let mut test_vec: Vec<Option<Test>> = Vec::new();
 
