@@ -73,20 +73,11 @@ impl GameState{
             };
             player2.pieces &= !temp_mask_to;
             player2.pieces_bb[usize::from(piece_temp_to.piece_type)] &= !temp_mask_to;
-
         } else{
             player.pieces |= temp_mask_to;
         }
 
-        self.board_arr[usize::from(to)] = Some(piece_temp_to);
-
-
-
-        //2 scenarios
-        //1 board is emtpy
-        //2 board is not empty, then have to capture piece and re-calculate checks, for now will focus on just updating game states
-
-
+        self.board_arr[usize::from(to)] = self.board_arr[usize::from(from)].take()
 
     }
 }
