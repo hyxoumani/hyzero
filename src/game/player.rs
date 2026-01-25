@@ -40,4 +40,8 @@ impl Player {
             pieces: 0xFFFF000000000000,
         }
     }
+
+    pub fn get_valid_moves {
+        
+    }
 }

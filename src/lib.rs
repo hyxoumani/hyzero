@@ -85,6 +85,19 @@ pub struct Move {
 
 
 
+pub struct precomputed_items {
+    sig_indexes: [[0; len(PieceType)]; len(Square)]
+    bit_mask: [[0; len(PieceType)]; len(Square)]
+    //using sig_indexes and bit_mask use mask to pre_compute things 
+}
+
+impl precomputed_items {
+    pub fn precompue_masks (&self) {
+
+    }
+}
+
+
 
 pub mod game;
 pub mod pieces;

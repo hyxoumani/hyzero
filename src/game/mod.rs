@@ -44,6 +44,7 @@ impl GameState{
         &self.game_state
     }
 
+
     pub fn update_board(&mut self, from: Square, to: Square){
         // given a from find if white or black as well as what type of piece it is
         let piece_temp_from: Piece = self.board_arr[usize::from(from)].unwrap();
@@ -78,6 +79,6 @@ impl GameState{
         }
 
         self.board_arr[usize::from(to)] = self.board_arr[usize::from(from)].take()
-
     }
+
 }
