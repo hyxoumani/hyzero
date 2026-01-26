@@ -85,16 +85,102 @@ pub struct Move {
 
 
 
+
+
+
+
+
+use crate::pieces::bishop::BishopEntry;
+use crate::pieces::mod_rook::RookEntry;
+
 pub struct precomputed_items {
-    sig_indexes: [[0; len(PieceType)]; len(Square)]
-    bit_mask: [[0; len(PieceType)]; len(Square)]
+    pub knight_moves: [u64; 64],
+    pub king_moves: [u64; 64],
+    pub white_pawn_moves: [u64; 64],
+    pub black_pawn_moves: [u64; 64],
+    pub rook_moves: [RookEntry; 64],
+    pub bishop_moves: [BishopEntry; 64]
     //using sig_indexes and bit_mask use mask to pre_compute things 
 }
 
 impl precomputed_items {
-    pub fn precompue_masks (&self) {
 
+    pub fn begin_precomputing() -> Self {
+        let knight_moves = std::array::from_fn(|i| {
+            let mut moves = 0u64;
+            let r = (i / 8) as i32;
+            let c = (i % 8) as i32;
+            let offsets = [(2,1),(2,-1),(-2,1),(-2,-1),(1,2),(1,-2),(-1,2),(-1,-2)];
+            for (dr, dc) in offsets {
+                let (nr, nc) = (r + dr, c + dc);
+                if nr >= 0 && nr < 8 && nc >= 0 && nc < 8 {
+                    moves |= 1 << (nr * 8 + nc);
+                }
+            }
+            moves
+        });
+
+        // --- 2. Kings ---
+        let king_moves = std::array::from_fn(|i| {
+            let mut moves = 0u64;
+            let r = (i / 8) as i32;
+            let c = (i % 8) as i32;
+            for dr in -1..=1 {
+                for dc in -1..=1 {
+                    if dr == 0 && dc == 0 { continue; }
+                    let (nr, nc) = (r + dr, c + dc);
+                    if nr >= 0 && nr < 8 && nc >= 0 && nc < 8 {
+                        moves |= 1 << (nr * 8 + nc);
+                    }
+                }
+            }
+            moves
+        });
+
+        // --- 3. Pawn Attacks (The "V" mask you mentioned) ---
+        let white_pawn_moves = std::array::from_fn(|i| {
+            let mut attacks = 0u64;
+            let r = (i / 8) as i32;
+            let c = (i % 8) as i32;
+            // White attacks "up" (higher rank)
+            if r < 7 { 
+                if c > 0 { attacks |= 1 << ((r + 1) * 8 + (c - 1)); }
+                if c < 7 { attacks |= 1 << ((r + 1) * 8 + (c + 1)); }
+            }
+            attacks
+        });
+
+        let black_pawn_moves = std::array::from_fn(|i| {
+            let mut attacks = 0u64;
+            let r = (i / 8) as i32;
+            let c = (i % 8) as i32;
+            // Black attacks "down" (lower rank)
+            if r > 0 {
+                if c > 0 { attacks |= 1 << ((r - 1) * 8 + (c - 1)); }
+                if c < 7 { attacks |= 1 << ((r - 1) * 8 + (c + 1)); }
+            }
+            attacks
+        });
+
+        // --- 4. Sliders (Rooks & Bishops) ---
+        // Here 'i' is the square index (0..63) passed to your init functions
+        let rook_moves = std::array::from_fn(|i| RookEntry::init_rook(i as u8));
+        let bishop_moves = std::array::from_fn(|i| BishopEntry::init_bishop(i as u8));
+
+        precomputed_items {
+            knight_moves,
+            king_moves,
+            white_pawn_moves,
+            black_pawn_moves,
+            rook_moves,
+            bishop_moves,
+        }
     }
+
+
+
+
+
 }
 
 
