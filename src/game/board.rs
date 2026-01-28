@@ -1,5 +1,5 @@
 use crate::game::Player;
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct GameBoard {
     pub(crate) player1: Player,
     pub(crate) player2: Player

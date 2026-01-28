@@ -41,7 +41,7 @@ impl Piece for Bishop {
 }
 
 use rand::Rng;
-
+#[derive(Debug)]
 pub struct BishopEntry {
     pub mask: u64,
     pub magic_num: u64,

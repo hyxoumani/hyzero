@@ -1,5 +1,8 @@
 use crate::Bitboard;
-#[derive(Debug)]
+use crate::game::Move;
+use rand::Rng;
+
+#[derive(Debug, Clone)]
 pub struct Player {
     pub (crate)color: bool,
     pub (crate)pieces_bb: [u64; 6], // [Pawn, Knight, Bishop, Rook, Queen, King]
@@ -23,6 +26,16 @@ impl Player {
             pieces: 0x000000000000FFFF, 
         }
     }
+
+    pub fn make_move(&mut self) -> Move{
+        //randomly generate
+        let mut rng = rand::thread_rng();
+        Move{
+            from: rng.gen_range(0..64).into(),
+            to: rng.gen_range(0..64).into(),
+            promotion_piece_type: None
+        }
+    }
     
     pub fn new_black() -> Self {
         let bbs = [
@@ -39,9 +52,5 @@ impl Player {
             pieces_bb: bbs,
             pieces: 0xFFFF000000000000,
         }
-    }
-
-    pub fn get_valid_moves {
-        
     }
 }

@@ -1,10 +1,9 @@
 use hyzero::game::GameState;
-
+use hyzero::session::SessionObj;
 fn main() {
 
-    let game_state : GameState = GameState::init_game();
+    let session_obj : SessionObj = SessionObj::start_session();
 
-    println!("{:?}", game_state.get_game_board());
     
     let mut test_vec: Vec<Option<Test>> = Vec::new();
 

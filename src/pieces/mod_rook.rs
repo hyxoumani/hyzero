@@ -39,7 +39,7 @@ impl Piece for Rook {
         moves & !friendly_pieces
     }
 }
-
+#[derive(Debug)]
 pub struct RookEntry {
     pub mask: u64,
     pub magic_num: u64,
