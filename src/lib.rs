@@ -96,12 +96,53 @@ pub struct PrecomputedItems {
     pub black_pawn_pushes: [u64; 64],
     pub black_pawn_attacks: [u64; 64],
     pub rook_moves: [RookEntry; 64],
-    pub bishop_moves: [BishopEntry; 64]
+    pub bishop_moves: [BishopEntry; 64],
+    pub rays: [[u64; 64]; 64]
     //using sig_indexes and bit_mask use mask to pre_compute things 
 }
 
 impl PrecomputedItems {
     pub fn begin_precomputing() -> Self {
+
+        let mut rays = [[0u64; 64]; 64];
+
+        for from in 0..64 {
+            let from_rank = from / 8;
+            let from_file = from % 8;
+
+            for to in 0..64 {
+                let to_rank = to / 8;
+                let to_file = to % 8;
+
+                let rank_diff = (to_rank as i8) - (from_rank as i8);
+                let file_diff = (to_file as i8) - (from_file as i8);
+
+                // 1. Check if 'from' and 'to' are on the same line
+                // They must share a rank, file, or have equal diagonal distance
+                let is_on_line = from_rank == to_rank || 
+                                from_file == to_file || 
+                                rank_diff.abs() == file_diff.abs();
+
+                if is_on_line && from != to {
+                    // Determine the "step" to move from 'from' toward 'to'
+                    let rank_step = rank_diff.signum(); // -1, 0, or 1
+                    let file_step = file_diff.signum(); // -1, 0, or 1
+                    
+                    let mut current_rank = from_rank as i8 + rank_step;
+                    let mut current_file = from_file as i8 + file_step;
+
+                    // 2. Fill the bits until we hit the 'to' square
+                    while (current_rank as usize) != to_rank || (current_file as usize) != to_file {
+                        let current_sq = (current_rank * 8 + current_file) as usize;
+                        rays[from][to] |= 1u64 << current_sq;
+
+                        current_rank += rank_step;
+                        current_file += file_step;
+                    }
+                }
+            }
+        }
+
         let knight_moves = std::array::from_fn(|i| {
             let mut moves = 0u64;
             let r = (i / 8) as i32;
@@ -189,6 +230,7 @@ impl PrecomputedItems {
             black_pawn_pushes,
             rook_moves,
             bishop_moves,
+            rays
         }
     }
 }
