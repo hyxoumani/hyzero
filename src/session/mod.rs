@@ -17,7 +17,7 @@ impl SessionObj {
 
     pub fn start_games(&self, num_games: u8){
         for i in 0..num_games{
-            let mut game_state: GameState = GameState::init_game(Arc::clone(&self.precomputed_items));
+            let mut game_state: GameState = GameState::init_game_state(Arc::clone(&self.precomputed_items));
             game_state.start_game();
 
         }

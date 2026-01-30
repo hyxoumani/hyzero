@@ -172,7 +172,8 @@ impl PrecomputedItems {
                 }
             }
             moves
-        });
+        }
+    );
 
 
     // Pre-calculated tables for Pawn behavior
@@ -233,6 +234,8 @@ impl PrecomputedItems {
             rays
         }
     }
+
+    
 }
 
 
