@@ -90,7 +90,7 @@ impl GameBoard{
         //recalculate checks after each turn
     }
 
-    pub fn validate_move(&self, piece_moved: Move, color: Color) -> bool {
+    pub fn validate_move(&self, piece_moved: Move, color: Color, board: Bitboard) -> bool {
         //just check if it's valid & not in check
         let mut player = if color == Color::White {
             &self.player1
@@ -164,36 +164,22 @@ impl GameBoard{
     pub fn get_attackers(&self, sq: usize, attacker_color:Color) -> u64{
         let mut attackers = 0u64;
         
-        let opponent = if attacker_color == Color::White {
+        let mut opponent = if attacker_color == Color::White {
             &self.player1 
         } else {
             &self.player2 
         };
-
-        // 1. Pawn Attacks (Note: we use the OPPOSITE color's attack table)
-        let pawn_attacks = if attacker_color == Color::White {
-            self.precomputed_items.black_pawn_attacks[sq] // Attacking UP
+        let mut opp_color = if attacker_color == Color::White{
+            Color::Black
         } else {
-            self.precomputed_items.white_pawn_attacks[sq] // Attacking DOWN
+            Color::White
         };
-        attackers |= pawn_attacks & opponent.pieces_bb[PieceType::Pawn as usize];
-        attackers |= self.precomputed_items.knight_moves[sq] & opponent.pieces_bb[PieceType::Knight as usize];
-        attackers |= self.precomputed_items.king_moves[sq] & opponent.pieces_bb[PieceType::King as usize];
-
-        // 3. Sliding Pieces (Magic Bitboards)
-        let blockers = self.combined_pieces;
-        
-        // Rook/Queen (Straight)
-        let rook_entry = &self.precomputed_items.rook_moves[sq];
-        let rook_attacks = rook_entry.magic_table[(rook_entry.magic_num.wrapping_mul(blockers & rook_entry.mask) >> (64 - rook_entry.sig_bits)) as usize];
-        let straight_attackers = opponent.pieces_bb[PieceType::Rook as usize] | opponent.pieces_bb[PieceType::Queen as usize];
-        attackers |= rook_attacks & straight_attackers;
-
-        // Bishop/Queen (Diagonal)
-        let bishop_entry = &self.precomputed_items.bishop_moves[sq];
-        let bishop_attacks = bishop_entry.magic_table[(bishop_entry.magic_num.wrapping_mul(blockers & bishop_entry.mask) >> (64 - bishop_entry.sig_bits)) as usize];
-        let diag_attackers = opponent.pieces_bb[PieceType::Bishop as usize] | opponent.pieces_bb[PieceType::Queen as usize];
-        attackers |= bishop_attacks & diag_attackers;
+        attackers |= self.get_move_mask(sq, opp_color, PieceType::Pawn) & opponent.pieces_bb[PieceType::Pawn as usize];
+        attackers |= self.get_move_mask(sq, opp_color, PieceType::Knight) & opponent.pieces_bb[PieceType::Knight as usize];
+        attackers |= self.get_move_mask(sq, opp_color, PieceType::King) & opponent.pieces_bb[PieceType::King as usize];
+        attackers |= self.get_move_mask(sq, opp_color, PieceType::Rook) & opponent.pieces_bb[PieceType::Rook as usize];
+        attackers |= self.get_move_mask(sq, opp_color, PieceType::Bishop) & opponent.pieces_bb[PieceType::Bishop as usize];
+        attackers |= self.get_move_mask(sq, opp_color, PieceType::Queen) & opponent.pieces_bb[PieceType::Queen as usize];
 
         attackers
     }
