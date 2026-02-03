@@ -1,5 +1,5 @@
 use crate::game::Player;
-use crate::{Bitboard, Color, PieceType, Square, Piece};
+use crate::{Bitboard, Color, PieceType, Square, Piece, BitIterator};
 use crate::PrecomputedItems;
 use super::Move;
 use std::sync::Arc;
@@ -16,7 +16,10 @@ pub struct GameBoard {
     precomputed_items: Arc<PrecomputedItems>,
     black_pieces: Bitboard,
     combined_pieces: Bitboard,
-    in_check: bool
+    in_check: bool,
+    white_pins: Bitboard,
+    black_pins: Bitboard,
+    is_game_over: bool
 
 }
 
@@ -53,45 +56,170 @@ impl GameBoard{
             precomputed_items,
             black_pieces: 0xFFFF000000000000,
             combined_pieces: 0x000000000000FFFF | 0xFFFF000000000000,
-            in_check: false
+            in_check: false,
+            white_pins: 0u64,
+            black_pins: 0u64,
+            is_game_over: false
         }
     }
 
     pub fn start_game(&mut self){
         let count = 0;
+        self.is_game_over = false;
         loop {
+            if self.is_game_over {break}
             let mut piece_moved: Move;
             if count % 2 == 0 {
                 loop {
                     piece_moved = self.player1.make_move();
-                    if self.validate_move(piece_moved, Color::White){
+                    if self.validate_move(piece_moved, Color::White, self.combined_pieces, self.white_pieces, self.black_pieces){
                         return
                     }
                 }
             } else {
                     loop {
                     piece_moved = self.player2.make_move();
-                    if self.validate_move(piece_moved, Color::Black){
+                    if self.validate_move(piece_moved, Color::Black, self.combined_pieces, self.white_pieces, self.black_pieces){
                         return
                     }
                 }
             }
-            self.compute_turn_items(count);
+            self.compute_turn_items(count, piece_moved);
             count += 1;
         }
     }
 
-    pub fn compute_turn_items(&mut self, count: usize){
+    pub fn compute_turn_items(&mut self, count: usize, piece_moved: Move){
         //at the end of each turn recompute where each piece is
+        self.update_board(piece_moved.from, piece_moved.to);
         self.white_pieces = self.player1.pieces;
         self.black_pieces = self.player2.pieces;
         self.combined_pieces = self.white_pieces | self.black_pieces;
 
-        //recalculate checks after each turn
+        if count %2 == 0 {self.calculate_pins(Color::White, self.combined_pieces, self.white_pieces, self.black_pieces);} else {self.calculate_pins(Color::Black, self.combined_pieces, self.white_pieces, self.black_pieces)}
+        //recalculate checkmate & stalemate after each turn
+        self.calculate_checkmate(count);
+
     }
 
-    pub fn validate_move(&self, piece_moved: Move, color: Color, board: Bitboard) -> bool {
+
+
+
+    pub fn calculate_pins(&mut self, color: Color, board: Bitboard, white_pieces: Bitboard, black_pieces: Bitboard){
+        let mut player1 = &self.player1;
+        let mut player2 = &self.player2;
+        
+        let (king_bits, friendly_bits, enemy_bits, enemy_sliders) = match color {
+            Color::White => (
+                player1.pieces_bb[PieceType::King as usize], 
+                white_pieces, 
+                black_pieces,
+                player2.pieces_bb[PieceType::King as usize] | player2.pieces_bb[PieceType::Rook as usize] | player2.pieces_bb[PieceType::Bishop as usize]
+            ),
+            Color::Black => (
+                player2.pieces_bb[PieceType::King as usize], 
+                black_pieces, 
+                white_pieces,
+                player1.pieces_bb[PieceType::King as usize] | player1.pieces_bb[PieceType::Rook as usize] | player1.pieces_bb[PieceType::Bishop as usize]
+            ),
+        };
+
+        let king_sq = king_bits.trailing_zeros() as usize;
+
+        // 2. The Closure: Captures the specific context for THIS side
+        let find_pin = |attacker_sq: usize| -> Option<u64> {
+            // Get precomputed ray between King and Attacker
+            let path = self.precomputed_items.rays[king_sq][attacker_sq];
+            let blockers = path & board;
+
+            // If exactly one piece blocks the ray and it's our color
+            if blockers.count_ones() == 1 && (blockers & friendly_bits) != 0 {
+                Some(blockers)
+            } else {
+                None
+            }
+        };
+
+        // 3. Execution
+        let mut pin_mask = 0u64;
+        
+        // Only check enemy sliders that are on the same lines as the King
+        for attacker_sq in BitIterator::new(enemy_sliders) {
+            let attacker_idx = attacker_sq as usize;
+            // 1. Get the precomputed exclusive path
+            let path = self.precomputed_items.rays[king_sq][attacker_idx];
+
+            // 2. If path is 0, they aren't on a line (or are adjacent)
+            // Note: Adjacent sliders are checks, not pins, so we ignore path == 0
+            if path == 0 { continue; }
+
+            // 3. Count pieces on the path
+            let blockers = path & board;
+
+            if blockers.count_ones() == 1 {
+                // 4. If the single blocker is friendly, it's a pin!
+                if (blockers & friendly_bits) != 0 {
+                    pin_mask |= blockers;
+                    
+                }
+            }
+        }
+
+        // 4. Store the result in the appropriate player's state
+        match color {
+            Color::White => self.white_pins = pin_mask,
+            Color::Black => self.black_pins = pin_mask,
+        }
+        
+    }
+
+    pub fn calculate_checkmate(&mut self, count: usize) -> bool{
+        let (player, opp_color, color, pins) = if count % 2 == 0 { 
+            (&self.player2, Color::Black, Color::White, self.white_pins)
+        } else {
+            (&self.player1, Color::White, Color::Black, self.black_pins)
+        };
+        let king_sq = player.pieces_bb[PieceType::King as usize].trailing_zeros() as usize;
+
+        //if in check
+        let attackers = self.get_attackers(king_sq, opp_color, self.combined_pieces, self.white_pieces, self.black_pieces);
+        if attackers != 0{
+            let mut king_moves = self.get_move_mask(king_sq, opp_color, PieceType::King, self.combined_pieces, self.white_pieces, self.black_pieces) & player.pieces;
+            while king_moves != 0 {
+                let mut king_sq = king_moves.trailing_zeros() as usize;
+                if self.get_attackers(king_sq, opp_color, self.combined_pieces, self.white_pieces, self.black_pieces) == 0{
+                    return false;
+                }
+                king_moves &= king_moves - 1; 
+            }
+        }
+
+        if attackers.count_ones() > 1 {
+            return true;
+        }
+
+        //get rays
+        let ray_mask = self.precomputed_items.rays[king_sq][attackers.trailing_zeros() as usize] | attackers;
+
+        for sq in BitIterator::new(player.pieces){
+            let move_mask = self.get_move_mask(sq, color, self.board_arr[sq as usize].unwrap().piece_type, self.combined_pieces, self.white_pieces, self.black_pieces);
+            if move_mask & ray_mask != 0 {
+                if 1u64 << sq & pins != 0 {
+                    if self.precomputed_items.rays[king_sq][sq] & ray_mask != 0 {
+                        return false
+                    }
+                }
+                return false
+            }
+        }
+
+        true
+    }
+
+    pub fn validate_move(&self, piece_moved: Move, color: Color, board: Bitboard, white_pieces: Bitboard, black_pieces: Bitboard) -> bool {
         //just check if it's valid & not in check
+        //better to instead pass clone pass a board
+
         let mut player = if color == Color::White {
             &self.player1
         } else {
@@ -102,13 +230,13 @@ impl GameBoard{
         let to_idx: Square = piece_moved.to;
         let king_sq: usize = player.pieces_bb[PieceType::King as usize].trailing_zeros() as usize;
         let mut temp_state = self.clone();
-        if 1u64 << to_idx as u64 & temp_state.get_move_mask(from_idx as usize, color, temp_state.board_arr[from_idx as usize].unwrap().piece_type) == 0{
+        if 1u64 << to_idx as u64 & temp_state.get_move_mask(from_idx as usize, color, temp_state.board_arr[from_idx as usize].unwrap().piece_type, board, white_pieces, black_pieces) == 0{
             return false
         }
         temp_state.update_board(from_idx, to_idx);
         let opponent_color = if color == Color::White { Color::Black } else { Color::White };
 
-        if temp_state.get_attackers(king_sq, opponent_color) != 0 {
+        if temp_state.get_attackers(king_sq, opponent_color, board, white_pieces, black_pieces) != 0 {
             return false;
         }
 
@@ -161,9 +289,8 @@ impl GameBoard{
         self.board_arr[to_idx] = self.board_arr[from_idx].take();
     }
 
-    pub fn get_attackers(&self, sq: usize, attacker_color:Color) -> u64{
+    pub fn get_attackers(&self, sq: usize, attacker_color:Color, board: Bitboard, white_pieces: Bitboard, black_pieces: Bitboard) -> u64{
         let mut attackers = 0u64;
-        
         let mut opponent = if attacker_color == Color::White {
             &self.player1 
         } else {
@@ -174,44 +301,44 @@ impl GameBoard{
         } else {
             Color::White
         };
-        attackers |= self.get_move_mask(sq, opp_color, PieceType::Pawn) & opponent.pieces_bb[PieceType::Pawn as usize];
-        attackers |= self.get_move_mask(sq, opp_color, PieceType::Knight) & opponent.pieces_bb[PieceType::Knight as usize];
-        attackers |= self.get_move_mask(sq, opp_color, PieceType::King) & opponent.pieces_bb[PieceType::King as usize];
-        attackers |= self.get_move_mask(sq, opp_color, PieceType::Rook) & opponent.pieces_bb[PieceType::Rook as usize];
-        attackers |= self.get_move_mask(sq, opp_color, PieceType::Bishop) & opponent.pieces_bb[PieceType::Bishop as usize];
-        attackers |= self.get_move_mask(sq, opp_color, PieceType::Queen) & opponent.pieces_bb[PieceType::Queen as usize];
+        attackers |= self.get_move_mask(sq, opp_color, PieceType::Pawn, board, white_pieces, black_pieces) & opponent.pieces_bb[PieceType::Pawn as usize];
+        attackers |= self.get_move_mask(sq, opp_color, PieceType::Knight, board, white_pieces, black_pieces) & opponent.pieces_bb[PieceType::Knight as usize];
+        attackers |= self.get_move_mask(sq, opp_color, PieceType::King, board, white_pieces, black_pieces) & opponent.pieces_bb[PieceType::King as usize];
+        attackers |= self.get_move_mask(sq, opp_color, PieceType::Rook, board, white_pieces, black_pieces) & opponent.pieces_bb[PieceType::Rook as usize];
+        attackers |= self.get_move_mask(sq, opp_color, PieceType::Bishop, board, white_pieces, black_pieces) & opponent.pieces_bb[PieceType::Bishop as usize];
+        attackers |= self.get_move_mask(sq, opp_color, PieceType::Queen, board, white_pieces, black_pieces) & opponent.pieces_bb[PieceType::Queen as usize];
 
         attackers
     }
 
-    pub fn get_move_mask(&self, sq: usize, color: Color, piece: PieceType) -> u64 {
-        let own_pieces = if color == Color::White { self.white_pieces } else { self.black_pieces };
-        let enemy_pieces = if color == Color::White { self.black_pieces } else { self.white_pieces };
+    pub fn get_move_mask(&self, sq: usize, color: Color, piece: PieceType, board: Bitboard, black_pieces: Bitboard, white_pieces: Bitboard) -> u64 {
+        let own_pieces = if color == Color::White { white_pieces } else { black_pieces };
+        let enemy_pieces = if color == Color::White { black_pieces } else { white_pieces };
 
         match piece {
-            PieceType::Pawn => self.get_pawn_moves(sq, color, enemy_pieces),
+            PieceType::Pawn => self.get_pawn_moves(sq, color, enemy_pieces, board),
             PieceType::Knight => self.precomputed_items.knight_moves[sq] & !own_pieces,
             PieceType::King => self.precomputed_items.king_moves[sq] & !own_pieces,
-            PieceType::Rook => self.get_sliding_moves(sq, PieceType::Rook) & !own_pieces,
-            PieceType::Bishop => self.get_sliding_moves(sq, PieceType::Bishop) & !own_pieces,
+            PieceType::Rook => self.get_sliding_moves(sq, PieceType::Rook, board) & !own_pieces,
+            PieceType::Bishop => self.get_sliding_moves(sq, PieceType::Bishop, board) & !own_pieces,
             PieceType::Queen => {
-                (self.get_sliding_moves(sq, PieceType::Rook) | 
-                self.get_sliding_moves(sq, PieceType::Bishop)) & !own_pieces
+                (self.get_sliding_moves(sq, PieceType::Rook, board) | 
+                self.get_sliding_moves(sq, PieceType::Bishop, board)) & !own_pieces
             }
         }
     }
 
     /// Helper to encapsulate Magic Bitboard lookups
-    fn get_sliding_moves(&self, sq: usize, piece_type: PieceType) -> u64 {
+    fn get_sliding_moves(&self, sq: usize, piece_type: PieceType, board: Bitboard) -> u64 {
         match piece_type {
             PieceType::Rook => {
                 let e = &self.precomputed_items.rook_moves[sq];
-                let hash = ( (e.mask & self.combined_pieces).wrapping_mul(e.magic_num) ) >> (64 - e.sig_bits);
+                let hash = ( (e.mask & board).wrapping_mul(e.magic_num) ) >> (64 - e.sig_bits);
                 e.magic_table[hash as usize]
             }
             PieceType::Bishop => {
                 let e = &self.precomputed_items.bishop_moves[sq];
-                let hash = ( (e.mask & self.combined_pieces).wrapping_mul(e.magic_num) ) >> (64 - e.sig_bits);
+                let hash = ( (e.mask & board).wrapping_mul(e.magic_num) ) >> (64 - e.sig_bits);
                 e.magic_table[hash as usize]
             }
             _ => 0,
@@ -219,7 +346,7 @@ impl GameBoard{
     }
 
     /// Helper for Pawn Pushes and Attacks
-    fn get_pawn_moves(&self, sq: usize, color: Color, enemy_pieces: u64) -> u64 {
+    fn get_pawn_moves(&self, sq: usize, color: Color, enemy_pieces: u64, board: Bitboard) -> u64 {
         let (pushes, attacks) = match color {
             Color::White => (
                 self.precomputed_items.white_pawn_pushes[sq],
@@ -232,13 +359,13 @@ impl GameBoard{
         };
 
         // 1. Calculate Pushes (must handle the "blockade" logic)
-        let mut valid_pushes = pushes & !self.combined_pieces;
+        let mut valid_pushes = pushes & !board;
         
         // If the square immediately in front is blocked, the double-push is also blocked
         let push_direction = if color == Color::White { 8i8 } else { -8i8 };
         let one_step_sq = 1u64 << (sq as i8 + push_direction) as usize;
         
-        if (one_step_sq & self.combined_pieces) != 0 {
+        if (one_step_sq & board) != 0 {
             // This removes the double-jump if the first square is occupied
             let double_step_mask = if color == Color::White { 0xFFFF_0000_0000_0000 } else { 0x0000_0000_0000_FFFF };
             valid_pushes &= !double_step_mask; 

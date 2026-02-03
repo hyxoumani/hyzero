@@ -38,6 +38,32 @@ impl From<PieceType> for usize {
     }
 }
 
+struct BitIterator {
+    bits: u64,
+}
+
+impl Iterator for BitIterator {
+    type Item = usize;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.bits == 0 {
+            None
+        } else {
+            let sq = self.bits.trailing_zeros() as usize;
+            self.bits &= self.bits - 1; // Clear the bit
+            Some(sq)
+        }
+    }
+}
+
+impl BitIterator {
+    pub fn new(bits: u64) -> Self {
+        return Self {
+            bits
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum File {
