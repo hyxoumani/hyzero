@@ -84,21 +84,30 @@ impl GameBoard{
                     }
                 }
             }
-            self.compute_turn_items(count, piece_moved);
             count += 1;
+            self.compute_turn_items(count, piece_moved);
+
         }
     }
 
     pub fn compute_turn_items(&mut self, count: usize, piece_moved: Move){
         //at the end of each turn recompute where each piece is
-        self.update_board(piece_moved.from, piece_moved.to);
+        self.update_board(piece_moved);
         self.white_pieces = self.player1.pieces;
         self.black_pieces = self.player2.pieces;
         self.combined_pieces = self.white_pieces | self.black_pieces;
 
-        if count %2 == 0 {self.calculate_pins(Color::White, self.combined_pieces, self.white_pieces, self.black_pieces);} else {self.calculate_pins(Color::Black, self.combined_pieces, self.white_pieces, self.black_pieces)}
+        let (color_to_move, friendly_bits, opponent_bits, opp_color, pins) = if count % 2 == 0 {
+            (Color::White, self.white_pieces, self.black_pieces, Color::Black, self.white_pins)
+        } else {
+            (Color::Black, self.black_pieces, self.white_pieces, Color::White, self.black_pins)
+        };
+        self.calculate_pins(color_to_move, self.combined_pieces, self.white_pieces, self.black_pieces);
         //recalculate checkmate & stalemate after each turn
-        self.calculate_checkmate(count);
+        self.is_game_over = self.calculate_checkmate(count);
+        if !self.is_game_over {
+            self.is_game_over = self.calculate_stalemate(color_to_move, opp_color, self.combined_bits, friendly_bits, opponent_bits, pins);
+        }
 
     }
 
@@ -173,6 +182,29 @@ impl GameBoard{
         
     }
 
+    pub fn calculate_stalemate(&mut self, color: Color, opp_color: Color, combined_bits: u64, friendly_bits: u64, opponent_bits: u64, pins: u64) -> bool{
+        let mut move_mask = 0u64;
+        let pin_mask = self.white
+        
+        for sq in BitIterator::new(friendly_bits){
+            let piece_type = self.board_arr[sq as usize].unwrap().piece_type;
+            if piece_type != PieceType::King {
+                //need to check for pins
+                move_mask |= self.get_move_mask(sq, piece_type, color, combined_bits, friendly_bits, opponent_bits);
+            } else {
+                for king_move in BitIterator::new(self.get_move_mask(sq, piece_type, color, combined_bits, friendly_bits, opponent_bits)){
+                    if self.get_attackers(king_move, opp_color, self.combined_pieces, self.white_pieces, self.black_pieces) == 0{
+                        return false;
+                    }
+                }
+            }
+            if move_mask != 0{
+                return false;
+            }
+        }
+        true
+    }
+
     pub fn calculate_checkmate(&mut self, count: usize) -> bool{
         let (player, opp_color, color, pins) = if count % 2 == 0 { 
             (&self.player2, Color::Black, Color::White, self.white_pins)
@@ -208,8 +240,9 @@ impl GameBoard{
                     if self.precomputed_items.rays[king_sq][sq] & ray_mask != 0 {
                         return false
                     }
+                } else {
+                    return false
                 }
-                return false
             }
         }
 
@@ -233,7 +266,7 @@ impl GameBoard{
         if 1u64 << to_idx as u64 & temp_state.get_move_mask(from_idx as usize, color, temp_state.board_arr[from_idx as usize].unwrap().piece_type, board, white_pieces, black_pieces) == 0{
             return false
         }
-        temp_state.update_board(from_idx, to_idx);
+        temp_state.update_board(piece_moved);
         let opponent_color = if color == Color::White { Color::Black } else { Color::White };
 
         if temp_state.get_attackers(king_sq, opponent_color, board, white_pieces, black_pieces) != 0 {
@@ -243,9 +276,9 @@ impl GameBoard{
         true
     }
 
-    pub fn update_board(&mut self, from: Square, to: Square) {
-        let from_idx = usize::from(from);
-        let to_idx = usize::from(to);
+    pub fn update_board(&mut self, piece_moved: Move) {
+        let from_idx = usize::from(piece_moved.from);
+        let to_idx = usize::from(piece_moved.to);
 
         let moving_piece = self.board_arr[from_idx].expect("No piece at 'from' square");
         let attacker_color = moving_piece.color;
@@ -287,6 +320,19 @@ impl GameBoard{
         }
 
         self.board_arr[to_idx] = self.board_arr[from_idx].take();
+
+
+        let player = if attacker_color == Color::White {
+            &mut self.player1
+        } else {
+            &mut self.player2
+        };
+        //update for promotion
+        if let Some(piece) = piece_moved.promotion_piece_type {
+            player.pieces_bb[PieceType::Pawn as usize] ^= 1u64 << to_idx;
+            player.pieces_bb[piece as usize] |= 1u64 << to_idx;
+            self.board_arr[to_idx] = Some(Piece{color: attacker_color, piece_type: piece});
+        }
     }
 
     pub fn get_attackers(&self, sq: usize, attacker_color:Color, board: Bitboard, white_pieces: Bitboard, black_pieces: Bitboard) -> u64{
@@ -311,7 +357,7 @@ impl GameBoard{
         attackers
     }
 
-    pub fn get_move_mask(&self, sq: usize, color: Color, piece: PieceType, board: Bitboard, black_pieces: Bitboard, white_pieces: Bitboard) -> u64 {
+    pub fn get_move_mask(&self, sq: usize, color: Color, piece: PieceType, board: Bitboard, white_pieces: Bitboard, black_pieces: Bitboard) -> u64 {
         let own_pieces = if color == Color::White { white_pieces } else { black_pieces };
         let enemy_pieces = if color == Color::White { black_pieces } else { white_pieces };
 
