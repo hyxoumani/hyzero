@@ -1,16 +1,20 @@
 pub mod board;
-pub mod player;
+pub mod playerobj;
+pub mod externplayer;
 
-pub use player::Player;
+pub use externplayer::ExternPlayer;
+pub use playerobj::Player;
 pub use board::GameBoard;
-use crate::{Bitboard, Color, PieceType, Square, Piece};
+use crate::{Bitboard, Color, PieceType, Square, Piece, CastleOption};
 use crate::PrecomputedItems;
 use std::sync::Arc;
 
 pub struct Move{
     pub from: Square,
     pub to: Square,
-    pub promotion_piece_type: Option<PieceType>
+    pub promotion_piece_type: Option<PieceType>,
+    pub castle_option: Option<CastleOption>,
+    pub en_passant: Option<bool>
 }
 
 #[derive(Debug, Clone)]

@@ -83,6 +83,12 @@ pub enum Color {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CastleOption {
+    Kingside,
+    Queenside
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(usize)]
 pub enum PieceType {
     Pawn,
@@ -123,11 +129,27 @@ pub struct PrecomputedItems {
     pub black_pawn_attacks: [u64; 64],
     pub rook_moves: [RookEntry; 64],
     pub bishop_moves: [BishopEntry; 64],
-    pub rays: [[u64; 64]; 64]
+    pub rays: [[u64; 64]; 64],
+    pub lines: [[u64; 64]; 64],
+    pub castle_squares: [[u64; 2]; 2],
     //using sig_indexes and bit_mask use mask to pre_compute things 
 }
 
 impl PrecomputedItems {
+    pub fn precompute_castle_squares() -> [[u64; 2]; 2] {
+        let mut castle_squares = [[0u64; 2]; 2];
+        castle_squares[Color::White as usize][CastleOption::Kingside as usize] = 
+            (1u64 << 4) | (1u64 << 5) | (1u64 << 6);
+        castle_squares[Color::White as usize][CastleOption::Queenside as usize] = 
+            (1u64 << 4) | (1u64 << 3) | (1u64 << 2);
+        castle_squares[Color::Black as usize][CastleOption::Kingside as usize] = 
+            (1u64 << 60) | (1u64 << 61) | (1u64 << 62);
+        castle_squares[Color::Black as usize][CastleOption::Queenside as usize] = 
+            (1u64 << 60) | (1u64 << 59) | (1u64 << 58);
+        
+        castle_squares
+    }
+
     pub fn begin_precomputing() -> Self {
 
         let mut rays = [[0u64; 64]; 64];
@@ -165,6 +187,55 @@ impl PrecomputedItems {
                         current_rank += rank_step;
                         current_file += file_step;
                     }
+                }
+            }
+        }
+
+        let mut line_masks = [[0u64; 64]; 64];
+
+        for sq1 in 0..64 {
+            let r1 = (sq1 / 8) as i32;
+            let c1 = (sq1 % 8) as i32;
+
+            for sq2 in 0..64 {
+                if sq1 == sq2 { continue; }
+
+                let r2 = (sq2 / 8) as i32;
+                let c2 = (sq2 % 8) as i32;
+
+                let dr = r2 - r1;
+                let dc = c2 - c1;
+
+                // Check if sq1 and sq2 are aligned (Rank, File, or Diagonal)
+                // A pair is aligned if dr == 0, dc == 0, or |dr| == |dc|
+                if dr == 0 || dc == 0 || dr.abs() == dc.abs() {
+                    // Normalize direction to unit steps (-1, 0, or 1)
+                    let step_r = dr.signum();
+                    let step_c = dc.signum();
+
+                    let mut line = 0u64;
+                    
+                    // Start from the edge and walk through the entire board along this axis
+                    // First, find the "starting" edge by reversing until we hit a boundary
+                    let mut curr_r = r1;
+                    let mut curr_c = c1;
+                    
+                    while curr_r >= 0 && curr_r < 8 && curr_c >= 0 && curr_c < 8 {
+                        curr_r -= step_r;
+                        curr_c -= step_c;
+                    }
+                    
+                    // Now walk forward from that edge to the opposite edge
+                    curr_r += step_r;
+                    curr_c += step_c;
+                    
+                    while curr_r >= 0 && curr_r < 8 && curr_c >= 0 && curr_c < 8 {
+                        line |= 1u64 << (curr_r * 8 + curr_c);
+                        curr_r += step_r;
+                        curr_c += step_c;
+                    }
+
+                    line_masks[sq1][sq2] = line;
                 }
             }
         }
@@ -257,11 +328,65 @@ impl PrecomputedItems {
             black_pawn_pushes,
             rook_moves,
             bishop_moves,
-            rays
+            rays,
+            lines: line_masks,
+            castle_squares: PrecomputedItems::precompute_castle_squares()
         }
     }
+}
 
-    
+pub fn create_game_board() -> [Option<Piece>; 64] {
+    let mut board = [None; 64];
+    let white = |t:PieceType| Some(Piece{piece_type: t, color: Color::White});
+    let black = |t:PieceType| Some(Piece{piece_type:t, color: Color::Black});
+    board[0] = white(PieceType::Rook);
+    board[1] = white(PieceType::Knight);
+    board[2] = white(PieceType::Bishop);
+    board[3] = white(PieceType::Queen);
+    board[4] = white(PieceType::King);
+    board[5] = white(PieceType::Bishop);
+    board[6] = white(PieceType::Knight);
+    board[7] = white(PieceType::Rook);
+    for i in 8..16 { board[i] = white(PieceType::Pawn); }
+    for i in 48..56 { board[i] = black(PieceType::Pawn); }
+    board[56] = black(PieceType::Rook);
+    board[57] = black(PieceType::Knight);
+    board[58] = black(PieceType::Bishop);
+    board[59] = black(PieceType::Queen);
+    board[60] = black(PieceType::King);
+    board[61] = black(PieceType::Bishop);
+    board[62] = black(PieceType::Knight);
+    board[63] = black(PieceType::Rook);
+
+    return board;
+}
+
+pub fn create_own_board(color:Color) -> [Option<Piece>; 64] {
+    let mut board = [None; 64];
+    let white = |t:PieceType| Some(Piece{piece_type: t, color: Color::White});
+    let black = |t:PieceType| Some(Piece{piece_type:t, color: Color::Black});
+    if color == Color::White {
+        board[0] = white(PieceType::Rook);
+        board[1] = white(PieceType::Knight);
+        board[2] = white(PieceType::Bishop);
+        board[3] = white(PieceType::Queen);
+        board[4] = white(PieceType::King);
+        board[5] = white(PieceType::Bishop);
+        board[6] = white(PieceType::Knight);
+        board[7] = white(PieceType::Rook);
+        for i in 8..16 { board[i] = white(PieceType::Pawn); }
+    } else {
+        for i in 48..56 { board[i] = black(PieceType::Pawn); }
+        board[56] = black(PieceType::Rook);
+        board[57] = black(PieceType::Knight);
+        board[58] = black(PieceType::Bishop);
+        board[59] = black(PieceType::Queen);
+        board[60] = black(PieceType::King);
+        board[61] = black(PieceType::Bishop);
+        board[62] = black(PieceType::Knight);
+        board[63] = black(PieceType::Rook);
+    }
+    return board
 }
 
 
