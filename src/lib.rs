@@ -1,8 +1,9 @@
 pub type Bitboard = u64;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Square {
+    #[default]
     A1, B1, C1, D1, E1, F1, G1, H1,
     A2, B2, C2, D2, E2, F2, G2, H2,
     A3, B3, C3, D3, E3, F3, G3, H3,
@@ -146,7 +147,6 @@ impl PrecomputedItems {
             (1u64 << 60) | (1u64 << 61) | (1u64 << 62);
         castle_squares[Color::Black as usize][CastleOption::Queenside as usize] = 
             (1u64 << 60) | (1u64 << 59) | (1u64 << 58);
-        
         castle_squares
     }
 

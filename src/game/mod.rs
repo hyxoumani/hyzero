@@ -9,6 +9,7 @@ use crate::{Bitboard, Color, PieceType, Square, Piece, CastleOption};
 use crate::PrecomputedItems;
 use std::sync::Arc;
 
+#[derive(Default, Copy, Debug, Clone)]
 pub struct Move{
     pub from: Square,
     pub to: Square,

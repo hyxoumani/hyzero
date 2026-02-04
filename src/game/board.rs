@@ -23,7 +23,9 @@ pub struct GameBoard {
     white_kingside: bool,
     white_queenside: bool,
     black_kingside: bool,
-    black_queenside: bool
+    black_queenside: bool,
+    last_move: Move,
+    is_en_passant: bool
 
 }
 
@@ -46,7 +48,9 @@ impl GameBoard{
             white_kingside: true,
             white_queenside: true,
             black_kingside: true,
-            black_queenside: true
+            black_queenside: true,
+            last_move: Move::default(),
+            is_en_passant: false,
         }
     }
 
@@ -83,7 +87,7 @@ impl GameBoard{
         self.white_pieces = self.player1.pieces;
         self.black_pieces = self.player2.pieces;
         self.combined_pieces = self.white_pieces | self.black_pieces;
-
+        self.last_move = piece_moved;
         let (color_to_move, friendly_bits, opponent_bits, opp_color, pins) = if count % 2 == 0 {
             (Color::White, self.white_pieces, self.black_pieces, Color::Black, self.white_pins)
         } else {
