@@ -2,6 +2,7 @@ use crate::{Bitboard, Color};
 use crate::game::Move;
 use crate::PieceType;
 use rand::Rng;
+use std::io;
 
 #[derive(Debug, Clone)]
 pub struct ExternPlayer {
@@ -18,33 +19,9 @@ impl ExternPlayer {
     }
 
     pub fn get_move(&self) -> String {
-        let mut rng = rand::thread_rng();
-        
-        // Generate random squares
-        let from_file = rng.gen_range(0..8);
-        let from_rank = rng.gen_range(0..8);
-        let to_file = rng.gen_range(0..8);
-        let to_rank = rng.gen_range(0..8);
-        
-        // Convert to chess notation (e.g., "e2e4")
-        let chess_notation = format!("{}{}{}{}", 
-            (b'a' + from_file) as char, 
-            from_rank + 1,
-            (b'a' + to_file) as char, 
-            to_rank + 1
-        );
-        
-        // Optionally add promotion character randomly
-        let promotions = ['q', 'r', 'b', 'n', ' '];
-        let promotion_char = promotions[rng.gen_range(0..5)];
-        
-        let full_notation = if promotion_char != ' ' {
-            format!("{}{}", chess_notation, promotion_char)
-        } else {
-            chess_notation
-        };
-        
-        full_notation
+        let mut input_string = String::new();
+        io::stdin().read_line(&mut input_string).expect("failed");
+
     }
 
 

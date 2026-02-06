@@ -75,8 +75,8 @@ impl GameBoard{
                     }
                 }
             }
-            count += 1;
             self.compute_turn_items(count, piece_moved);
+            count += 1;
 
         }
     }
@@ -314,7 +314,15 @@ impl GameBoard{
                 }
             }
             return true
-        } 
+        }
+        
+        //check for enpassant
+        if let Some(is_en_passant) = self.last_move.en_passant {
+            if is_en_passant {
+                
+            }
+        }
+
 
         let mut temp_state = self.clone();
         if 1u64 << to_idx as u64 & temp_state.get_move_mask(from_idx as usize, color, temp_state.board_arr[from_idx as usize].unwrap().piece_type, board, white_pieces, black_pieces) == 0{
