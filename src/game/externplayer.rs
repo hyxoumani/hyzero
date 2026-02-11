@@ -21,7 +21,8 @@ impl ExternPlayer {
     pub fn get_move(&self) -> String {
         let mut input_string = String::new();
         io::stdin().read_line(&mut input_string).expect("failed");
-
+        
+        input_string
     }
 
 
