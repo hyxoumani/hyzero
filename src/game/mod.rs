@@ -25,7 +25,6 @@ pub struct GameState {
 }
 
 impl GameState {
-
     pub fn init_game_state(precomputed_items: Arc<PrecomputedItems>) -> Self {
         Self{        
             game_state: GameBoard::init_game_board(precomputed_items),
