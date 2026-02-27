@@ -25,14 +25,15 @@ pub struct GameState {
 }
 
 impl GameState {
-    pub fn init_game_state(precomputed_items: Arc<PrecomputedItems>) -> Self {
+    pub fn init_game_state(precomputed_items: Arc<PrecomputedItems>, player1: Player, player2: Player) -> Self {
         Self{        
-            game_state: GameBoard::init_game_board(precomputed_items),
+            game_state: GameBoard::init_game_board(precomputed_items, player1, player2),
             game_over: false
         }
     }
 
     pub fn start_game(&mut self){
         self.game_state.start_game();
+        
     }
 }

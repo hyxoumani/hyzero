@@ -31,11 +31,11 @@ pub struct GameBoard {
 
 impl GameBoard{
 
-    pub fn init_game_board(precomputed_items: Arc<PrecomputedItems>) -> Self{
+    pub fn init_game_board(precomputed_items: Arc<PrecomputedItems>, player1: Player, player2: Player) -> Self{
 
         Self{
-            player1: Player::new_white(),
-            player2: Player::new_black(),
+            player1,
+            player2,
             board_arr: create_game_board(),
             white_pieces: 0x000000000000FFFF,
             precomputed_items,

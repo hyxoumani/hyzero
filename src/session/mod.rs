@@ -4,7 +4,9 @@ use crate::game::GameState;
 use std::sync::Arc;
 
 pub struct SessionObj {
-    precomputed_items: Arc<PrecomputedItems>
+    precomputed_items: Arc<PrecomputedItems>,
+    
+    
 }
 
 impl SessionObj {

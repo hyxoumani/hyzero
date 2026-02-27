@@ -2,8 +2,8 @@ use crate::{Bitboard, Color, CastleOption, Piece};
 use crate::game::Move;
 use crate::PieceType;
 use rand::Rng;
-use super::ExternPlayer;
 use crate::create_own_board;
+use tokio::net::TcpStream;
 
 
 #[derive(Debug, Clone)]
@@ -11,11 +11,20 @@ pub struct Player {
     pub (crate)color: Color,
     pub (crate)pieces_bb: [u64; 6], // [Pawn, Knight, Bishop, Rook, Queen, King]
     pub (crate)pieces: u64,         // All pieces combined (occupancy)
-    pub (crate)player: ExternPlayer,
-    pub (crate)own_board: [Option<Piece>; 64]
+    pub (crate)own_board: [Option<Piece>; 64],
+    stream: TcpStream
+
 }
 
 impl Player {
+
+    pub fn init_player(is_white: bool, stream: TcpStream) -> Self {
+        if is_white {
+            return Self::new_white();
+        }
+        return Self::new_black();
+    }
+
     pub fn new_white() -> Self {
         let bbs = [
             0x000000000000FF00, // 0: Pawns
@@ -30,7 +39,6 @@ impl Player {
             color: Color::White,
             pieces_bb: bbs,
             pieces: 0x000000000000FFFF, 
-            player: ExternPlayer::new(bbs, Color::White),
             own_board: create_own_board(Color::White)
         }
     }
@@ -116,7 +124,6 @@ impl Player {
             color: Color::Black,
             pieces_bb: bbs,
             pieces: 0xFFFF000000000000,
-            player: ExternPlayer::new(bbs, Color::Black),
             own_board: create_own_board(Color::Black)
 
         }
