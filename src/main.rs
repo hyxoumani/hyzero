@@ -1,8 +1,11 @@
-use hyzero::game::GameState;
 use hyzero::session::SessionObj;
+use hyzero::PrecomputedItems;
+use std::sync::Arc;
+
 fn main() {
 
-    let session_obj : SessionObj = SessionObj::start_session();
+    let precomputed_items = Arc::new(PrecomputedItems::begin_precomputing());
+    let session_obj : SessionObj = SessionObj::start_session(precomputed_items);
 
     let mut test_vec: Vec<Option<Test>> = Vec::new();
 

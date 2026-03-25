@@ -1,7 +1,6 @@
 use hyzero::session::SessionObj;
-use std::{
-    sync::{Arc}
-};
+use hyzero::PrecomputedItems;
+use std::sync::Arc;
 
 use tokio::{
     net::{TcpListener, TcpStream}
@@ -24,7 +23,9 @@ async fn main () {
 }
 
 pub async fn create_server(){
-    let session_obj = Arc::new(SessionObj::start_session());
+    let precomputed_items: Arc<PrecomputedItems> = Arc::new(PrecomputedItems::begin_precomputing());
+    let session_obj = Arc::new(SessionObj::start_session(precomputed_items.clone()));
+
     let listener = TcpListener::bind("127.0.0.1:7878").await.unwrap();
     let num_waiting = 0;
     //is it better to maintain
@@ -41,7 +42,7 @@ pub async fn create_server(){
     }
 }
 
-async fn handle_connection (stream: TcpStream, num_waiting = i32){
+async fn handle_connection (stream: TcpStream, num_waiting: i32){
     //check count
     //see if we need to make a new game_state if num_waiting = 1
     //if num_waiting == 1 game_state start and add to gamesession arr
@@ -50,7 +51,7 @@ async fn handle_connection (stream: TcpStream, num_waiting = i32){
     //init player obj itself, then get the extern_player, game_State is able to call extern_player get_move
     //need to implement extern_player with tcpstream 
     if num_waiting == 1 {
-        
+
     }
 
 }

@@ -3,9 +3,18 @@ use crate::{Bitboard, Color, PieceType, Square, Piece, BitIterator, CastleOption
 use crate::PrecomputedItems;
 use super::Move;
 use std::sync::Arc;
+use std::collections::HashMap;
 use crate::create_game_board;
 
-
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum GameResult {
+    Ongoing,
+    Checkmate(Color),
+    Stalemate,
+    FiftyMoveRule,
+    ThreefoldRepetition,
+    InsufficientMaterial,
+}
 
 #[derive(Debug, Clone)]
 pub struct GameBoard {
@@ -19,13 +28,15 @@ pub struct GameBoard {
     in_check: bool,
     white_pins: Bitboard,
     black_pins: Bitboard,
-    is_game_over: bool,
+    game_result: GameResult,
     white_kingside: bool,
     white_queenside: bool,
     black_kingside: bool,
     black_queenside: bool,
     last_move: Move,
-    is_en_passant: bool
+    en_passant_target: Option<usize>,
+    halfmove_clock: u32,
+    position_history: HashMap<u64, u8>,
 
 }
 
@@ -44,62 +55,114 @@ impl GameBoard{
             in_check: false,
             white_pins: 0u64,
             black_pins: 0u64,
-            is_game_over: false,
+            game_result: GameResult::Ongoing,
             white_kingside: true,
             white_queenside: true,
             black_kingside: true,
             black_queenside: true,
             last_move: Move::default(),
-            is_en_passant: false,
+            en_passant_target: None,
+            halfmove_clock: 0,
+            position_history: HashMap::new(),
         }
     }
 
     pub fn start_game(&mut self){
-        let count = 0;
-        self.is_game_over = false;
+        let mut count: usize = 0;
+        self.game_result = GameResult::Ongoing;
         loop {
-            if self.is_game_over {break}
-            let mut piece_moved: Move;
+            if self.game_result != GameResult::Ongoing {break}
+            let piece_moved;
             if count % 2 == 0 {
                 loop {
-                    piece_moved = self.player1.make_move();
-                    if self.validate_move(piece_moved, Color::White, self.combined_pieces, self.white_pieces, self.black_pieces){
-                        return
+                    let candidate = self.player1.make_move();
+                    if self.validate_move(candidate, Color::White, self.combined_pieces, self.white_pieces, self.black_pieces){
+                        piece_moved = candidate;
+                        break;
                     }
+                    println!("Invalid move, try again.");
                 }
             } else {
-                    loop {
-                    piece_moved = self.player2.make_move();
-                    if self.validate_move(piece_moved, Color::Black, self.combined_pieces, self.white_pieces, self.black_pieces){
-                        return
+                loop {
+                    let candidate = self.player2.make_move();
+                    if self.validate_move(candidate, Color::Black, self.combined_pieces, self.white_pieces, self.black_pieces){
+                        piece_moved = candidate;
+                        break;
                     }
+                    println!("Invalid move, try again.");
                 }
             }
             self.compute_turn_items(count, piece_moved);
             count += 1;
+        }
 
+        match self.game_result {
+            GameResult::Checkmate(winner) => println!("Checkmate! {:?} wins!", winner),
+            GameResult::Stalemate => println!("Draw by stalemate!"),
+            GameResult::FiftyMoveRule => println!("Draw by 50-move rule!"),
+            GameResult::ThreefoldRepetition => println!("Draw by threefold repetition!"),
+            GameResult::InsufficientMaterial => println!("Draw by insufficient material!"),
+            GameResult::Ongoing => {},
         }
     }
 
     pub fn compute_turn_items(&mut self, count: usize, piece_moved: Move){
+        // Detect pawn move / capture BEFORE updating the board
+        let moving_piece = self.board_arr[usize::from(piece_moved.from)];
+        let is_pawn_move = moving_piece.map(|p| p.piece_type) == Some(PieceType::Pawn);
+        let is_capture = self.board_arr[usize::from(piece_moved.to)].is_some()
+            || (is_pawn_move && self.en_passant_target == Some(usize::from(piece_moved.to)));
+
         //at the end of each turn recompute where each piece is
         self.update_board(piece_moved);
+        self.update_castling(piece_moved);
         self.white_pieces = self.player1.pieces;
         self.black_pieces = self.player2.pieces;
         self.combined_pieces = self.white_pieces | self.black_pieces;
         self.last_move = piece_moved;
+
+        // Recalculate pins for BOTH sides
+        self.calculate_pins(Color::White, self.combined_pieces, self.white_pieces, self.black_pieces);
+        self.calculate_pins(Color::Black, self.combined_pieces, self.white_pieces, self.black_pieces);
+
+        // When count % 2 == 0, white just moved, now check if BLACK is in checkmate/stalemate
         let (color_to_move, friendly_bits, opponent_bits, opp_color, pins) = if count % 2 == 0 {
-            (Color::White, self.white_pieces, self.black_pieces, Color::Black, self.white_pins)
-        } else {
             (Color::Black, self.black_pieces, self.white_pieces, Color::White, self.black_pins)
+        } else {
+            (Color::White, self.white_pieces, self.black_pieces, Color::Black, self.white_pins)
         };
-        self.calculate_pins(color_to_move, self.combined_pieces, self.white_pieces, self.black_pieces);
         //recalculate checkmate & stalemate after each turn
-        self.is_game_over = self.calculate_checkmate(count);
-        if !self.is_game_over {
-            self.is_game_over = self.calculate_stalemate(color_to_move, opp_color, self.combined_pieces, friendly_bits, opponent_bits, pins);
+        if self.calculate_checkmate(color_to_move) {
+            // The winner is the side that just moved (opposite of color_to_move)
+            let winner = if color_to_move == Color::White { Color::Black } else { Color::White };
+            self.game_result = GameResult::Checkmate(winner);
+        }
+        if self.game_result == GameResult::Ongoing && self.calculate_stalemate(color_to_move, opp_color, self.combined_pieces, friendly_bits, opponent_bits, pins) {
+            self.game_result = GameResult::Stalemate;
         }
 
+        // 50-move rule
+        if is_pawn_move || is_capture {
+            self.halfmove_clock = 0;
+        } else {
+            self.halfmove_clock += 1;
+        }
+        if self.game_result == GameResult::Ongoing && self.halfmove_clock >= 100 {
+            self.game_result = GameResult::FiftyMoveRule;
+        }
+
+        // Threefold repetition
+        let hash = self.position_hash(color_to_move);
+        let count_entry = self.position_history.entry(hash).or_insert(0);
+        *count_entry += 1;
+        if self.game_result == GameResult::Ongoing && *count_entry >= 3 {
+            self.game_result = GameResult::ThreefoldRepetition;
+        }
+
+        // Insufficient material
+        if self.game_result == GameResult::Ongoing && self.is_insufficient_material() {
+            self.game_result = GameResult::InsufficientMaterial;
+        }
     }
 
     pub fn update_castling(&mut self, piece_moved: Move) {
@@ -216,7 +279,7 @@ impl GameBoard{
                 //need to check for pins
                 let move_set = self.get_move_mask(sq, color, piece_type, combined_bits, friendly_bits, opponent_bits);
                 if  move_set != 0{
-                    if 1u64 << sq & pins != 0 {
+                    if (1u64 << sq) & pins != 0 {
                         let king_sq = self.get_king_sq(color) as usize;
                         if move_set & self.precomputed_items.lines[king_sq][sq] != 0 {
                             return false
@@ -237,39 +300,51 @@ impl GameBoard{
         true
     }
 
-    pub fn calculate_checkmate(&mut self, count: usize) -> bool{
-        let (player, opp_color, color, pins) = if count % 2 == 0 { 
-            (&self.player2, Color::Black, Color::White, self.white_pins)
-        } else {
-            (&self.player1, Color::White, Color::Black, self.black_pins)
+    pub fn calculate_checkmate(&mut self, color: Color) -> bool{
+        // color = the side we're checking for checkmate
+        let (player, opp_color, pins) = match color {
+            Color::White => (&self.player1, Color::Black, self.white_pins),
+            Color::Black => (&self.player2, Color::White, self.black_pins),
         };
         let king_sq = player.pieces_bb[PieceType::King as usize].trailing_zeros() as usize;
 
-        //if in check
+        // Find opponent pieces attacking our king
         let attackers = self.get_attackers(king_sq, opp_color, self.combined_pieces, self.white_pieces, self.black_pieces);
-        if attackers != 0{
-            let mut king_moves = self.get_move_mask(king_sq, opp_color, PieceType::King, self.combined_pieces, self.white_pieces, self.black_pieces) & player.pieces;
-            while king_moves != 0 {
-                let mut king_sq = king_moves.trailing_zeros() as usize;
-                if self.get_attackers(king_sq, opp_color, self.combined_pieces, self.white_pieces, self.black_pieces) == 0{
-                    return false;
-                }
-                king_moves &= king_moves - 1; 
-            }
+
+        // Not in check = not checkmate
+        if attackers == 0 {
+            return false;
         }
 
+        // Check if king can escape
+        let mut king_moves = self.get_move_mask(king_sq, color, PieceType::King, self.combined_pieces, self.white_pieces, self.black_pieces);
+        while king_moves != 0 {
+            let escape_sq = king_moves.trailing_zeros() as usize;
+            if self.get_attackers(escape_sq, opp_color, self.combined_pieces, self.white_pieces, self.black_pieces) == 0 {
+                return false;
+            }
+            king_moves &= king_moves - 1;
+        }
+
+        // Double check = must move king, and we already checked king can't escape
         if attackers.count_ones() > 1 {
             return true;
         }
 
-        //get rays
-        let ray_mask = self.precomputed_items.rays[king_sq][attackers.trailing_zeros() as usize] | attackers;
+        // Single check: can any piece block or capture the attacker?
+        let attacker_sq = attackers.trailing_zeros() as usize;
+        let ray_mask = self.precomputed_items.rays[king_sq][attacker_sq] | attackers;
 
         for sq in BitIterator::new(player.pieces){
-            let move_mask = self.get_move_mask(sq, color, self.board_arr[sq as usize].unwrap().piece_type, self.combined_pieces, self.white_pieces, self.black_pieces);
+            if sq == king_sq { continue; }
+            let piece = match self.board_arr[sq] {
+                Some(p) => p,
+                None => continue,
+            };
+            let move_mask = self.get_move_mask(sq, color, piece.piece_type, self.combined_pieces, self.white_pieces, self.black_pieces);
             if move_mask & ray_mask != 0 {
-                if 1u64 << sq & pins != 0 {
-                    if self.precomputed_items.rays[king_sq][sq] & ray_mask != 0 {
+                if (1u64 << sq) & pins != 0 {
+                    if self.precomputed_items.lines[king_sq][sq] & ray_mask != 0 {
                         return false
                     }
                 } else {
@@ -302,26 +377,21 @@ impl GameBoard{
                 CastleOption::Queenside => if !castle_queenside {return false}
             }
 
-            //get casling side
-            if castle_option == CastleOption::Kingside {
-                for sq in BitIterator::new(self.precomputed_items.castle_squares[color as usize][castle_option as usize]) {
-                    if board & (1u64 << sq) != 0 {
-                        return false;
-                    }
-                    if self.get_attackers(sq, opp_color, board, white_pieces, black_pieces) != 0 {
-                        return false
-                    }
+            // Check empty squares (must be unoccupied)
+            for sq in BitIterator::new(self.precomputed_items.castle_empty_squares[color as usize][castle_option as usize]) {
+                if board & (1u64 << sq) != 0 {
+                    return false;
+                }
+            }
+            // Check path squares (king must not pass through attack)
+            for sq in BitIterator::new(self.precomputed_items.castle_path_squares[color as usize][castle_option as usize]) {
+                if self.get_attackers(sq, opp_color, board, white_pieces, black_pieces) != 0 {
+                    return false;
                 }
             }
             return true
         }
         
-        //check for enpassant
-        if let Some(is_en_passant) = self.last_move.en_passant {
-            if is_en_passant {
-                
-            }
-        }
 
 
         let mut temp_state = self.clone();
@@ -331,7 +401,19 @@ impl GameBoard{
         temp_state.update_board(piece_moved);
         let opponent_color = if color == Color::White { Color::Black } else { Color::White };
 
-        if temp_state.get_attackers(king_sq, opponent_color, board, white_pieces, black_pieces) != 0 {
+        // Use updated occupancy from temp state
+        let temp_white = temp_state.player1.pieces;
+        let temp_black = temp_state.player2.pieces;
+        let temp_combined = temp_white | temp_black;
+
+        // King may have moved, recalculate its position
+        let temp_king_sq = if color == Color::White {
+            temp_state.player1.pieces_bb[PieceType::King as usize].trailing_zeros() as usize
+        } else {
+            temp_state.player2.pieces_bb[PieceType::King as usize].trailing_zeros() as usize
+        };
+
+        if temp_state.get_attackers(temp_king_sq, opponent_color, temp_combined, temp_white, temp_black) != 0 {
             return false;
         }
 
@@ -406,14 +488,29 @@ impl GameBoard{
             player.own_board[rook_to] = player.own_board[rook_from].take();
         }
         
+        // Handle en passant capture
+        if piece_type == PieceType::Pawn && Some(to_idx) == self.en_passant_target {
+            let captured_pawn_idx = if attacker_color == Color::White { to_idx - 8 } else { to_idx + 8 };
+            let captured_mask = 1u64 << captured_pawn_idx;
+            let opponent = if attacker_color == Color::White { &mut self.player2 } else { &mut self.player1 };
+            opponent.pieces &= !captured_mask;
+            opponent.pieces_bb[PieceType::Pawn as usize] &= !captured_mask;
+            opponent.own_board[captured_pawn_idx] = None;
+            self.board_arr[captured_pawn_idx] = None;
+        }
+
         // 5. Specialized Pawn Logic: En Passant Target Generation
         if piece_type == PieceType::Pawn {
             let diff = (from_idx as i8 - to_idx as i8).abs();
             if diff == 16 {
-                let ep_idx = if attacker_color == Color::White { from_idx + 8 } else { from_idx - 8 };
+                self.en_passant_target = Some(if attacker_color == Color::White { from_idx + 8 } else { from_idx - 8 });
+            } else {
+                self.en_passant_target = None;
             }
+        } else {
+            self.en_passant_target = None;
         }
-        
+
         self.board_arr[to_idx] = self.board_arr[from_idx].take();
         
         let player = if attacker_color == Color::White {
@@ -510,14 +607,68 @@ impl GameBoard{
         let one_step_sq = 1u64 << (sq as i8 + push_direction) as usize;
         
         if (one_step_sq & board) != 0 {
-            // This removes the double-jump if the first square is occupied
-            let double_step_mask = if color == Color::White { 0xFFFF_0000_0000_0000 } else { 0x0000_0000_0000_FFFF };
-            valid_pushes &= !double_step_mask; 
+            // Remove this pawn's specific double-push square (2 ranks ahead)
+            let double_step_sq = 1u64 << (sq as i8 + 2 * push_direction) as usize;
+            valid_pushes &= !double_step_sq;
         }
 
         // 2. Calculate Attacks (only moves if an enemy piece is there)
-        let valid_attacks = attacks & enemy_pieces;
+        let mut valid_attacks = attacks & enemy_pieces;
+        if let Some(ep_sq) = self.en_passant_target {
+            if attacks & (1u64 << ep_sq) != 0 {
+                valid_attacks |= 1u64 << ep_sq;
+            }
+        }
 
         valid_pushes | valid_attacks
+    }
+
+    fn position_hash(&self, side_to_move: Color) -> u64 {
+        let mut hash = 0u64;
+        for i in 0..6 {
+            hash ^= self.player1.pieces_bb[i].wrapping_mul(0x9e3779b97f4a7c15u64.wrapping_add(i as u64));
+            hash ^= self.player2.pieces_bb[i].wrapping_mul(0x517cc1b727220a95u64.wrapping_add(i as u64));
+        }
+        hash ^= (side_to_move as u64).wrapping_mul(0x6c62272e07bb0142);
+        hash ^= (self.white_kingside as u64) << 0;
+        hash ^= (self.white_queenside as u64) << 1;
+        hash ^= (self.black_kingside as u64) << 2;
+        hash ^= (self.black_queenside as u64) << 3;
+        if let Some(ep) = self.en_passant_target {
+            hash ^= (ep as u64).wrapping_mul(0x9e3779b97f4a7c15);
+        }
+        hash
+    }
+
+    fn is_insufficient_material(&self) -> bool {
+        let white = &self.player1;
+        let black = &self.player2;
+
+        if white.pieces_bb[PieceType::Pawn as usize] != 0 || black.pieces_bb[PieceType::Pawn as usize] != 0 { return false; }
+        if white.pieces_bb[PieceType::Rook as usize] != 0 || black.pieces_bb[PieceType::Rook as usize] != 0 { return false; }
+        if white.pieces_bb[PieceType::Queen as usize] != 0 || black.pieces_bb[PieceType::Queen as usize] != 0 { return false; }
+
+        let white_knights = white.pieces_bb[PieceType::Knight as usize].count_ones();
+        let white_bishops = white.pieces_bb[PieceType::Bishop as usize].count_ones();
+        let black_knights = black.pieces_bb[PieceType::Knight as usize].count_ones();
+        let black_bishops = black.pieces_bb[PieceType::Bishop as usize].count_ones();
+
+        let white_minor = white_knights + white_bishops;
+        let black_minor = black_knights + black_bishops;
+
+        // K vs K
+        if white_minor == 0 && black_minor == 0 { return true; }
+        // K+minor vs K
+        if (white_minor <= 1 && black_minor == 0) || (white_minor == 0 && black_minor <= 1) { return true; }
+        // K+B vs K+B (same colored bishops)
+        if white_knights == 0 && black_knights == 0 && white_bishops == 1 && black_bishops == 1 {
+            let wb_sq = white.pieces_bb[PieceType::Bishop as usize].trailing_zeros() as usize;
+            let bb_sq = black.pieces_bb[PieceType::Bishop as usize].trailing_zeros() as usize;
+            let wb_color = (wb_sq / 8 + wb_sq % 8) % 2;
+            let bb_color = (bb_sq / 8 + bb_sq % 8) % 2;
+            if wb_color == bb_color { return true; }
+        }
+
+        false
     }
 }

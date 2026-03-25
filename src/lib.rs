@@ -28,18 +28,18 @@ impl From<Square> for u8 {
 }
 
 impl From<Square> for usize {
-    fn from (s:Square) -> Self {
+    fn from(s: Square) -> Self {
         s as usize
     }
 }
 
 impl From<PieceType> for usize {
-    fn from (p: PieceType) -> Self {
+    fn from(p: PieceType) -> Self {
         p as usize
     }
 }
 
-struct BitIterator {
+pub struct BitIterator {
     bits: u64,
 }
 
@@ -51,7 +51,7 @@ impl Iterator for BitIterator {
             None
         } else {
             let sq = self.bits.trailing_zeros() as usize;
-            self.bits &= self.bits - 1; // Clear the bit
+            self.bits &= self.bits - 1;
             Some(sq)
         }
     }
@@ -59,9 +59,7 @@ impl Iterator for BitIterator {
 
 impl BitIterator {
     pub fn new(bits: u64) -> Self {
-        return Self {
-            bits
-        }
+        Self { bits }
     }
 }
 
@@ -106,18 +104,6 @@ pub struct Piece {
     pub color: Color,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Move {
-    pub from_square: Square,
-    pub to_square: Square,
-    pub piece_moved: Piece,
-    pub is_capture: bool,
-    pub is_castle: bool,
-    pub is_en_passant: bool,
-    pub promotion_piece_type: Option<PieceType>,
-}
-
-
 use crate::pieces::bishop::BishopEntry;
 use crate::pieces::mod_rook::RookEntry;
 #[derive(Debug)]
@@ -132,22 +118,36 @@ pub struct PrecomputedItems {
     pub bishop_moves: [BishopEntry; 64],
     pub rays: [[u64; 64]; 64],
     pub lines: [[u64; 64]; 64],
-    pub castle_squares: [[u64; 2]; 2],
-    //using sig_indexes and bit_mask use mask to pre_compute things 
+    pub castle_empty_squares: [[u64; 2]; 2],
+    pub castle_path_squares: [[u64; 2]; 2],
 }
 
 impl PrecomputedItems {
-    pub fn precompute_castle_squares() -> [[u64; 2]; 2] {
-        let mut castle_squares = [[0u64; 2]; 2];
-        castle_squares[Color::White as usize][CastleOption::Kingside as usize] = 
-            (1u64 << 4) | (1u64 << 5) | (1u64 << 6);
-        castle_squares[Color::White as usize][CastleOption::Queenside as usize] = 
-            (1u64 << 4) | (1u64 << 3) | (1u64 << 2);
-        castle_squares[Color::Black as usize][CastleOption::Kingside as usize] = 
-            (1u64 << 60) | (1u64 << 61) | (1u64 << 62);
-        castle_squares[Color::Black as usize][CastleOption::Queenside as usize] = 
-            (1u64 << 60) | (1u64 << 59) | (1u64 << 58);
-        castle_squares
+    pub fn precompute_castle_squares() -> ([[u64; 2]; 2], [[u64; 2]; 2]) {
+        let mut empty = [[0u64; 2]; 2];
+        let mut path = [[0u64; 2]; 2];
+
+        // Empty squares: between king and rook (must be unoccupied)
+        empty[Color::White as usize][CastleOption::Kingside as usize] =
+            (1u64 << 5) | (1u64 << 6);           // f1, g1
+        empty[Color::White as usize][CastleOption::Queenside as usize] =
+            (1u64 << 1) | (1u64 << 2) | (1u64 << 3); // b1, c1, d1
+        empty[Color::Black as usize][CastleOption::Kingside as usize] =
+            (1u64 << 61) | (1u64 << 62);          // f8, g8
+        empty[Color::Black as usize][CastleOption::Queenside as usize] =
+            (1u64 << 57) | (1u64 << 58) | (1u64 << 59); // b8, c8, d8
+
+        // Path squares: king passes through these (must not be under attack)
+        path[Color::White as usize][CastleOption::Kingside as usize] =
+            (1u64 << 4) | (1u64 << 5) | (1u64 << 6);  // e1, f1, g1
+        path[Color::White as usize][CastleOption::Queenside as usize] =
+            (1u64 << 4) | (1u64 << 3) | (1u64 << 2);  // e1, d1, c1
+        path[Color::Black as usize][CastleOption::Kingside as usize] =
+            (1u64 << 60) | (1u64 << 61) | (1u64 << 62); // e8, f8, g8
+        path[Color::Black as usize][CastleOption::Queenside as usize] =
+            (1u64 << 60) | (1u64 << 59) | (1u64 << 58); // e8, d8, c8
+
+        (empty, path)
     }
 
     pub fn begin_precomputing() -> Self {
@@ -165,21 +165,17 @@ impl PrecomputedItems {
                 let rank_diff = (to_rank as i8) - (from_rank as i8);
                 let file_diff = (to_file as i8) - (from_file as i8);
 
-                // 1. Check if 'from' and 'to' are on the same line
-                // They must share a rank, file, or have equal diagonal distance
-                let is_on_line = from_rank == to_rank || 
-                                from_file == to_file || 
+                let is_on_line = from_rank == to_rank ||
+                                from_file == to_file ||
                                 rank_diff.abs() == file_diff.abs();
 
                 if is_on_line && from != to {
-                    // Determine the "step" to move from 'from' toward 'to'
-                    let rank_step = rank_diff.signum(); // -1, 0, or 1
-                    let file_step = file_diff.signum(); // -1, 0, or 1
-                    
+                    let rank_step = rank_diff.signum();
+                    let file_step = file_diff.signum();
+
                     let mut current_rank = from_rank as i8 + rank_step;
                     let mut current_file = from_file as i8 + file_step;
 
-                    // 2. Fill the bits until we hit the 'to' square
                     while (current_rank as usize) != to_rank || (current_file as usize) != to_file {
                         let current_sq = (current_rank * 8 + current_file) as usize;
                         rays[from][to] |= 1u64 << current_sq;
@@ -206,29 +202,23 @@ impl PrecomputedItems {
                 let dr = r2 - r1;
                 let dc = c2 - c1;
 
-                // Check if sq1 and sq2 are aligned (Rank, File, or Diagonal)
-                // A pair is aligned if dr == 0, dc == 0, or |dr| == |dc|
                 if dr == 0 || dc == 0 || dr.abs() == dc.abs() {
-                    // Normalize direction to unit steps (-1, 0, or 1)
                     let step_r = dr.signum();
                     let step_c = dc.signum();
 
                     let mut line = 0u64;
-                    
-                    // Start from the edge and walk through the entire board along this axis
-                    // First, find the "starting" edge by reversing until we hit a boundary
+
                     let mut curr_r = r1;
                     let mut curr_c = c1;
-                    
+
                     while curr_r >= 0 && curr_r < 8 && curr_c >= 0 && curr_c < 8 {
                         curr_r -= step_r;
                         curr_c -= step_c;
                     }
-                    
-                    // Now walk forward from that edge to the opposite edge
+
                     curr_r += step_r;
                     curr_c += step_c;
-                    
+
                     while curr_r >= 0 && curr_r < 8 && curr_c >= 0 && curr_c < 8 {
                         line |= 1u64 << (curr_r * 8 + curr_c);
                         curr_r += step_r;
@@ -254,7 +244,6 @@ impl PrecomputedItems {
             moves
         });
 
-        // --- 2. Kings ---
         let king_moves = std::array::from_fn(|i| {
             let mut moves = 0u64;
             let r = (i / 8) as i32;
@@ -269,53 +258,48 @@ impl PrecomputedItems {
                 }
             }
             moves
-        }
-    );
+        });
 
+        let white_pawn_attacks: [u64; 64] = std::array::from_fn(|i| {
+            let mut mask = 0u64;
+            let (r, c) = (i / 8, i % 8);
+            if r < 7 {
+                if c > 0 { mask |= 1u64 << ((r + 1) * 8 + (c - 1)); }
+                if c < 7 { mask |= 1u64 << ((r + 1) * 8 + (c + 1)); }
+            }
+            mask
+        });
 
-    // Pre-calculated tables for Pawn behavior
-    let white_pawn_attacks: [u64; 64] = std::array::from_fn(|i| {
-        let mut mask = 0u64;
-        let (r, c) = (i / 8, i % 8);
-        if r < 7 {
-            if c > 0 { mask |= 1u64 << ((r + 1) * 8 + (c - 1)); }
-            if c < 7 { mask |= 1u64 << ((r + 1) * 8 + (c + 1)); }
-        }
-        mask
-    });
+        let white_pawn_pushes: [u64; 64] = std::array::from_fn(|i| {
+            let mut mask = 0u64;
+            let (r, c) = (i / 8, i % 8);
+            if r < 7 {
+                mask |= 1u64 << ((r + 1) * 8 + c);
+                if r == 1 { mask |= 1u64 << ((r + 2) * 8 + c); }
+            }
+            mask
+        });
 
-    let white_pawn_pushes: [u64; 64] = std::array::from_fn(|i| {
-        let mut mask = 0u64;
-        let (r, c) = (i / 8, i % 8);
-        if r < 7 {
-            mask |= 1u64 << ((r + 1) * 8 + c); // Single push
-            if r == 1 { mask |= 1u64 << ((r + 2) * 8 + c); } // Double push
-        }
-        mask
-    });
+        let black_pawn_attacks: [u64; 64] = std::array::from_fn(|i| {
+            let mut mask = 0u64;
+            let (r, c) = (i / 8, i % 8);
+            if r > 0 {
+                if c > 0 { mask |= 1u64 << ((r - 1) * 8 + (c - 1)); }
+                if c < 7 { mask |= 1u64 << ((r - 1) * 8 + (c + 1)); }
+            }
+            mask
+        });
 
-    let black_pawn_attacks: [u64; 64] = std::array::from_fn(|i| {
-        let mut mask = 0u64;
-        let (r, c) = (i / 8, i % 8);
-        if r > 0 {
-            if c > 0 { mask |= 1u64 << ((r - 1) * 8 + (c - 1)); }
-            if c < 7 { mask |= 1u64 << ((r - 1) * 8 + (c + 1)); }
-        }
-        mask
-    });
+        let black_pawn_pushes: [u64; 64] = std::array::from_fn(|i| {
+            let mut mask = 0u64;
+            let (r, c) = (i / 8, i % 8);
+            if r > 0 {
+                mask |= 1u64 << ((r - 1) * 8 + c);
+                if r == 6 { mask |= 1u64 << ((r - 2) * 8 + c); }
+            }
+            mask
+        });
 
-    let black_pawn_pushes: [u64; 64] = std::array::from_fn(|i| {
-        let mut mask = 0u64;
-        let (r, c) = (i / 8, i % 8);
-        if r > 0 {
-            mask |= 1u64 << ((r - 1) * 8 + c); // Single push
-            if r == 6 { mask |= 1u64 << ((r - 2) * 8 + c); } // Double push
-        }
-        mask
-    });
-
-        // --- 4. Sliders (Rooks & Bishops) ---
-        // Here 'i' is the square index (0..63) passed to your init functions
         let rook_moves = std::array::from_fn(|i| RookEntry::init_rook(i as u8));
         let bishop_moves = std::array::from_fn(|i| BishopEntry::init_bishop(i as u8));
 
@@ -330,7 +314,14 @@ impl PrecomputedItems {
             bishop_moves,
             rays,
             lines: line_masks,
-            castle_squares: PrecomputedItems::precompute_castle_squares()
+            castle_empty_squares: {
+                let (empty, _) = PrecomputedItems::precompute_castle_squares();
+                empty
+            },
+            castle_path_squares: {
+                let (_, path) = PrecomputedItems::precompute_castle_squares();
+                path
+            }
         }
     }
 }
@@ -358,7 +349,7 @@ pub fn create_game_board() -> [Option<Piece>; 64] {
     board[62] = black(PieceType::Knight);
     board[63] = black(PieceType::Rook);
 
-    return board;
+    board
 }
 
 pub fn create_own_board(color:Color) -> [Option<Piece>; 64] {
@@ -386,12 +377,9 @@ pub fn create_own_board(color:Color) -> [Option<Piece>; 64] {
         board[62] = black(PieceType::Knight);
         board[63] = black(PieceType::Rook);
     }
-    return board
+    board
 }
-
-
 
 pub mod game;
 pub mod pieces;
 pub mod session;
-
