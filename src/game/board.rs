@@ -640,6 +640,44 @@ impl GameBoard{
         hash
     }
 
+    pub fn process_move(&mut self, move_str: &str, color: Color, turn_count: usize) -> Result<(Move, GameResult), String> {
+        let player = if color == Color::White { &self.player1 } else { &self.player2 };
+        let candidate = player.parse_move(move_str);
+
+        if !self.validate_move(candidate, color, self.combined_pieces, self.white_pieces, self.black_pieces) {
+            return Err("Invalid move".to_string());
+        }
+
+        self.compute_turn_items(turn_count, candidate);
+        Ok((candidate, self.game_result))
+    }
+
+    pub fn board_snapshot(&self) -> [Option<Piece>; 64] {
+        self.board_arr
+    }
+
+    pub fn result(&self) -> GameResult {
+        self.game_result
+    }
+
+    pub fn bitboard_string(&self) -> String {
+        format!(
+            "wp={:016x} wn={:016x} wb={:016x} wr={:016x} wq={:016x} wk={:016x} bp={:016x} bn={:016x} bb={:016x} br={:016x} bq={:016x} bk={:016x}",
+            self.player1.pieces_bb[PieceType::Pawn as usize],
+            self.player1.pieces_bb[PieceType::Knight as usize],
+            self.player1.pieces_bb[PieceType::Bishop as usize],
+            self.player1.pieces_bb[PieceType::Rook as usize],
+            self.player1.pieces_bb[PieceType::Queen as usize],
+            self.player1.pieces_bb[PieceType::King as usize],
+            self.player2.pieces_bb[PieceType::Pawn as usize],
+            self.player2.pieces_bb[PieceType::Knight as usize],
+            self.player2.pieces_bb[PieceType::Bishop as usize],
+            self.player2.pieces_bb[PieceType::Rook as usize],
+            self.player2.pieces_bb[PieceType::Queen as usize],
+            self.player2.pieces_bb[PieceType::King as usize],
+        )
+    }
+
     fn is_insufficient_material(&self) -> bool {
         let white = &self.player1;
         let black = &self.player2;

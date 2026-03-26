@@ -1,0 +1,201 @@
+warning: unused imports: `Bitboard` and `Square`
+ --> src/pieces/mod.rs:1:13
+  |
+1 | use crate::{Bitboard, Color, PieceType, Square};
+  |             ^^^^^^^^                    ^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `Bitboard` and `Square`
+ --> src/pieces/pawn.rs:1:13
+  |
+1 | use crate::{Bitboard, Color, PieceType, Square};
+  |             ^^^^^^^^                    ^^^^^^
+
+warning: unused imports: `Bitboard` and `Square`
+ --> src/pieces/knight.rs:1:13
+  |
+1 | use crate::{Bitboard, Color, PieceType, Square};
+  |             ^^^^^^^^                    ^^^^^^
+
+warning: unused imports: `Bitboard` and `Square`
+ --> src/pieces/bishop.rs:1:13
+  |
+1 | use crate::{Bitboard, Color, PieceType, Square};
+  |             ^^^^^^^^                    ^^^^^^
+
+warning: unused imports: `Bitboard` and `Square`
+ --> src/pieces/mod_rook.rs:1:13
+  |
+1 | use crate::{Bitboard, Color, PieceType, Square};
+  |             ^^^^^^^^                    ^^^^^^
+
+warning: unused imports: `Bitboard` and `Square`
+ --> src/pieces/queen.rs:1:13
+  |
+1 | use crate::{Bitboard, Color, PieceType, Square};
+  |             ^^^^^^^^                    ^^^^^^
+
+warning: unused imports: `Bitboard` and `Square`
+ --> src/pieces/king.rs:1:13
+  |
+1 | use crate::{Bitboard, Color, PieceType, Square};
+  |             ^^^^^^^^                    ^^^^^^
+
+warning: unused import: `crate::game::GameState`
+ --> src/session/mod.rs:3:5
+  |
+3 | use crate::game::GameState;
+  |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: use of deprecated function `rand::thread_rng`: Renamed to `rng`
+  --> src/pieces/bishop.rs:67:29
+   |
+67 |         let mut rng = rand::thread_rng();
+   |                             ^^^^^^^^^^
+   |
+   = note: `#[warn(deprecated)]` on by default
+
+warning: use of deprecated function `rand::thread_rng`: Renamed to `rng`
+  --> src/pieces/mod_rook.rs:64:29
+   |
+64 |         let mut rng = rand::thread_rng();
+   |                             ^^^^^^^^^^
+
+warning: variable does not need to be mutable
+   --> src/game/board.rs:197:13
+    |
+197 |         let mut player1 = &self.player1;
+    |             ----^^^^^^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> src/game/board.rs:198:13
+    |
+198 |         let mut player2 = &self.player2;
+    |             ----^^^^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: unused variable: `enemy_bits`
+   --> src/game/board.rs:200:40
+    |
+200 |         let (king_bits, friendly_bits, enemy_bits, enemy_sliders) = match color {
+    |                                        ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_enemy_bits`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `find_pin`
+   --> src/game/board.rs:218:13
+    |
+218 |         let find_pin = |attacker_sq: usize| -> Option<u64> {
+    |             ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_find_pin`
+
+warning: variable does not need to be mutable
+   --> src/game/board.rs:275:13
+    |
+275 |         let mut move_mask = 0u64;
+    |             ----^^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: unused variable: `move_mask`
+   --> src/game/board.rs:275:13
+    |
+275 |         let mut move_mask = 0u64;
+    |             ^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_move_mask`
+
+warning: variable does not need to be mutable
+   --> src/game/board.rs:363:14
+    |
+363 |         let (mut player, castle_kingside, castle_queenside, opp_color) = if color == Color::White {
+    |              ----^^^^^^
+    |              |
+    |              help: remove this `mut`
+
+warning: unused variable: `king_sq`
+   --> src/game/board.rs:371:13
+    |
+371 |         let king_sq: usize = player.pieces_bb[PieceType::King as usize].trailing_zeros() as usize;
+    |             ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_king_sq`
+
+warning: variable does not need to be mutable
+   --> src/game/board.rs:535:13
+    |
+535 |         let mut opponent = if attacker_color == Color::White {
+    |             ----^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src/game/board.rs:540:13
+    |
+540 |         let mut opp_color = if attacker_color == Color::White{
+    |             ----^^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: field `in_check` is never read
+  --> src/game/board.rs:28:5
+   |
+20 | pub struct GameBoard {
+   |            --------- field in this struct
+...
+28 |     in_check: bool,
+   |     ^^^^^^^^
+   |
+   = note: `GameBoard` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `precomputed_items` is never read
+ --> src/session/mod.rs:7:5
+  |
+6 | pub struct SessionObj {
+  |            ---------- field in this struct
+7 |     precomputed_items: Arc<PrecomputedItems>,
+  |     ^^^^^^^^^^^^^^^^^
+
+warning: `hyzero` (lib) generated 22 warnings (run `cargo fix --lib -p hyzero` to apply 18 suggestions)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.01s
+     Running `target/debug/server`
+Computing precomputed items...
+Server listening on /tmp/hyzero.sock
+Waiting for White player...
+White player connected.
+Waiting for Black player...
+Black player connected.
+[DEBUG] Received move notation: "e2e4"
+[Move 1] W: e2e4
+  wp=000000001000ef00 wn=0000000000000042 wb=0000000000000024 wr=0000000000000081 wq=0000000000000008 wk=0000000000000010 bp=00ff000000000000 bn=4200000000000000 bb=2400000000000000 br=8100000000000000 bq=0800000000000000 bk=1000000000000000
+[DEBUG] Received move notation: "e7e5"
+[Move 2] B: e7e5
+  wp=000000001000ef00 wn=0000000000000042 wb=0000000000000024 wr=0000000000000081 wq=0000000000000008 wk=0000000000000010 bp=00ef001000000000 bn=4200000000000000 bb=2400000000000000 br=8100000000000000 bq=0800000000000000 bk=1000000000000000
+[DEBUG] Received move notation: "f1c4"
+[Move 3] W: f1c4
+  wp=000000001000ef00 wn=0000000000000042 wb=0000000004000004 wr=0000000000000081 wq=0000000000000008 wk=0000000000000010 bp=00ef001000000000 bn=4200000000000000 bb=2400000000000000 br=8100000000000000 bq=0800000000000000 bk=1000000000000000
+[DEBUG] Received move notation: "b8c6"
+[Move 4] B: b8c6
+  wp=000000001000ef00 wn=0000000000000042 wb=0000000004000004 wr=0000000000000081 wq=0000000000000008 wk=0000000000000010 bp=00ef001000000000 bn=4000040000000000 bb=2400000000000000 br=8100000000000000 bq=0800000000000000 bk=1000000000000000
+[DEBUG] Received move notation: "d1h5"
+[Move 5] W: d1h5
+  wp=000000001000ef00 wn=0000000000000042 wb=0000000004000004 wr=0000000000000081 wq=0000008000000000 wk=0000000000000010 bp=00ef001000000000 bn=4000040000000000 bb=2400000000000000 br=8100000000000000 bq=0800000000000000 bk=1000000000000000
+[DEBUG] Received move notation: "g8f6"
+[Move 6] B: g8f6
+  wp=000000001000ef00 wn=0000000000000042 wb=0000000004000004 wr=0000000000000081 wq=0000008000000000 wk=0000000000000010 bp=00ef001000000000 bn=0000240000000000 bb=2400000000000000 br=8100000000000000 bq=0800000000000000 bk=1000000000000000
+[DEBUG] Received move notation: "h5f7"
+[Move 7] W: h5f7
+  wp=000000001000ef00 wn=0000000000000042 wb=0000000004000004 wr=0000000000000081 wq=0020000000000000 wk=0000000000000010 bp=00cf001000000000 bn=0000240000000000 bb=2400000000000000 br=8100000000000000 bq=0800000000000000 bk=1000000000000000
+Black disconnected.
+
+--- Move History ---
+W: e2e4
+B: e7e5
+W: f1c4
+B: b8c6
+W: d1h5
+B: g8f6
+W: h5f7
+Server shut down.

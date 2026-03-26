@@ -44,7 +44,7 @@ impl Player {
         self.own_board[from_idx as usize].map(|p| p.piece_type)
     }
 
-    fn parse_move(&self, notation: &str) -> Move {
+    pub fn parse_move(&self, notation: &str) -> Move {
         let chars: Vec<char> = notation.chars().collect();
 
         if chars.len() < 4 {

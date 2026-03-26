@@ -59,13 +59,19 @@ All fundamental types live here and are re-exported for use across the crate:
 - `mod_rook.rs`, `bishop.rs` — Magic bitboard implementation: each square has a `RookEntry`/`BishopEntry` with a `mask`, randomly-found `magic_num`, `sig_bits`, and a precomputed `magic_table`. Lookup: `table[(mask & occupancy).wrapping_mul(magic) >> (64 - sig_bits)]`
 - Other piece files contain structs implementing the `Piece` trait but move generation is handled centrally in `GameBoard::get_move_mask()`
 
+### Game History (`src/game/history.rs`)
+- `GameHistory` stores move history (`Vec<String>` with W/B prefixes) and board snapshots (`Vec<[Option<Piece>; 64]>`) after each validated move
+
 ### Session & Server (`src/session/`, `src/bin/`)
 - `session/mod.rs` — `SessionObj` holds `Arc<PrecomputedItems>`; intended as the top-level container for session state (MCTS info, etc.)
-- `src/bin/server.rs` — async TCP server on `127.0.0.1:7878` using Tokio; WIP
-- `src/bin/client.rs` — stub client
+- `src/bin/server.rs` — async Unix domain socket server on `/tmp/hyzero.sock` using Tokio. Accepts 2 clients (White, Black), coordinates turns via `mpsc` channels, validates moves via `GameBoard::process_move()`, records move history with W/B prefixes, stores board snapshots, and sends bitboard representation after every move.
+- `src/bin/client.rs` — async Unix domain socket client. Connects to server, receives color assignment, handles protocol messages (`YOUR_TURN`, `OK`, `INVALID`, `OPPONENT_MOVED`, `BOARD`, `GAME_OVER`), prompts for move input via stdin.
+
+### Architecture
+See `ARCHITECTURE.md` for the full MuZero system design including MCTS, neural network components, self-play threading model, training loop, and data storage.
 
 ### Remaining Work (`src/todo.md`)
-Key incomplete areas: sliding piece blocking is implemented via magic bitboards but en passant, full legal move filtering, and the MuZero/MCTS search layer are not yet implemented.
+Key incomplete areas: en passant edge cases, full legal move filtering, and the MuZero/MCTS search layer are not yet implemented.
 
 ---
 
@@ -178,6 +184,12 @@ After each subagent completes, update CLAUDE.md with status (`DONE` / `FAILED`) 
 | 8. Implement En Passant | DONE | en_passant_target field, EP capture in update_board, EP in get_pawn_moves |
 | 9. Add Draw Rules | DONE | 50-move clock, threefold repetition hash, insufficient material |
 | 10. Game Result Reporting | DONE | GameResult enum replaces is_game_over bool, prints result |
+| 11. Create GameHistory | DONE | history.rs with move_history and board_snapshots |
+| 12. Add process_move() | DONE | process_move, board_snapshot, result, bitboard_string methods; parse_move made pub |
+| 13. Rewrite server.rs | DONE | Unix domain socket server with turn coordination, history, bitboard output |
+| 14. Rewrite client.rs | DONE | Unix domain socket client with protocol handling and stdin input |
+| 15. Update CLAUDE.md | DONE | Updated architecture section, task status table |
+| 16. Write ARCHITECTURE.md | DONE | Full MuZero architecture doc |
 
 ### Verification
 After each task: `cargo check` / `cargo build`

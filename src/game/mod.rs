@@ -1,6 +1,7 @@
 pub mod board;
 pub mod playerobj;
 pub mod externplayer;
+pub mod history;
 
 pub use playerobj::Player;
 pub use board::GameBoard;
