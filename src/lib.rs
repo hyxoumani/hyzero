@@ -1,3 +1,4 @@
+/// Bitboard — 64 bits, one per square, A1=0 H8=63
 pub type Bitboard = u64;
 
 #[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
@@ -383,3 +384,6 @@ pub fn create_own_board(color:Color) -> [Option<Piece>; 64] {
 pub mod game;
 pub mod pieces;
 pub mod session;
+pub mod data;
+pub mod mcts;
+pub mod selfplay;

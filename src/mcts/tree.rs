@@ -1,0 +1,296 @@
+use crate::data::{HiddenState, Policy, ActionIndex};
+use crate::mcts::evaluator::Evaluator;
+use crate::mcts::node::MCTSNode;
+use crate::mcts::puct::select_child;
+
+/// Configuration for MCTS search.
+#[derive(Debug, Clone)]
+pub struct MCTSConfig {
+    pub num_simulations: u32,
+    pub exploration_constant: f32,
+}
+
+impl Default for MCTSConfig {
+    fn default() -> Self {
+        Self {
+            num_simulations: 800,
+            exploration_constant: 1.5,
+        }
+    }
+}
+
+/// Transient MCTS tree built fresh for each move.
+/// After search, extract the visit distribution, then discard the tree.
+pub struct MCTSTree {
+    root: MCTSNode,
+    config: MCTSConfig,
+}
+
+impl MCTSTree {
+    /// Create a new tree with an already-evaluated root.
+    pub fn new(
+        root_hidden_state: HiddenState,
+        root_policy: &Policy,
+        root_value: f32,
+        legal_actions: Vec<ActionIndex>,
+        config: MCTSConfig,
+    ) -> Self {
+        let mut root = MCTSNode::new(root_hidden_state, root_policy, legal_actions, 0.0);
+        // Root gets one visit with its initial value
+        root.visit_count = 1;
+        root.total_value = root_value;
+
+        Self { root, config }
+    }
+
+    /// Run all simulations. Each simulation: select -> expand -> backpropagate.
+    pub async fn run_simulations(&mut self, evaluator: &dyn Evaluator) {
+        for _ in 0..self.config.num_simulations {
+            // Collect the path of (child index) taken during selection
+            let mut path: Vec<usize> = Vec::new();
+
+            // Selection: walk down tree using PUCT until we hit an unexpanded child
+            let mut current = &self.root as *const MCTSNode;
+            loop {
+                let node = unsafe { &*current };
+                if node.legal_actions.is_empty() {
+                    // Terminal node — backpropagate with current value
+                    break;
+                }
+
+                let child_idx = select_child(node, self.config.exploration_constant);
+                path.push(child_idx);
+
+                match &node.children[child_idx] {
+                    Some(child) => {
+                        current = child.as_ref() as *const MCTSNode;
+                    }
+                    None => {
+                        // Unexpanded — need to expand
+                        break;
+                    }
+                }
+            }
+
+            // Determine if we need to expand or if we hit a terminal
+            let value = if path.is_empty() {
+                // Root is terminal
+                self.root.q_value()
+            } else {
+                // Navigate to the parent of the leaf to expand
+                let leaf_action_idx = *path.last().unwrap();
+                let parent = self.navigate_to_parent_mut(&path);
+
+                if parent.children[leaf_action_idx].is_some() {
+                    // We selected an existing child (terminal node with no legal actions)
+                    let child = parent.children[leaf_action_idx].as_ref().unwrap();
+                    child.q_value()
+                } else {
+                    // Expand: call evaluator
+                    let action = parent.legal_actions[leaf_action_idx];
+                    let (new_hidden, reward, policy, value) =
+                        evaluator.expand_leaf(&parent.hidden_state, action).await;
+
+                    // For now, create leaf with empty legal actions (we don't have the game
+                    // state to compute them). The self-play game task will provide legal actions.
+                    // During pure MCTS testing with mock evaluators, leaves are terminal.
+                    let child = MCTSNode::new(new_hidden, &policy, Vec::new(), reward);
+                    parent.children[leaf_action_idx] = Some(Box::new(child));
+
+                    value
+                }
+            };
+
+            // Backpropagate: walk back up the path, updating visit counts and values
+            self.backpropagate(&path, value);
+        }
+    }
+
+    /// Navigate to the parent node of the last element in the path.
+    /// path must have at least one element.
+    fn navigate_to_parent_mut(&mut self, path: &[usize]) -> &mut MCTSNode {
+        let mut node = &mut self.root;
+        // Walk all but the last step
+        for &idx in &path[..path.len() - 1] {
+            node = node.children[idx].as_mut().unwrap();
+        }
+        node
+    }
+
+    /// Backpropagate value up the tree along the given path.
+    fn backpropagate(&mut self, path: &[usize], value: f32) {
+        // Update root
+        self.root.visit_count += 1;
+        self.root.total_value += value;
+
+        // Walk down the path updating each node
+        let mut node = &mut self.root;
+        for &idx in path {
+            let child = node.children[idx].as_mut().unwrap();
+            child.visit_count += 1;
+            // Value is negated at each level (opponent's perspective)
+            child.total_value += value;
+            node = node.children[idx].as_mut().unwrap();
+        }
+    }
+
+    /// Extract the normalized visit count distribution over legal actions.
+    /// Returns a vector of the same length as root.legal_actions.
+    pub fn extract_visit_distribution(&self) -> Vec<f32> {
+        let total: u32 = self.root.children.iter()
+            .map(|c| c.as_ref().map_or(0, |n| n.visit_count))
+            .sum();
+
+        if total == 0 {
+            return vec![0.0; self.root.legal_actions.len()];
+        }
+
+        self.root.children.iter()
+            .map(|c| c.as_ref().map_or(0, |n| n.visit_count) as f32 / total as f32)
+            .collect()
+    }
+
+    /// Root Q-value estimate.
+    pub fn root_value(&self) -> f32 {
+        self.root.q_value()
+    }
+
+    /// Select an action based on visit counts and temperature.
+    /// temperature=0 picks the most-visited action deterministically.
+    /// temperature>0 samples proportionally to visit_count^(1/temperature).
+    pub fn select_action(&self, temperature: f32) -> ActionIndex {
+        if self.root.legal_actions.is_empty() {
+            return 0;
+        }
+
+        let visits: Vec<f32> = self.root.children.iter()
+            .map(|c| c.as_ref().map_or(0, |n| n.visit_count) as f32)
+            .collect();
+
+        if temperature <= f32::EPSILON {
+            // Deterministic: pick highest visit count
+            let best_idx = visits.iter()
+                .enumerate()
+                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+            self.root.legal_actions[best_idx]
+        } else {
+            // Temperature-based sampling
+            let inv_temp = 1.0 / temperature;
+            let weights: Vec<f32> = visits.iter().map(|&v| v.powf(inv_temp)).collect();
+            let total: f32 = weights.iter().sum();
+
+            if total <= 0.0 {
+                return self.root.legal_actions[0];
+            }
+
+            let threshold = rand::random::<f32>() * total;
+            let mut cumulative = 0.0;
+            for (i, &w) in weights.iter().enumerate() {
+                cumulative += w;
+                if cumulative >= threshold {
+                    return self.root.legal_actions[i];
+                }
+            }
+            *self.root.legal_actions.last().unwrap()
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mcts::evaluator::Evaluator;
+    use crate::data::{BoardObservation, HiddenState, Policy, ActionIndex, NUM_ACTIONS};
+    use async_trait::async_trait;
+
+    /// Mock evaluator that returns uniform policy and 0.5 value.
+    struct MockEvaluator;
+
+    #[async_trait]
+    impl Evaluator for MockEvaluator {
+        async fn root_setup(&self, _obs: &BoardObservation) -> (HiddenState, Policy, f32) {
+            let policy = vec![1.0 / NUM_ACTIONS as f32; NUM_ACTIONS];
+            (HiddenState::new(64), policy, 0.5)
+        }
+
+        async fn expand_leaf(&self, _hs: &HiddenState, _action: ActionIndex) -> (HiddenState, f32, Policy, f32) {
+            let policy = vec![1.0 / NUM_ACTIONS as f32; NUM_ACTIONS];
+            (HiddenState::new(64), 0.0, policy, 0.5)
+        }
+    }
+
+    #[tokio::test]
+    async fn test_tree_runs_simulations() {
+        let policy = vec![1.0 / NUM_ACTIONS as f32; NUM_ACTIONS];
+        let legal_actions: Vec<ActionIndex> = (0..20).collect();
+        let config = MCTSConfig {
+            num_simulations: 50,
+            exploration_constant: 1.5,
+        };
+
+        let mut tree = MCTSTree::new(
+            HiddenState::new(64),
+            &policy,
+            0.5,
+            legal_actions,
+            config,
+        );
+
+        let evaluator = MockEvaluator;
+        tree.run_simulations(&evaluator).await;
+
+        // Root should have 1 (initial) + 50 (simulations) = 51 visits
+        assert_eq!(tree.root.visit_count, 51);
+    }
+
+    #[tokio::test]
+    async fn test_visit_distribution_sums_to_one() {
+        let policy = vec![1.0 / NUM_ACTIONS as f32; NUM_ACTIONS];
+        let legal_actions: Vec<ActionIndex> = (0..10).collect();
+        let config = MCTSConfig {
+            num_simulations: 100,
+            exploration_constant: 1.5,
+        };
+
+        let mut tree = MCTSTree::new(
+            HiddenState::new(64),
+            &policy,
+            0.5,
+            legal_actions,
+            config,
+        );
+
+        tree.run_simulations(&MockEvaluator).await;
+
+        let dist = tree.extract_visit_distribution();
+        let sum: f32 = dist.iter().sum();
+        assert!((sum - 1.0).abs() < 1e-5, "Visit distribution sum: {}", sum);
+    }
+
+    #[tokio::test]
+    async fn test_select_action_deterministic() {
+        let policy = vec![1.0 / NUM_ACTIONS as f32; NUM_ACTIONS];
+        let legal_actions: Vec<ActionIndex> = (0..5).collect();
+        let config = MCTSConfig {
+            num_simulations: 50,
+            exploration_constant: 1.5,
+        };
+
+        let mut tree = MCTSTree::new(
+            HiddenState::new(64),
+            &policy,
+            0.5,
+            legal_actions,
+            config,
+        );
+
+        tree.run_simulations(&MockEvaluator).await;
+
+        // Temperature 0 should always pick the same action
+        let action1 = tree.select_action(0.0);
+        let action2 = tree.select_action(0.0);
+        assert_eq!(action1, action2);
+    }
+}

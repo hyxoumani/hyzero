@@ -20,23 +20,23 @@ pub enum GameResult {
 pub struct GameBoard {
     pub(crate) player1: Player,
     pub(crate) player2: Player,
-    board_arr: [Option<Piece>; 64],
-    white_pieces: Bitboard,
-    precomputed_items: Arc<PrecomputedItems>,
-    black_pieces: Bitboard,
-    combined_pieces: Bitboard,
-    in_check: bool,
-    white_pins: Bitboard,
-    black_pins: Bitboard,
-    game_result: GameResult,
-    white_kingside: bool,
-    white_queenside: bool,
-    black_kingside: bool,
-    black_queenside: bool,
-    last_move: Move,
-    en_passant_target: Option<usize>,
-    halfmove_clock: u32,
-    position_history: HashMap<u64, u8>,
+    pub(crate) board_arr: [Option<Piece>; 64],
+    pub(crate) white_pieces: Bitboard,
+    pub(crate) precomputed_items: Arc<PrecomputedItems>,
+    pub(crate) black_pieces: Bitboard,
+    pub(crate) combined_pieces: Bitboard,
+    pub(crate) in_check: bool,
+    pub(crate) white_pins: Bitboard,
+    pub(crate) black_pins: Bitboard,
+    pub(crate) game_result: GameResult,
+    pub(crate) white_kingside: bool,
+    pub(crate) white_queenside: bool,
+    pub(crate) black_kingside: bool,
+    pub(crate) black_queenside: bool,
+    pub(crate) last_move: Move,
+    pub(crate) en_passant_target: Option<usize>,
+    pub(crate) halfmove_clock: u32,
+    pub(crate) position_history: HashMap<u64, u8>,
 
 }
 
@@ -601,15 +601,19 @@ impl GameBoard{
 
         // 1. Calculate Pushes (must handle the "blockade" logic)
         let mut valid_pushes = pushes & !board;
-        
+
         // If the square immediately in front is blocked, the double-push is also blocked
-        let push_direction = if color == Color::White { 8i8 } else { -8i8 };
-        let one_step_sq = 1u64 << (sq as i8 + push_direction) as usize;
-        
-        if (one_step_sq & board) != 0 {
-            // Remove this pawn's specific double-push square (2 ranks ahead)
-            let double_step_sq = 1u64 << (sq as i8 + 2 * push_direction) as usize;
-            valid_pushes &= !double_step_sq;
+        let push_direction: i8 = if color == Color::White { 8 } else { -8 };
+        let one_step = sq as i8 + push_direction;
+        if one_step >= 0 && one_step < 64 {
+            let one_step_sq = 1u64 << one_step as usize;
+            if (one_step_sq & board) != 0 {
+                let double_step = sq as i8 + 2 * push_direction;
+                if double_step >= 0 && double_step < 64 {
+                    let double_step_sq = 1u64 << double_step as usize;
+                    valid_pushes &= !double_step_sq;
+                }
+            }
         }
 
         // 2. Calculate Attacks (only moves if an enemy piece is there)

@@ -2,6 +2,18 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## System: Local LLM Review Hook
+
+A PostToolUse hook sends every Edit/Write diff to **Qwen2.5-Coder:32b** (Ollama, localhost:11434) for automatic bugs-and-correctness review. See `docs/system.md` for full details.
+
+- **Hook script**: `~/.claude/hooks/ollama-review.sh`
+- **Hook config**: `~/.claude/settings.local.json`
+- **Behavior**: blocks with review text if issues found, silent on LGTM or non-source files
+- **Failure mode**: silent (Ollama down = no disruption)
+- **Disable**: remove/rename `~/.claude/settings.local.json`
+
+---
+
 ## Project Overview
 
 `hyzero` is a Rust chess engine attempting to emulate MuZero. It uses bitboard representation and magic bitboards for sliding piece move generation, with an async TCP server for networked play.
@@ -68,9 +80,9 @@ All fundamental types live here and are re-exported for use across the crate:
 - `src/bin/client.rs` — async Unix domain socket client. Connects to server, receives color assignment, handles protocol messages (`YOUR_TURN`, `OK`, `INVALID`, `OPPONENT_MOVED`, `BOARD`, `GAME_OVER`), prompts for move input via stdin.
 
 ### Architecture
-See `ARCHITECTURE.md` for the full MuZero system design including MCTS, neural network components, self-play threading model, training loop, and data storage.
+See `docs/ARCHITECTURE.md` for the full MuZero system design including MCTS, neural network components, self-play threading model, training loop, and data storage.
 
-### Remaining Work (`src/todo.md`)
+### Remaining Work (`docs/todo.md`)
 Key incomplete areas: en passant edge cases, full legal move filtering, and the MuZero/MCTS search layer are not yet implemented.
 
 ---
@@ -190,6 +202,45 @@ After each subagent completes, update CLAUDE.md with status (`DONE` / `FAILED`) 
 | 14. Rewrite client.rs | DONE | Unix domain socket client with protocol handling and stdin input |
 | 15. Update CLAUDE.md | DONE | Updated architecture section, task status table |
 | 16. Write ARCHITECTURE.md | DONE | Full MuZero architecture doc |
+
+### MCTS & Self-Play Infrastructure (Tasks 17-23)
+
+Detailed task document: `docs/TASKS_MCTS_SELFPLAY.md`
+
+| Task | Status | Notes |
+|------|--------|-------|
+| 17. Module Structure + Data Types | DONE | data/types.rs, data/encoding.rs, mcts/mod.rs, selfplay/mod.rs |
+| 18. MCTS Tree + PUCT | DONE | MCTSNode, MCTSTree, Evaluator trait, PUCT selection, simulation loop |
+| 19. Inference Channel + Batching | DONE | InferenceBatcher, ChannelEvaluator, RandomBackend stub |
+| 20. Replay Buffer | DONE | VecDeque ring buffer, weighted sampling, bincode checkpoints |
+| 21. Self-Play Game Task | DONE | play_game() async fn, MCTS per move, trajectory building |
+| 22. Coordinator + Training Thread | DONE | SelfPlayCoordinator with semaphore, TrainingThread stub with replay buffer, selfplay binary |
+| 23. Integration + Cleanup | DONE | Clippy fixes in new modules, removed DEBUG print, verified selfplay+tests |
+
+**Execution order:**
+```
+Task 17 → Task 18 → [Task 19 | Task 20] (parallel) → Task 21 → Task 22 → Task 23
+```
+
+### Python Neural Network Layer (Tasks 24-26)
+
+Detailed task document: `docs/TASKS_PYTHON.md`
+
+| Task | Status | Notes |
+|------|--------|-------|
+| 24. Python Project Setup + Models | TODO | config, ResidualBlock, h/g/f networks, shape tests |
+| 25. Training Loop + Checkpointing | TODO | Trainer class, MuZero loss, K-step unroll, weight save/load |
+| 26. Inference Server | TODO | InferenceServer class, batch methods, weight loading |
+
+**Execution order:**
+```
+Task 24 → [Task 25 | Task 26] (parallel)
+```
+
+Python tasks can run in parallel with Rust Tasks 17-20 (shared interface spec only).
+
+Every task runs as a **subagent** with edit and bash permissions.
+Update CLAUDE.md and docs/ status after each task. When any task changes architecture, adds modules, modifies APIs, or alters behavior, update all relevant docs in `docs/` (ARCHITECTURE.md, TASKS_MCTS_SELFPLAY.md, TASKS_PYTHON.md, todo.md, etc.) to reflect those changes.
 
 ### Verification
 After each task: `cargo check` / `cargo build`

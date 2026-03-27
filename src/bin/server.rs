@@ -128,7 +128,7 @@ async fn handle_client(
                     continue;
                 }
                 let notation = line[5..].trim();
-                println!("[DEBUG] Received move notation: {:?}", notation);
+
 
                 let mut gs = state.lock().await;
                 let expected_color = if gs.turn_count % 2 == 0 { Color::White } else { Color::Black };
