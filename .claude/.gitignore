@@ -1,0 +1,5 @@
+# Local settings (per-developer)
+settings.local.json
+
+# Agent memory (session-generated, not portable)
+agent-memory/

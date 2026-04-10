@@ -1,0 +1,28 @@
+{
+  "name": "solo-dev",
+  "version": "0.1.0",
+  "created": "",
+  "agents": [
+    "orchestrator",
+    "researcher",
+    "planner",
+    "implementer",
+    "tester",
+    "reviewer",
+    "context-keeper"
+  ],
+  "hooks": [
+    "readonly-guard",
+    "safety-net",
+    "commit-review-gate",
+    "auto-format",
+    "sonnet-review-gate",
+    "test-gate"
+  ],
+  "skills": [
+    "autoresearch",
+    "eval",
+    "plan-and-develop",
+    "qwen-review"
+  ]
+}
