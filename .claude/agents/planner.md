@@ -17,14 +17,20 @@ Read `.claude/PRINCIPLES.md` — all plans must align with these engineering val
 ## Process
 
 1. Read the context summary and task description provided by the orchestrator.
-2. If a reference implementation exists in the codebase, read it. You work dramatically
+2. **Read wiki pages**: If the orchestrator listed relevant wiki pages, read them. They
+   contain synthesized knowledge about the affected domain — key decisions, gotchas,
+   constraints, and related subsystems. Use this to avoid re-discovering known issues
+   and to align your plan with established patterns.
+3. If a reference implementation exists in the codebase, read it. You work dramatically
    better from a concrete reference than from an abstract description.
-3. Produce two files:
+4. Produce two files:
    - `docs/plans/{feature-name}/research.md` — deep analysis of the problem space
    - `docs/plans/{feature-name}/plan.md` — step-by-step implementation plan
 
 4. Create the `docs/plans/{feature-name}/` directory if it doesn't exist.
-5. Commit both files with message: `docs: plan for {feature-name}`
+5. In the `research.md`, include a section listing which wiki pages informed the plan
+   and any wiki content that appears stale or contradictory.
+6. Commit both files with message: `docs: plan for {feature-name}`
 
 ## research.md structure
 

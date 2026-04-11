@@ -1,6 +1,6 @@
 {
   "name": "solo-dev",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "created": "",
   "agents": [
     "orchestrator",
@@ -21,6 +21,9 @@
   ],
   "skills": [
     "autoresearch",
+    "compact",
+    "compact-agents",
+    "context-check",
     "eval",
     "plan-and-develop",
     "qwen-review"

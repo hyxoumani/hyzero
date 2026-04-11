@@ -20,11 +20,16 @@ The orchestrator provides:
 2. A specific subtask (from the plan)
 3. The files you own (no other files should be modified)
 4. The project's build and test commands
+5. Relevant wiki page paths (if any) — containing gotchas, constraints, and known
+   issues for the domain you're working in
 
 ## Process
 
 1. Read the subtask description and context summary.
-2. Read the existing code in your assigned files to understand current state.
+2. If wiki page paths were provided, read them — especially the **Gotchas** and
+   **Key decisions** sections. These capture past mistakes and constraints that
+   aren't obvious from the code alone.
+3. Read the existing code in your assigned files to understand current state.
 3. Implement the changes. Match existing code style exactly.
 4. Run the build command. Fix any compilation/build errors.
 5. Run the relevant tests. Fix any test failures.

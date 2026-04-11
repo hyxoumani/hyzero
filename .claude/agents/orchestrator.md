@@ -40,27 +40,37 @@ Assess every incoming task:
 
 For medium and complex tasks:
 
-1. **Research**: Spawn researcher with the task description. It returns a context summary.
-2. **Plan**: Spawn planner with the context summary + task. It produces `docs/plans/{feature}/research.md`
-   and `plan.md`. For complex tasks, spawn a second researcher to review the plan for gaps.
-3. **Decompose**: Read `plan.md`. Break it into independent subtasks. Independence test:
+1. **Wiki scan**: Read `docs/wiki/index.md`. Identify which wiki pages are relevant to
+   the task. Read those pages. This is accumulated project knowledge — use it to inform
+   all downstream agent briefs.
+2. **Research**: Spawn researcher with the task description + list of relevant wiki pages
+   to read. It returns a context summary.
+3. **Plan**: Spawn planner with the context summary + task + relevant wiki pages.
+   It produces `docs/plans/{feature}/research.md` and `plan.md`. For complex tasks,
+   spawn a second researcher to review the plan for gaps.
+4. **Decompose**: Read `plan.md`. Break it into independent subtasks. Independence test:
    can subtask A complete without subtask B's result? If yes, parallelize.
-4. **Implement**: Spawn implementer(s). Each gets: context summary, specific subtask, files
-   it owns. Up to MAX_PARALLEL_IMPLEMENTERS (default: 1, configurable).
-5. **Test**: Spawn tester for each implementer's output. Must pass before review.
-6. **Review**: Spawn reviewer with ONLY the final diff — never the implementer's reasoning
-   or failed attempts. Clean context produces better review.
-7. **Decide**: If tests pass and reviewer approves, keep. Otherwise revert and retry (max 3
+5. **Implement**: Spawn implementer(s). Each gets: context summary, specific subtask, files
+   it owns, and any relevant wiki page paths (gotchas, constraints). Up to
+   MAX_PARALLEL_IMPLEMENTERS (default: 1, configurable).
+6. **Test**: Spawn tester for each implementer's output. Must pass before review.
+7. **Review**: Spawn reviewer with ONLY the final diff + relevant wiki pages for pattern
+   conformance — never the implementer's reasoning or failed attempts.
+8. **Decide**: If tests pass and reviewer approves, keep. Otherwise revert and retry (max 3
    attempts) or escalate to user.
-8. **Log**: Spawn context-keeper to update CLAUDE.md, record results, encode lessons.
+9. **Log**: Spawn context-keeper to update CLAUDE.md, record results, encode lessons,
+   and update wiki pages with new findings.
 
 ## Context-keeper triggers
 
 Spawn context-keeper in these situations:
-- **After every completed task** — to encode reviewer findings into permanent rules
-- **After session end** — to write session summary to `docs/sessions/`
+- **After every completed task** — to encode reviewer findings into permanent rules and
+  update relevant wiki pages with new knowledge
+- **After session end** — to write session summary and merge findings into wiki
 - **When any agent discovers a non-obvious constraint** — to persist it before context is lost
-- **After autoresearch experiments** — to log results to `results.tsv`
+- **After autoresearch experiments** — to log results to `results.tsv` and synthesize
+  experiment learnings into wiki pages
+- **Periodically during long sessions** — run `/compact` to ensure wiki stays current
 
 ## Autoresearch mode
 

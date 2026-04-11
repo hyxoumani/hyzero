@@ -37,15 +37,25 @@ _TBD_
 
 ## Review System
 
-Code is reviewed automatically via hooks at two stages:
+Code is reviewed automatically via hooks. Review mode configured at bootstrap:
 
-- **Per-edit**: `readonly-guard.sh` blocks writes to protected files
-- **Pre-commit**: `commit-review-gate.sh` — headless Claude Sonnet reviews the full staged diff before commit
+- **Review mode**: _TBD_ (commit-only / per-edit-only / both / none)
+- **Per-edit guard**: `readonly-guard.sh` blocks writes to protected files
 - **Post-edit**: `auto-format.sh` — auto-runs project formatter after every edit
 - **Safety**: `safety-net.sh` — blocks destructive commands (`rm -rf`, `git push --force`, etc.)
 - **On stop**: `test-gate.sh` — runs the test suite before Claude finishes a task
 - **Alternative review**: `/qwen-review` skill — local Qwen2.5-Coder via Ollama (airgapped)
-- **Legacy per-edit review**: `sonnet-review-gate.sh` available but not active by default
+
+## Project Wiki
+
+The context-keeper maintains a persistent wiki at `docs/wiki/`. This is the synthesized
+knowledge base for the project — not a collection of individual docs, but interconnected
+pages that compound with every task.
+
+**For all agents**: Read `docs/wiki/index.md` at task start. Read pages relevant to your
+domain before exploring code. The wiki is pre-synthesized knowledge — faster and more
+complete than re-discovering from source. If you find stale wiki content, flag it in
+your output so the context-keeper can fix it.
 
 ## Context Management
 

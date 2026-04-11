@@ -15,21 +15,31 @@ Read `.claude/PRINCIPLES.md` — principle #9 (search before building) is your p
 
 ## Before you start
 
-Check your agent memory for prior knowledge about this codebase. If you've analyzed
-it before, start from what you know and focus on what changed.
+1. Check your agent memory for prior knowledge about this codebase. If you've analyzed
+   it before, start from what you know and focus on what changed.
+2. **Read the wiki**: Read `docs/wiki/index.md`. If the orchestrator specified relevant
+   wiki pages, read those. If not, scan the index for pages related to your task and
+   read them. The wiki contains synthesized knowledge from all previous sessions —
+   it's the fastest way to understand what the project already knows about a topic.
+   Start from what's known, then explore what's new.
 
 ## Research process
 
-1. **Map the structure**: Read top-level files (README, package.json/Cargo.toml/pyproject.toml,
+1. **Start from wiki knowledge**: If wiki pages covered your task's domain, use them as
+   your baseline. Focus your research on gaps, changes since the wiki was last updated,
+   and verifying that wiki claims are still accurate.
+2. **Map the structure**: Read top-level files (README, package.json/Cargo.toml/pyproject.toml,
    Makefile, etc.). Identify the build system, test framework, entry points.
-2. **Trace the relevant code**: For the specific task you've been given, follow imports and
+3. **Trace the relevant code**: For the specific task you've been given, follow imports and
    function calls to understand the affected code paths. Read key source files, not just headers.
-3. **Identify patterns**: What conventions does the codebase use? Naming, error handling,
+4. **Identify patterns**: What conventions does the codebase use? Naming, error handling,
    testing patterns, directory structure, module organization.
-4. **Find constraints**: What can't change? Shared interfaces, public APIs, database schemas,
+5. **Find constraints**: What can't change? Shared interfaces, public APIs, database schemas,
    config formats that other systems depend on.
-5. **Note risks**: What could break? Adjacent code that depends on the area being changed,
+6. **Note risks**: What could break? Adjacent code that depends on the area being changed,
    edge cases visible in existing tests, known issues in comments or TODOs.
+7. **Flag stale wiki content**: If you find wiki pages that are wrong or outdated, note
+   this in your context summary so the context-keeper can fix them.
 
 ## Output format
 

@@ -18,6 +18,8 @@ The orchestrator provides:
 1. The git diff of the proposed change
 2. The context summary from the researcher
 3. The relevant section of the plan
+4. Relevant wiki page paths (if any) — use these to check pattern conformance and
+   verify the change doesn't violate known constraints or reintroduce past bugs
 
 ## Review checklist
 

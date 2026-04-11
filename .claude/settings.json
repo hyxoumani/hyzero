@@ -22,7 +22,7 @@
           {
             "type": "command",
             "command": "bash .claude/hooks/commit-review-gate.sh",
-            "timeout": 65000
+            "timeout": 130000
           }
         ]
       }
@@ -53,6 +53,28 @@
   },
   "env": {},
   "permissions": {
+    "allow": [
+      "Edit(file_path:CLAUDE.md)",
+      "Write(file_path:CLAUDE.md)",
+      "Edit(file_path:**/CLAUDE.md)",
+      "Write(file_path:**/CLAUDE.md)",
+      "Edit(file_path:.claude/rules/*.md)",
+      "Write(file_path:.claude/rules/*.md)",
+      "Edit(file_path:**/.claude/rules/*.md)",
+      "Write(file_path:**/.claude/rules/*.md)",
+      "Edit(file_path:docs/**/*.md)",
+      "Write(file_path:docs/**/*.md)",
+      "Edit(file_path:**/docs/**/*.md)",
+      "Write(file_path:**/docs/**/*.md)",
+      "Edit(file_path:results.tsv)",
+      "Write(file_path:results.tsv)",
+      "Edit(file_path:**/results.tsv)",
+      "Write(file_path:**/results.tsv)",
+      "Edit(file_path:.claude/agent-memory/**/*.md)",
+      "Write(file_path:.claude/agent-memory/**/*.md)",
+      "Edit(file_path:**/.claude/agent-memory/**/*.md)",
+      "Write(file_path:**/.claude/agent-memory/**/*.md)"
+    ],
     "deny": []
   }
 }

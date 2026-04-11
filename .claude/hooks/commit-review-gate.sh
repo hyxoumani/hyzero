@@ -1,6 +1,7 @@
 #!/bin/bash
 # Commit Review Gate — PreToolUse hook for Bash(git commit*)
-# Reviews the full staged diff before allowing a commit.
+# Reviews the full staged diff using a tool-augmented Sonnet instance
+# that can read project files, conventions, and surrounding code.
 # Exit 0 = approve, Exit 2 = deny (Claude sees the failure and fixes).
 
 set -euo pipefail
@@ -15,23 +16,36 @@ CMD=$(echo "$INPUT" | jq -r '.tool_input.command // empty')
 DIFF=$(git diff --cached 2>/dev/null)
 [ -z "$DIFF" ] && exit 0
 
-# Build review prompt
-REVIEW_PROMPT="Review this git diff before commit. Respond with ONLY valid JSON:
+# Build review prompt — Sonnet gets tools to explore the codebase itself
+REVIEW_PROMPT="You are a code reviewer. A commit is about to be made. Here is the staged diff:
+
+\`\`\`diff
+$DIFF
+\`\`\`
+
+Use your tools to understand the context:
+1. Read CLAUDE.md and .claude/rules/ for project conventions
+2. Read the full files being changed to understand surrounding code
+3. Grep for usages of any modified functions/types to check for breakage
+4. Check git log for recent history on heavily-changed files if relevant
+
+Then respond with ONLY valid JSON:
 {\"verdict\": \"approve\" or \"deny\", \"reason\": \"brief explanation\", \"issues\": [\"list of specific issues if deny\"]}
 
 Focus ONLY on:
 - Bugs, logic errors, off-by-one mistakes
 - Security vulnerabilities (hardcoded secrets, injection, path traversal)
+- Breaking changes to callers of modified functions
+- Violations of project conventions found in CLAUDE.md / .claude/rules/
 - Missing error handling for new code paths
-- Obvious performance issues
 
-Do NOT flag: style preferences, naming opinions, or minor nitpicks.
+Do NOT flag: style preferences, naming opinions, or minor nitpicks."
 
-Diff:
-$DIFF"
-
-# Call headless Claude with Sonnet (60s timeout)
-RESPONSE=$(timeout 60 claude -p "$REVIEW_PROMPT" --model sonnet --output-format json 2>/dev/null) || {
+# Call headless Claude with Sonnet + tools (120s timeout for tool usage)
+RESPONSE=$(timeout 120 claude -p "$REVIEW_PROMPT" \
+  --model sonnet \
+  --allowedTools "Read,Grep,Glob,Bash(git log*),Bash(git blame*)" \
+  --output-format json 2>/dev/null) || {
   echo "[commit-review-gate] Auto-approved (timeout/error) — consider manual review" >&2
   exit 0
 }
