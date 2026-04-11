@@ -24,9 +24,15 @@ The difference from `/compact`:
 Scan all agent knowledge sources:
 
 ```bash
-# Researcher agent memory
-echo "=== Researcher Memory ==="
-ls -la .claude/agent-memory/researcher/*.md 2>/dev/null | grep -v README
+# All agent memory
+echo "=== Agent Memory ==="
+for dir in .claude/agent-memory/*/; do
+  [ ! -d "$dir" ] && continue
+  AGENT=$(basename "$dir")
+  FILES=$(ls "$dir"*.md 2>/dev/null | grep -v README | wc -l)
+  [ "$FILES" -gt 0 ] && echo "$AGENT: $FILES files"
+  ls -la "$dir"*.md 2>/dev/null | grep -v README
+done
 
 # Recent researcher context summaries in plans
 echo "=== Research Docs ==="
@@ -45,7 +51,7 @@ echo "=== Wiki Pages ==="
 ls docs/wiki/*.md 2>/dev/null
 ```
 
-Read each researcher memory file in `.claude/agent-memory/researcher/`.
+Read each agent memory file in `.claude/agent-memory/*/` (all agents, not just researcher).
 Read `docs/wiki/index.md` to understand existing wiki coverage.
 
 ### Step 2: Map knowledge to wiki pages
@@ -57,6 +63,9 @@ For each piece of agent knowledge, determine where it belongs:
 | Researcher: architecture findings | `docs/wiki/{subsystem}.md` |
 | Researcher: pattern discoveries | `docs/wiki/patterns.md` or domain-specific page |
 | Researcher: constraint identification | `docs/wiki/{domain}.md` → Gotchas section |
+| Orchestrator: integration decisions | `docs/wiki/{feature}.md` → Key decisions |
+| Orchestrator: debugging traces | `docs/wiki/{subsystem}.md` → Gotchas section |
+| Context-keeper: rule rationale | `docs/wiki/{domain}.md` → Key decisions |
 | Planner: rejected approaches | `docs/wiki/{feature}.md` → Key decisions |
 | Reviewer: recurring issues | `docs/wiki/{domain}.md` → Gotchas section |
 | Tester: flaky test patterns | `docs/wiki/testing.md` → Known flakes |
@@ -103,7 +112,7 @@ that contradicts the wiki:
 
 ### Step 5: Update agent memory status
 
-After merging researcher memory into the wiki, add a note at the bottom of each
+After merging any agent's memory into the wiki, add a note at the bottom of each
 processed agent-memory file:
 
 ```markdown

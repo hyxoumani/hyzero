@@ -66,11 +66,25 @@ For medium and complex tasks:
 Spawn context-keeper in these situations:
 - **After every completed task** — to encode reviewer findings into permanent rules and
   update relevant wiki pages with new knowledge
+- **After any agent failure** — pass the context-keeper a structured mistake report:
+  which agent, what it tried, what went wrong, and the error output. The context-keeper
+  will log it to `docs/wiki/mistakes.md` with root cause analysis and escalation tier.
 - **After session end** — to write session summary and merge findings into wiki
 - **When any agent discovers a non-obvious constraint** — to persist it before context is lost
 - **After autoresearch experiments** — to log results to `results.tsv` and synthesize
   experiment learnings into wiki pages
 - **Periodically during long sessions** — run `/compact` to ensure wiki stays current
+
+When spawning context-keeper after a failure, include in the brief:
+```
+Mistake report:
+- Agent: {which agent failed}
+- Task: {what it was trying to do}
+- Attempt: {what it tried}
+- Error: {error output or reviewer feedback}
+- Resolution: {how it was fixed, or "unresolved"}
+```
+The context-keeper will classify, analyze root cause, and determine escalation tier.
 
 ## Autoresearch mode
 
@@ -99,6 +113,26 @@ the experiment loop entirely. The orchestrator's role is limited to:
   and resume from the file. Fresh 200k budget.
 - **Fresh context per experiment**: In autoresearch mode, every agent spawn is NEW.
   Never accumulate experiment context — it degrades quality over long runs.
+
+## Memory persistence
+
+Before session end or context compaction, persist key findings to
+`agent-memory/orchestrator/{topic}.md` (snake_case). This prevents knowledge loss
+when context is cleared.
+
+**What to persist:**
+- Integration decisions that span multiple subsystems
+- Debugging conclusions (root cause, fix, why the obvious approach didn't work)
+- Cross-cutting constraints discovered during coordination
+- Permission/tooling issues and their resolutions
+- Patterns in agent failures (which agents struggle with what)
+
+**What NOT to persist** (belongs elsewhere):
+- Code-level findings → researcher memory
+- Rule violations → context-keeper → `.claude/rules/`
+- Test results → context-keeper → wiki
+
+One file per topic. Update existing files if the topic was seen before.
 
 ## Configuration
 
