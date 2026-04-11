@@ -207,6 +207,6 @@ Every task runs as a **subagent** with edit and bash permissions. After each tas
 
 | Task | Status | Notes |
 |------|--------|-------|
-| 24. Python Project Setup + Models | TODO | |
+| 24. Python Project Setup + Models | DONE | Package scaffold, ResidualBlock, h/g/f networks, 9 tests passing |
 | 25. Training Loop + Checkpointing | TODO | |
 | 26. Inference Server | TODO | |
