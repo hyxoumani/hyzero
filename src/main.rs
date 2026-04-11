@@ -5,7 +5,7 @@ use std::sync::Arc;
 fn main() {
 
     let precomputed_items = Arc::new(PrecomputedItems::begin_precomputing());
-    let session_obj : SessionObj = SessionObj::start_session(precomputed_items);
+    let _session_obj : SessionObj = SessionObj::start_session(precomputed_items);
 
     let mut test_vec: Vec<Option<Test>> = Vec::new();
 
@@ -13,8 +13,8 @@ fn main() {
         test_vec.push(Some(Test::new(i)));
     }
 
-    for i in 0..5 {
-        println!("{:?}", test_vec[i].as_ref().unwrap());
+    for item in test_vec.iter().take(5) {
+        println!("{:?}", item.as_ref().unwrap());
     }
 
 
@@ -23,6 +23,7 @@ fn main() {
 
 #[derive(Debug)]
 pub struct Test {
+    #[allow(dead_code)]
     val: u8
 }
 

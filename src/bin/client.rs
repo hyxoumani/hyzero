@@ -50,10 +50,10 @@ async fn main() {
                         }
                     }
                 }
-            } else if msg.starts_with("OK ") {
-                println!("Move accepted: {}", &msg[3..]);
-            } else if msg.starts_with("INVALID ") {
-                println!("Invalid: {}", &msg[8..]);
+            } else if let Some(rest) = msg.strip_prefix("OK ") {
+                println!("Move accepted: {}", rest);
+            } else if let Some(rest) = msg.strip_prefix("INVALID ") {
+                println!("Invalid: {}", rest);
                 // Re-prompt
                 loop {
                     eprint!("[{}] Your move: ", my_color);
@@ -67,12 +67,12 @@ async fn main() {
                         _ => return,
                     }
                 }
-            } else if msg.starts_with("OPPONENT_MOVED ") {
-                println!("Opponent played: {}", &msg[15..]);
-            } else if msg.starts_with("BOARD ") {
-                println!("Board: {}", &msg[6..]);
-            } else if msg.starts_with("GAME_OVER ") {
-                println!("Game over: {}", &msg[10..]);
+            } else if let Some(rest) = msg.strip_prefix("OPPONENT_MOVED ") {
+                println!("Opponent played: {}", rest);
+            } else if let Some(rest) = msg.strip_prefix("BOARD ") {
+                println!("Board: {}", rest);
+            } else if let Some(rest) = msg.strip_prefix("GAME_OVER ") {
+                println!("Game over: {}", rest);
                 return;
             } else if msg == "WAIT" {
                 println!("Waiting for opponent...");

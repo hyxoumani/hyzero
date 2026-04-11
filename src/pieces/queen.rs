@@ -1,4 +1,4 @@
-use crate::{Bitboard, Color, PieceType, Square};
+use crate::{Color, PieceType};
 use super::Piece;
 
 pub struct Queen {

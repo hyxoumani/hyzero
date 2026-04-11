@@ -1,4 +1,4 @@
-use crate::{Bitboard, Color, PieceType, Square};
+use crate::{Color, PieceType};
 use super::Piece;
 
 pub struct Rook {
@@ -38,7 +38,7 @@ impl RookEntry {
             magic_num: 0,
             sig_bits: 0,
             magic_table: Vec::new(),
-            pos: pos
+            pos,
         };
         
         rook_entry.mask = rook_entry.calculate_mask(pos);
@@ -61,7 +61,7 @@ impl RookEntry {
     }
 
     pub fn calculate_magic_num(&mut self){
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         let num_var = 1 << self.sig_bits;
 
         let combinations = self.generate_combinations();
@@ -118,7 +118,7 @@ impl RookEntry {
         for (dr, dc) in dirs {
             for len in 1..8 {
                 let (nr, nc) = (r + dr * len, c + dc * len);
-                if nr < 0 || nr >= 8 || nc < 0 || nc >= 8 { break; }
+                if !(0..8).contains(&nr) || !(0..8).contains(&nc) { break; }
                 let bit = 1 << (nr * 8 + nc);
                 moves |= bit;
                 if (occupied & bit) != 0 { break; } // Hit a blocker

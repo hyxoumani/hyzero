@@ -5,6 +5,12 @@ pub struct GameHistory {
     pub board_snapshots: Vec<[Option<Piece>; 64]>,
 }
 
+impl Default for GameHistory {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl GameHistory {
     pub fn new() -> Self {
         Self {

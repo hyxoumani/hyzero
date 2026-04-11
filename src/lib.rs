@@ -151,6 +151,7 @@ impl PrecomputedItems {
         (empty, path)
     }
 
+    #[allow(clippy::needless_range_loop)]
     pub fn begin_precomputing() -> Self {
 
         let mut rays = [[0u64; 64]; 64];
@@ -212,7 +213,7 @@ impl PrecomputedItems {
                     let mut curr_r = r1;
                     let mut curr_c = c1;
 
-                    while curr_r >= 0 && curr_r < 8 && curr_c >= 0 && curr_c < 8 {
+                    while (0..8).contains(&curr_r) && (0..8).contains(&curr_c) {
                         curr_r -= step_r;
                         curr_c -= step_c;
                     }
@@ -220,7 +221,7 @@ impl PrecomputedItems {
                     curr_r += step_r;
                     curr_c += step_c;
 
-                    while curr_r >= 0 && curr_r < 8 && curr_c >= 0 && curr_c < 8 {
+                    while (0..8).contains(&curr_r) && (0..8).contains(&curr_c) {
                         line |= 1u64 << (curr_r * 8 + curr_c);
                         curr_r += step_r;
                         curr_c += step_c;
@@ -238,7 +239,7 @@ impl PrecomputedItems {
             let offsets = [(2,1),(2,-1),(-2,1),(-2,-1),(1,2),(1,-2),(-1,2),(-1,-2)];
             for (dr, dc) in offsets {
                 let (nr, nc) = (r + dr, c + dc);
-                if nr >= 0 && nr < 8 && nc >= 0 && nc < 8 {
+                if (0..8).contains(&nr) && (0..8).contains(&nc) {
                     moves |= 1 << (nr * 8 + nc);
                 }
             }
@@ -253,7 +254,7 @@ impl PrecomputedItems {
                 for dc in -1..=1 {
                     if dr == 0 && dc == 0 { continue; }
                     let (nr, nc) = (r + dr, c + dc);
-                    if nr >= 0 && nr < 8 && nc >= 0 && nc < 8 {
+                    if (0..8).contains(&nr) && (0..8).contains(&nc) {
                         moves |= 1 << (nr * 8 + nc);
                     }
                 }
@@ -339,8 +340,8 @@ pub fn create_game_board() -> [Option<Piece>; 64] {
     board[5] = white(PieceType::Bishop);
     board[6] = white(PieceType::Knight);
     board[7] = white(PieceType::Rook);
-    for i in 8..16 { board[i] = white(PieceType::Pawn); }
-    for i in 48..56 { board[i] = black(PieceType::Pawn); }
+    board[8..16].fill(white(PieceType::Pawn));
+    board[48..56].fill(black(PieceType::Pawn));
     board[56] = black(PieceType::Rook);
     board[57] = black(PieceType::Knight);
     board[58] = black(PieceType::Bishop);
@@ -366,9 +367,9 @@ pub fn create_own_board(color:Color) -> [Option<Piece>; 64] {
         board[5] = white(PieceType::Bishop);
         board[6] = white(PieceType::Knight);
         board[7] = white(PieceType::Rook);
-        for i in 8..16 { board[i] = white(PieceType::Pawn); }
+        board[8..16].fill(white(PieceType::Pawn));
     } else {
-        for i in 48..56 { board[i] = black(PieceType::Pawn); }
+        board[48..56].fill(black(PieceType::Pawn));
         board[56] = black(PieceType::Rook);
         board[57] = black(PieceType::Knight);
         board[58] = black(PieceType::Bishop);

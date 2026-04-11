@@ -1,9 +1,9 @@
 //using this to intialize session vars like precomputed items, mcst info, etc
 use crate::PrecomputedItems;
-use crate::game::GameState;
 use std::sync::Arc;
 
 pub struct SessionObj {
+    #[allow(dead_code)]
     precomputed_items: Arc<PrecomputedItems>,
     
 

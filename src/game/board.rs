@@ -25,6 +25,7 @@ pub struct GameBoard {
     pub(crate) precomputed_items: Arc<PrecomputedItems>,
     pub(crate) black_pieces: Bitboard,
     pub(crate) combined_pieces: Bitboard,
+    #[allow(dead_code)]
     pub(crate) in_check: bool,
     pub(crate) white_pins: Bitboard,
     pub(crate) black_pins: Bitboard,
@@ -73,7 +74,7 @@ impl GameBoard{
         loop {
             if self.game_result != GameResult::Ongoing {break}
             let piece_moved;
-            if count % 2 == 0 {
+            if count.is_multiple_of(2) {
                 loop {
                     let candidate = self.player1.make_move();
                     if self.validate_move(candidate, Color::White, self.combined_pieces, self.white_pieces, self.black_pieces){
@@ -125,8 +126,8 @@ impl GameBoard{
         self.calculate_pins(Color::White, self.combined_pieces, self.white_pieces, self.black_pieces);
         self.calculate_pins(Color::Black, self.combined_pieces, self.white_pieces, self.black_pieces);
 
-        // When count % 2 == 0, white just moved, now check if BLACK is in checkmate/stalemate
-        let (color_to_move, friendly_bits, opponent_bits, opp_color, pins) = if count % 2 == 0 {
+        // When count.is_multiple_of(2), white just moved, now check if BLACK is in checkmate/stalemate
+        let (color_to_move, friendly_bits, opponent_bits, opp_color, pins) = if count.is_multiple_of(2) {
             (Color::Black, self.black_pieces, self.white_pieces, Color::White, self.black_pins)
         } else {
             (Color::White, self.white_pieces, self.black_pieces, Color::Black, self.white_pins)
@@ -194,48 +195,31 @@ impl GameBoard{
 
 
     pub fn calculate_pins(&mut self, color: Color, board: Bitboard, white_pieces: Bitboard, black_pieces: Bitboard){
-        let mut player1 = &self.player1;
-        let mut player2 = &self.player2;
-        
-        let (king_bits, friendly_bits, enemy_bits, enemy_sliders) = match color {
+        let player1 = &self.player1;
+        let player2 = &self.player2;
+
+        let (king_bits, friendly_bits, enemy_sliders) = match color {
             Color::White => (
-                player1.pieces_bb[PieceType::King as usize] as u64, 
-                white_pieces, 
-                black_pieces,
+                player1.pieces_bb[PieceType::King as usize],
+                white_pieces,
                 player2.pieces_bb[PieceType::King as usize] | player2.pieces_bb[PieceType::Rook as usize] | player2.pieces_bb[PieceType::Bishop as usize]
             ),
             Color::Black => (
-                player2.pieces_bb[PieceType::King as usize] as u64, 
-                black_pieces, 
-                white_pieces,
+                player2.pieces_bb[PieceType::King as usize],
+                black_pieces,
                 player1.pieces_bb[PieceType::King as usize] | player1.pieces_bb[PieceType::Rook as usize] | player1.pieces_bb[PieceType::Bishop as usize]
             ),
         };
 
         let king_sq = king_bits.trailing_zeros() as usize;
 
-        // 2. The Closure: Captures the specific context for THIS side
-        let find_pin = |attacker_sq: usize| -> Option<u64> {
-            // Get precomputed ray between King and Attacker
-            let path = self.precomputed_items.rays[king_sq][attacker_sq];
-            let blockers = path & board;
-
-            // If exactly one piece blocks the ray and it's our color
-            if blockers.count_ones() == 1 && (blockers & friendly_bits) != 0 {
-                Some(blockers)
-            } else {
-                None
-            }
-        };
-
-        // 3. Execution
+        // Execution
         let mut pin_mask = 0u64;
         
         // Only check enemy sliders that are on the same lines as the King
         for attacker_sq in BitIterator::new(enemy_sliders) {
-            let attacker_idx = attacker_sq as usize;
             // 1. Get the precomputed exclusive path
-            let path = self.precomputed_items.rays[king_sq][attacker_idx];
+            let path = self.precomputed_items.rays[king_sq][attacker_sq];
 
             // 2. If path is 0, they aren't on a line (or are adjacent)
             // Note: Adjacent sliders are checks, not pins, so we ignore path == 0
@@ -268,19 +252,18 @@ impl GameBoard{
             &self.player2
         };
 
-        return player.pieces_bb[PieceType::King as usize]
+        player.pieces_bb[PieceType::King as usize]
     }
 
     pub fn calculate_stalemate(&mut self, color: Color, opp_color: Color, combined_bits: u64, friendly_bits: u64, opponent_bits: u64, pins: u64) -> bool{
-        let mut move_mask = 0u64;
         for sq in BitIterator::new(friendly_bits){
-            let piece_type = self.board_arr[sq as usize].unwrap().piece_type;
+            let piece_type = self.board_arr[sq].unwrap().piece_type;
             if piece_type != PieceType::King {
                 //need to check for pins
                 let move_set = self.get_move_mask(sq, color, piece_type, combined_bits, friendly_bits, opponent_bits);
                 if  move_set != 0{
                     if (1u64 << sq) & pins != 0 {
-                        let king_sq = self.get_king_sq(color) as usize;
+                        let king_sq = self.get_king_sq(color).trailing_zeros() as usize;
                         if move_set & self.precomputed_items.lines[king_sq][sq] != 0 {
                             return false
                         }
@@ -360,7 +343,7 @@ impl GameBoard{
         //just check if it's valid & not in check
         //better to instead pass clone pass a board
 
-        let (mut player, castle_kingside, castle_queenside, opp_color) = if color == Color::White {
+        let (_player, castle_kingside, castle_queenside, opp_color) = if color == Color::White {
             (&self.player1, self.white_kingside, self.white_queenside, Color::Black)
         } else {
             (&self.player2, self.black_kingside, self.black_queenside, Color::White)
@@ -368,7 +351,6 @@ impl GameBoard{
 
         let from_idx: Square = piece_moved.from;
         let to_idx: Square = piece_moved.to;
-        let king_sq: usize = player.pieces_bb[PieceType::King as usize].trailing_zeros() as usize;
         
         //handle castling
         if let Some(castle_option) = piece_moved.castle_option {
@@ -532,12 +514,12 @@ impl GameBoard{
 
     pub fn get_attackers(&self, sq: usize, attacker_color:Color, board: Bitboard, white_pieces: Bitboard, black_pieces: Bitboard) -> u64{
         let mut attackers = 0u64;
-        let mut opponent = if attacker_color == Color::White {
-            &self.player1 
+        let opponent = if attacker_color == Color::White {
+            &self.player1
         } else {
-            &self.player2 
+            &self.player2
         };
-        let mut opp_color = if attacker_color == Color::White{
+        let opp_color = if attacker_color == Color::White {
             Color::Black
         } else {
             Color::White
@@ -605,11 +587,11 @@ impl GameBoard{
         // If the square immediately in front is blocked, the double-push is also blocked
         let push_direction: i8 = if color == Color::White { 8 } else { -8 };
         let one_step = sq as i8 + push_direction;
-        if one_step >= 0 && one_step < 64 {
+        if (0..64).contains(&one_step) {
             let one_step_sq = 1u64 << one_step as usize;
             if (one_step_sq & board) != 0 {
                 let double_step = sq as i8 + 2 * push_direction;
-                if double_step >= 0 && double_step < 64 {
+                if (0..64).contains(&double_step) {
                     let double_step_sq = 1u64 << double_step as usize;
                     valid_pushes &= !double_step_sq;
                 }
@@ -634,7 +616,7 @@ impl GameBoard{
             hash ^= self.player2.pieces_bb[i].wrapping_mul(0x517cc1b727220a95u64.wrapping_add(i as u64));
         }
         hash ^= (side_to_move as u64).wrapping_mul(0x6c62272e07bb0142);
-        hash ^= (self.white_kingside as u64) << 0;
+        hash ^= self.white_kingside as u64;
         hash ^= (self.white_queenside as u64) << 1;
         hash ^= (self.black_kingside as u64) << 2;
         hash ^= (self.black_queenside as u64) << 3;

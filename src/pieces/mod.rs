@@ -1,4 +1,4 @@
-use crate::{Bitboard, Color, PieceType, Square};
+use crate::{Color, PieceType};
 
 pub trait Piece {
     fn get_piece_type(&self) -> PieceType;

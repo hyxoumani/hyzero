@@ -51,11 +51,11 @@ impl Player {
             panic!("Invalid move notation: {}", notation);
         }
 
-        let from_file = (chars[0] as u8 - b'a') as u8;
+        let from_file = chars[0] as u8 - b'a';
         let from_rank = (chars[1].to_digit(10).unwrap() - 1) as u8;
         let from_idx = from_rank * 8 + from_file;
 
-        let to_file = (chars[2] as u8 - b'a') as u8;
+        let to_file = chars[2] as u8 - b'a';
         let to_rank = (chars[3].to_digit(10).unwrap() - 1) as u8;
         let to_idx = to_rank * 8 + to_file;
 

@@ -1,4 +1,4 @@
-use crate::{Bitboard, Color, PieceType, Square};
+use crate::{Color, PieceType};
 use super::Piece;
 
 pub struct Bishop {
@@ -64,7 +64,7 @@ impl BishopEntry {
     }
 
     pub fn calculate_magic_num(&mut self) {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         let num_var = 1 << self.sig_bits;
 
         let combinations = self.generate_combinations();
@@ -126,7 +126,7 @@ impl BishopEntry {
         for (dr, dc) in dirs {
             for len in 1..8 {
                 let (nr, nc) = (r + dr * len, c + dc * len);
-                if nr < 0 || nr >= 8 || nc < 0 || nc >= 8 { break; }
+                if !(0..8).contains(&nr) || !(0..8).contains(&nc) { break; }
                 let bit = 1 << (nr * 8 + nc);
                 moves |= bit;
                 if (occupied & bit) != 0 { break; }
