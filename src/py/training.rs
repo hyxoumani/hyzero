@@ -241,9 +241,9 @@ impl PyTrainingThread {
             version_tx,
             weight_tx,
             10_000, // max_replay_trajectories
-            256,    // train_batch_size
+            64,     // train_batch_size
             5,      // unroll_k
-            200,    // min_samples
+            50,     // min_samples
             4,      // train_steps_per_game
         ))
     }

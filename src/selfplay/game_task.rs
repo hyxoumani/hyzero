@@ -44,7 +44,7 @@ pub async fn play_game(
     let mut turn_count: usize = 0;
     let mut side_to_move = Color::White;
 
-    const MAX_GAME_LENGTH: usize = 300;
+    const MAX_GAME_LENGTH: usize = 150;
 
     let mcts_config = MCTSConfig {
         num_simulations: config.num_simulations,

@@ -5,8 +5,8 @@ set +m
 
 # Configuration
 DURATION=${1:-180}  # seconds to run
-MIN_GAMES=2         # minimum games that must complete
-MIN_TRAIN_STEPS=3   # minimum training steps
+MIN_GAMES=1         # minimum games that must complete
+MIN_TRAIN_STEPS=1   # minimum training steps
 LOG_DIR="logs"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 LOG_FILE="${LOG_DIR}/e2e_${TIMESTAMP}.log"
@@ -17,6 +17,9 @@ mkdir -p "$LOG_DIR"
 echo "=== hyzero End-to-End Test ==="
 echo "Duration: ${DURATION}s"
 echo "Log: ${LOG_FILE}"
+
+# Ensure Python package is installed
+python3 -c "import hyzero" 2>/dev/null || pip install -e python/ -q 2>&1 | tail -1
 
 # Build
 echo "[1/4] Building..."

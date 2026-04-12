@@ -93,9 +93,9 @@ async fn main() {
         Arc::new(ChannelEvaluator::new(inference_tx));
 
     let selfplay_config = SelfPlayConfig {
-        max_concurrent_games: 4,
+        max_concurrent_games: 8,
         game_config: GameConfig {
-            num_simulations: 50,
+            num_simulations: 25,
             exploration_constant: 1.5,
             temperature_moves: 15,
         },
@@ -109,6 +109,6 @@ async fn main() {
         selfplay_config,
     );
 
-    println!("[selfplay] Starting self-play loop (4 concurrent games, 50 sims/move)");
+    println!("[selfplay] Starting self-play loop (8 concurrent games, 25 sims/move)");
     coordinator.run().await;
 }
