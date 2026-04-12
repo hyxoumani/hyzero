@@ -4,3 +4,4 @@ results.tsv
 run.log
 evals/results/
 *.log
+checkpoints/
