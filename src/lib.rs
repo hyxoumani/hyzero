@@ -388,3 +388,4 @@ pub mod session;
 pub mod data;
 pub mod mcts;
 pub mod selfplay;
+pub mod py;

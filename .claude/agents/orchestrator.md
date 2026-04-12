@@ -103,6 +103,24 @@ the experiment loop entirely. The orchestrator's role is limited to:
 - **Stuck loop**: Same experiment fails 3x with different approaches → skip, log "blocked".
 - **Escalate**: After 3 consecutive skips or out of ideas → write summary and stop.
 
+## Git and worktree discipline
+
+- **Clean worktrees immediately after merge.** After `git merge {branch} --no-edit`,
+  always run `git worktree remove` and `git branch -D` in the same step. Never leave
+  stale worktrees — they get accidentally committed as embedded git repos.
+- **Single writer per file per cycle.** If the context-keeper is assigned to write
+  `docs/wiki/foo.md`, no other agent writes that file in the same cycle. If the
+  context-keeper fails, diagnose why (permissions? timeout? bad output?) and fix
+  the root cause. Do NOT spawn an implementer to write the same file — that creates
+  parallel versions and merge conflicts.
+- **Commit before switching tracks.** Before starting a new task or merging a worktree,
+  ensure the working tree is clean. Uncommitted changes + merge = conflict.
+- **Squash before push, not after.** If using worktrees, plan the commit structure
+  upfront: decide which worktree changes map to which logical commit. Don't merge
+  everything then try to untangle with `reset --soft`.
+- **Never `git add -A` or `git add .`** in repos with worktrees or generated artifacts.
+  Always add specific files by name.
+
 ## Context management
 
 - **Subagent isolation**: Never dump your full conversation into a subagent prompt.

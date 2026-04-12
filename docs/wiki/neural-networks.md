@@ -57,6 +57,9 @@ Total loss = sum / (K+1). Dynamics gradient scaled 1/K.
 3. **Reward**: Per-step (immediate), not cumulative. Real rewards come from trajectory.
 4. **Action encoding**: 4096 = 64×64, queen-default promotion. Underpromotion (4672) unimplemented.
 5. **Value not negated per ply** in backup — intentional, verify during training.
+6. **Reward loss K not K+1**: Only K reward terms (steps 1..K), policy/value have K+1 (steps 0..K). Divide reward loss by K.
+7. **Gradient hook on g output**: `register_hook(lambda grad: grad * 0.5)` on dynamics OUTPUT for correct chained K-step scaling (MuZero Appendix G).
+8. **torch.load deprecation**: Use `weights_only=False` explicitly in PyTorch 2.x to avoid FutureWarning.
 
 ## Related Files
 

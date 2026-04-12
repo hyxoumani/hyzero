@@ -90,7 +90,7 @@
 
 4. **in_check field unused**: Computed dynamically instead of cached. Not a bug, but means recalculation on every validation.
 
-5. **King square lookup**: `get_king_sq()` returns a bitboard (e.g., `1 << 60`), NOT a square index. Convert with `.trailing_zeros()` before array indexing. See board_index_panic.md for history.
+5. **King square lookup**: `get_king_sq()` returns a bitboard (e.g., `1 << 60`), NOT a square index. Convert with `.trailing_zeros()` before array indexing. Bug: direct cast to `usize` causes array out-of-bounds with bitboard value (e.g., `1 << 60 = 1152921504606846976` instead of `60`). Correct pattern: `get_king_sq(color).trailing_zeros() as usize`. See src/game/board.rs lines 266, 292 for example usage.
 
 ## Related Files
 

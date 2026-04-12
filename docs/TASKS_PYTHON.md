@@ -208,5 +208,7 @@ Every task runs as a **subagent** with edit and bash permissions. After each tas
 | Task | Status | Notes |
 |------|--------|-------|
 | 24. Python Project Setup + Models | DONE | Package scaffold, ResidualBlock, h/g/f networks, 9 tests passing |
-| 25. Training Loop + Checkpointing | TODO | |
-| 26. Inference Server | TODO | |
+| 25. Training Loop + Checkpointing | DONE | Trainer with MuZero loss, K-step unroll, gradient scaling, checkpoint save/load, 6 tests |
+| 26. Inference Server | DONE | InferenceServer class, root_setup_batch, expand_leaf_batch, load_weights, 12 tests |
+| 27. MCTS Value Negation Fix | DONE | Fixed MCTSTree::backpropagate() to negate values per ply |
+| 28. PyO3 Integration | DONE | PyO3Backend, PyTrainingThread, batch assembly with zero-padding, weight sync via watch channel |

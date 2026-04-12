@@ -3,7 +3,7 @@
 ## Status
 
 - **Done**: Rust engine, MCTS, self-play pipeline with `RandomBackend` (uniform policies, zero values)
-- **TODO**: PyO3 bindings, real neural network calls (Tasks 24-26)
+- **Done**: PyO3 bindings, real neural network calls via PyO3Backend and PyTrainingThread (Tasks 24-28)
 
 ## Data Flow
 
@@ -48,12 +48,17 @@ InferenceServer.load_weights(bytes) → deserialize → load state dicts
 
 Model version tracked via `watch::Sender<u64>`. Brief stale-weight lag is acceptable.
 
-## TODO: PyO3 Implementation
+## PyO3 Implementation (DONE)
 
-1. Add `pyo3` (feature: full) to `Cargo.toml`; add `build.rs` and `pyproject.toml`
-2. `src/py/mod.rs` — convert `BoardObservation` ↔ numpy; expose `InferenceServer` and `Trainer` class methods
-3. `PyO3Backend` in `src/selfplay/inference.rs` — acquire GIL, call batch methods, release GIL
-4. `PyTrainerThread` — call `train_batch()`, sync weights via `get_weights()`
+1. Added `pyo3 0.28` (feature: full) and `numpy 0.28` to `Cargo.toml`
+2. `src/py/mod.rs` — conversion utilities for `BoardObservation` ↔ numpy; imports of `InferenceServer` and `Trainer` classes
+3. `src/py/inference_backend.rs` — `PyO3Backend` struct implementing `InferenceBackend` trait
+   - Acquires GIL, calls Python `InferenceServer.root_setup_batch()` and `expand_leaf_batch()`
+   - Converts `InferenceRequest` → numpy arrays, distributes results via oneshot channels
+4. `src/py/training.rs` — `PyTrainingThread` replaces stub
+   - Calls `trainer.train_batch(batch)` with zero-padded visit distributions
+   - Syncs weights via `trainer.get_weights()` → `watch::Sender<bytes>`
+   - Weight loading task calls `inference_server.load_weights(bytes)`
 
 ## GIL Strategy
 
@@ -61,9 +66,10 @@ Same-process via `InferenceBackend` trait. One GIL acquisition per batch (~32 re
 
 ## Known Gotchas
 
-1. **Action plane layout**: 3 planes for `g()` input — exact encoding unspecified. Verify `Move → action planes` tensor layout.
-2. **PyO3 panic propagation**: If Python call panics, test whether it poisons the Rust async loop.
-3. **Stale weights**: `watch` channel lag is acceptable but verify no race at model version rollover.
+1. **Visit distribution padding**: StepRecord visit_distribution is sparse (length = num_visits < 4096). PyTrainingThread zero-pads to 4096 for batch assembly. Trainer.train_batch() expects dense [B, K+1, 4096] array.
+2. **PyO3 reference counting**: InferenceServer Py<PyAny> handle must be cloned with `clone_ref()` (not `clone()`) to share between PyO3Backend and weight loading task. Regular `clone()` fails.
+3. **pyo3 0.28 vs 0.22**: Version 0.28 is cleaner — no abi3-py38 needed, works with Python 3.9+. abi3 mode adds complexity; unnecessary here.
+4. **GIL per batch**: One GIL acquisition per 32 requests (~800/move), not per MCTS node. If bottleneck detected, swap for ProcessBackend (Unix socket subprocess, no Rust changes needed).
 
 ## Related Files
 

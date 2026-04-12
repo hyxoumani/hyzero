@@ -5,7 +5,7 @@
 **Per-move flow**:
 1. Encode board → `BoardObservation` (19 planes: 6 piece types × 2 colors + castling + en passant + side + halfmove clock)
 2. Call `evaluator.root_setup(observation)` → (hidden_state, policy, value)
-3. Run N simulations (default 800)
+3. Run N simulations (50 for CPU dev, 200+ for GPU production)
 4. Extract visit count distribution, select action by visits (temperature scheduling)
 5. Apply move, record StepRecord, **discard entire tree** (transient)
 
@@ -14,7 +14,7 @@
 1. **SELECT**: Walk down tree using PUCT = Q(s,a) + P(s,a) * sqrt(N(s)) / (1 + N(s,a))
 2. **EXPAND**: Call g(s, a) → (s_new, reward) in latent space
 3. **EVALUATE**: Call f(s_new) → (policy, value) to initialize children
-4. **BACKUP**: Propagate value to root, increment visit counts (values NOT negated per ply)
+4. **BACKUP**: Propagate value to root with negation per ply, increment visit counts (two-player zero-sum)
 
 ## Inference Batching
 
@@ -26,7 +26,11 @@ Ring buffer (`VecDeque<GameTrajectory>`) with K-step sampling: pick random traje
 
 ## Self-Play Coordinator
 
-Spawns N concurrent games (semaphore gated). Each game: root setup → MCTS → move selection → step record, repeating until terminal. Returns GameTrajectory with outcome and model_version. TrainingThread receives trajectories, adds to replay buffer, periodically samples batches for training and publishes model version updates.
+Spawns N concurrent games (semaphore gated). Each game: root setup → MCTS → move selection → step record, repeating until terminal (or 300-move limit). Returns GameTrajectory with outcome and model_version. TrainingThread receives trajectories, adds to replay buffer, periodically samples batches for training and publishes model version updates.
+
+### Root Noise for Exploration
+
+Dirichlet(0.03) noise added to root policy before move selection. Implemented via Marsaglia-Tsang Gamma sampling (MuZero paper). **WARNING**: Slow in debug mode; use `--release` builds for end-to-end testing.
 
 ## Action Encoding
 
@@ -34,11 +38,15 @@ Action space: 4096 (64×64 from/to, queen default promotion). Encoding: `action 
 
 ## Key Gotchas
 
-1. **Value negation**: NOT negated per ply (unusual, intentional). Verify during training.
-2. **Transient tree**: Discarded after each move. Fresh tree per move, no caching.
-3. **Batch timeout**: Few concurrent games → small batches → lower GPU utilization.
-4. **Stale model data**: Old trajectories in buffer. Loss initially high (bootstrapping).
-5. **Action space mismatch**: 4096 logits vs ~40 legal moves. Network learns suppression.
+1. **Value negation**: Negated per ply during backprop (two-player zero-sum). See `MCTSTree::backpropagate()`: `child.total_value += -value`.
+2. **Dirichlet noise overhead**: Marsaglia-Tsang Gamma sampling for Dir(0.03) is very slow in debug mode. For e2e testing, always use `--release` builds or run the binary directly (not via `cargo run`).
+3. **Game length with Dirichlet**: Games run ~200 moves now (vs ~60 before); correct behavior for better play, but impacts iteration speed.
+4. **Transient tree**: Discarded after each move. Fresh tree per move, no caching.
+5. **Batch timeout tuning**: 10ms timeout is empirical. Few concurrent games → small batches → lower GPU utilization.
+6. **Stale model data**: Old trajectories in buffer. Loss initially high (bootstrapping).
+7. **Action space mismatch**: 4096 logits vs ~40 legal moves. Network learns suppression.
+8. **Visit distribution sparsity**: replay buffer stores StepRecord with visit counts for each move. Array is sparse (length = num_visits). PyTrainingThread zero-pads to 4096 before passing to trainer.
+9. **Stdout buffering in scripts**: `cargo run` buffers output. For log capture in shell scripts, run the binary directly: `target/release/selfplay` instead of `cargo run --bin selfplay`.
 
 ## Related Files
 

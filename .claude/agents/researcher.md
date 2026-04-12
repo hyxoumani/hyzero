@@ -22,6 +22,9 @@ Read `.claude/PRINCIPLES.md` — principle #9 (search before building) is your p
    read them. The wiki contains synthesized knowledge from all previous sessions —
    it's the fastest way to understand what the project already knows about a topic.
    Start from what's known, then explore what's new.
+3. **Check the mistakes log**: Read `docs/wiki/mistakes.md`. Scan for mistakes in the
+   domain you're researching. Include relevant past mistakes in your context summary
+   so downstream agents (planner, implementer) are aware of known pitfalls.
 
 ## Research process
 

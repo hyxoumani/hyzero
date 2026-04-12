@@ -3,6 +3,72 @@ use crate::mcts::evaluator::Evaluator;
 use crate::mcts::node::MCTSNode;
 use crate::mcts::puct::select_child;
 
+/// Exploration fraction for Dirichlet noise at the root.
+const NOISE_EPSILON: f32 = 0.25;
+/// Dirichlet concentration parameter (alpha) for chess.
+const NOISE_ALPHA: f32 = 0.03;
+
+/// Sample from a Dirichlet(alpha, ..., alpha) distribution of length `n`.
+///
+/// Uses Gamma(alpha, 1) sampling via the Marsaglia-Tsang method for alpha < 1,
+/// then normalizes. Returns a uniform distribution if `n == 0`.
+fn dirichlet_noise(n: usize) -> Vec<f32> {
+    if n == 0 {
+        return Vec::new();
+    }
+
+    use rand::Rng;
+    let mut rng = rand::rng();
+
+    // Gamma(alpha, 1) samples via Marsaglia-Tsang for alpha < 1:
+    // Let Y ~ Gamma(alpha+1, 1) and U ~ Uniform(0,1).
+    // Then X = Y * U^(1/alpha) ~ Gamma(alpha, 1).
+    let alpha = NOISE_ALPHA;
+    let d = alpha + 1.0 - 1.0 / 3.0;   // alpha+1 shifted for M-T
+    let c = 1.0 / (9.0 * d).sqrt();
+
+    let mut samples: Vec<f32> = (0..n)
+        .map(|_| {
+            // Marsaglia-Tsang for Gamma(alpha+1, 1)
+            let y_gamma = loop {
+                let x: f32 = rng.random::<f32>() * 6.0 - 3.0; // rough normal approx
+                // Use Box-Muller for a proper normal sample
+                let u1: f32 = rng.random::<f32>();
+                let u2: f32 = rng.random::<f32>();
+                let z = (-2.0 * u1.ln()).sqrt() * (2.0 * std::f32::consts::PI * u2).cos();
+                let v = (1.0 + c * z).powi(3);
+                if v <= 0.0 {
+                    let _ = x; // suppress unused warning
+                    continue;
+                }
+                let u: f32 = rng.random::<f32>();
+                let z2 = z * z;
+                if u < 1.0 - 0.0331 * z2 * z2 {
+                    break d * v;
+                }
+                if u.ln() < 0.5 * z2 + d * (1.0 - v + v.ln()) {
+                    break d * v;
+                }
+            };
+            // Apply Y * U^(1/alpha) transformation
+            let u: f32 = rng.random::<f32>();
+            y_gamma * u.powf(1.0 / alpha)
+        })
+        .collect();
+
+    let sum: f32 = samples.iter().sum();
+    if sum > 0.0 {
+        for s in &mut samples {
+            *s /= sum;
+        }
+    } else {
+        // Degenerate: return uniform
+        let uniform = 1.0 / n as f32;
+        samples.fill(uniform);
+    }
+    samples
+}
+
 /// Configuration for MCTS search.
 #[derive(Debug, Clone)]
 pub struct MCTSConfig {
@@ -39,6 +105,16 @@ impl MCTSTree {
         // Root gets one visit with its initial value
         root.visit_count = 1;
         root.total_value = root_value;
+
+        // Mix Dirichlet noise into root priors for exploration diversity.
+        // P(a) = (1 - ε) * P(a) + ε * η_a, where η ~ Dir(α).
+        let n = root.priors.len();
+        if n > 0 {
+            let noise = dirichlet_noise(n);
+            for (prior, eta) in root.priors.iter_mut().zip(noise.iter()) {
+                *prior = (1.0 - NOISE_EPSILON) * *prior + NOISE_EPSILON * eta;
+            }
+        }
 
         Self { root, config }
     }
@@ -128,8 +204,8 @@ impl MCTSTree {
         for &idx in path {
             let child = node.children[idx].as_mut().unwrap();
             child.visit_count += 1;
-            // Value is negated at each level (opponent's perspective)
-            child.total_value += value;
+            // Negate value at each level: child is evaluated from the opponent's perspective
+            child.total_value += -value;
             node = node.children[idx].as_mut().unwrap();
         }
     }

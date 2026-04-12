@@ -3,6 +3,9 @@
 Knowledge base maintained by the context-keeper. Pages are synthesized from
 session findings, reviewer feedback, experiments, and architectural decisions.
 
+## Project
+- [Project Roadmap](project-roadmap.md) — current state, next tasks, known risks
+
 ## Engine Core
 - [Chess Engine](chess-engine.md) — board representation, move generation, validation gotchas
 
@@ -12,3 +15,6 @@ session findings, reviewer feedback, experiments, and architectural decisions.
 
 ## Integration
 - [Rust-Python Integration](rust-python-integration.md) — FFI boundary, data flow, PyO3 status
+
+## Development
+- [Dev Workflow & Framework](dev-workflow.md) — orchestration, agents, worktree patterns, memory system

@@ -57,6 +57,10 @@ domain before exploring code. The wiki is pre-synthesized knowledge — faster a
 complete than re-discovering from source. If you find stale wiki content, flag it in
 your output so the context-keeper can fix it.
 
+**Mistakes log**: `docs/wiki/mistakes.md` records past agent failures with root cause
+analysis and error classification. Check it before starting work in any domain to avoid
+repeating known mistakes. Mistakes escalate: gotcha → rule → hook.
+
 ## Context Management
 
 IMPORTANT: When compacting, always preserve the full list of modified files, the current

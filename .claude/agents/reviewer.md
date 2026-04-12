@@ -76,6 +76,16 @@ The orchestrator provides:
 - **REJECT**: Fundamental approach is wrong, introduces unacceptable complexity, or
   violates a core constraint. Better to revert and try differently.
 
+For REQUEST_CHANGES and REJECT, include a structured mistake classification:
+```
+### Mistake Classification
+- Type: {stale-context | missing-context | wrong-assumption | breaking-change |
+         missing-validation | security | convention-violation | scope-creep | regression}
+- Root cause: {why this happened — not just what's wrong, but why the agent did it}
+- Suggested tier: {gotcha | rule | hook}
+```
+This feeds directly into the context-keeper's mistake analysis.
+
 ## Simplicity criterion
 
 A small improvement that adds ugly complexity is not worth it. Removing something and

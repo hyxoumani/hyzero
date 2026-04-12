@@ -9,3 +9,5 @@ tokio = {version = "1", features = ["full"]}
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
 bincode = "1"
+pyo3 = { version = "0.28", features = ["auto-initialize"] }
+numpy = "0.28"

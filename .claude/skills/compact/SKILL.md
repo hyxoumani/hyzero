@@ -81,7 +81,32 @@ if the update connects to pages not yet linked.
 Update `docs/wiki/index.md` to include any new pages. Group pages by domain, not
 alphabetically.
 
-### Step 5: Lint pass
+### Step 5: Mistake pattern detection
+
+Read `docs/wiki/mistakes.md`. Analyze logged mistakes for systemic patterns:
+
+1. **Type clustering**: Are 3+ mistakes sharing the same error type (e.g., `missing-context`,
+   `wrong-assumption`)? This signals a pipeline problem, not an agent problem.
+   - `missing-context` cluster → orchestrator briefs need more context, or wiki is incomplete
+   - `wrong-assumption` cluster → researcher isn't verifying claims against code
+   - `breaking-change` cluster → reviewer needs to grep for callers more aggressively
+   - `stale-context` cluster → wiki pages are outdated, run lint pass
+
+2. **Domain clustering**: Are 3+ mistakes in the same domain? That area needs:
+   - A dedicated wiki page if one doesn't exist
+   - Richer gotchas if the page exists but mistakes keep happening
+   - A path-scoped rule in `.claude/rules/` for automated enforcement
+
+3. **Escalation audit**: Are any mistakes still at **gotcha** tier but recurring?
+   Escalate to **rule** or **hook**. The goal is: every recurring mistake eventually
+   becomes automated prevention.
+
+4. **Root cause depth**: Are root cause chains consistently shallow ("wrong output")?
+   Push for deeper analysis — the systemic cause is what prevents recurrence.
+
+Report patterns found and escalation recommendations.
+
+### Step 6: Lint pass
 
 Audit all documentation for health:
 
@@ -92,10 +117,11 @@ Audit all documentation for health:
    not linked from index or other pages? Any `CONTRADICTION` flags that can now be
    resolved?
 4. **Cross-references**: Grep wiki pages for topics mentioned but not linked.
+5. **Mistakes log**: Any mistakes marked "pending" escalation that can now be resolved?
 
 Fix issues in-place.
 
-### Step 6: Log and summarize
+### Step 7: Log and summarize
 
 Append to `docs/log.md`:
 ```

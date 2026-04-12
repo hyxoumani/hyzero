@@ -29,7 +29,10 @@ The orchestrator provides:
 2. If wiki page paths were provided, read them — especially the **Gotchas** and
    **Key decisions** sections. These capture past mistakes and constraints that
    aren't obvious from the code alone.
-3. Read the existing code in your assigned files to understand current state.
+3. **Check the mistakes log**: Read `docs/wiki/mistakes.md`. Scan for mistakes in
+   your domain and file area. If a past mistake is relevant to your subtask, factor
+   it into your approach — don't repeat what already failed.
+4. Read the existing code in your assigned files to understand current state.
 3. Implement the changes. Match existing code style exactly.
 4. Run the build command. Fix any compilation/build errors.
 5. Run the relevant tests. Fix any test failures.
@@ -54,8 +57,16 @@ The orchestrator provides:
 - Build error: Read the error, fix it, retry. Max 3 attempts.
 - Test failure: Read the failure output, fix the code (not the test unless the test is
   wrong), retry. Max 3 attempts.
-- After 3 failures: Stop. Return the error output and what you tried. The orchestrator
-  will decide whether to retry with a different approach or skip.
+- After 3 failures: Stop. Return a structured failure report to the orchestrator:
+  ```
+  Failure report:
+  - Task: {subtask description}
+  - Files: {files touched}
+  - Attempts: {what was tried each time}
+  - Errors: {error output from each attempt}
+  - Diagnosis: {your best understanding of why it failed}
+  ```
+  The orchestrator will pass this to the context-keeper for mistake logging.
 
 ## Isolation
 

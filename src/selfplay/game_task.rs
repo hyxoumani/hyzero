@@ -44,6 +44,8 @@ pub async fn play_game(
     let mut turn_count: usize = 0;
     let mut side_to_move = Color::White;
 
+    const MAX_GAME_LENGTH: usize = 300;
+
     let mcts_config = MCTSConfig {
         num_simulations: config.num_simulations,
         exploration_constant: config.exploration_constant,
@@ -51,6 +53,11 @@ pub async fn play_game(
 
     loop {
         if board.result() != GameResult::Ongoing {
+            break;
+        }
+
+        if turn_count >= MAX_GAME_LENGTH {
+            // Treat as draw — prevents runaway games
             break;
         }
 

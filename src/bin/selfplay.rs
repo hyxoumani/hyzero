@@ -1,11 +1,14 @@
 use std::sync::Arc;
 
+use pyo3::prelude::*;
+use pyo3::types::PyBytes;
 use tokio::sync::{mpsc, watch};
 
 use hyzero::PrecomputedItems;
+use hyzero::py::{PyO3Backend, PyTrainingThread};
 use hyzero::selfplay::{
-    InferenceBatcher, BatcherConfig, RandomBackend, ChannelEvaluator,
-    SelfPlayConfig, SelfPlayCoordinator, TrainingConfig, TrainingThread,
+    InferenceBatcher, BatcherConfig, ChannelEvaluator,
+    SelfPlayConfig, SelfPlayCoordinator,
 };
 use hyzero::selfplay::game_task::GameConfig;
 
@@ -21,12 +24,38 @@ async fn main() {
     let (inference_tx, inference_rx) = mpsc::channel(256);
     let (trajectory_tx, trajectory_rx) = mpsc::channel(64);
     let (version_tx, version_rx) = watch::channel(1u64);
+    let (weight_tx, weight_rx) = watch::channel::<Option<Vec<u8>>>(None);
 
-    // 3. Spawn inference batcher with random backend
-    let backend = Box::new(RandomBackend::new(64));
+    // 3. Create the Python InferenceServer first so we can share it.
+    //    We need one reference for the backend and a clone for the weight loader.
+    println!("[selfplay] Creating Python InferenceServer...");
+    let server: Py<PyAny> = Python::attach(|py| {
+        let config = PyModule::import(py, "hyzero.config")
+            .expect("hyzero Python package not found — ensure it is installed")
+            .getattr("DEFAULT_CONFIG")
+            .expect("DEFAULT_CONFIG missing from hyzero.config")
+            .into_pyobject(py)
+            .expect("into_pyobject failed")
+            .unbind();
+        let cls = PyModule::import(py, "hyzero.inference.server")
+            .expect("hyzero.inference.server not found")
+            .getattr("InferenceServer")
+            .expect("InferenceServer class not found");
+        let srv: Py<PyAny> = cls
+            .call1((config, "cpu"))
+            .expect("InferenceServer() constructor failed")
+            .unbind();
+        srv
+    });
+
+    // Clone the Py<PyAny> ref-counted handle for the weight loader task.
+    let server_for_weights: Py<PyAny> = Python::attach(|py| server.clone_ref(py));
+
+    // 4. Spawn inference batcher with the PyO3Backend.
+    let backend = Box::new(PyO3Backend::new(server, 64));
     let batcher_config = BatcherConfig {
         max_batch_size: 32,
-        batch_timeout_ms: 1,
+        batch_timeout_ms: 10,
     };
     let mut batcher = InferenceBatcher::new(inference_rx, backend, batcher_config);
     tokio::spawn(async move {
@@ -34,21 +63,32 @@ async fn main() {
         println!("[selfplay] Inference batcher stopped");
     });
 
-    // 4. Spawn training thread
-    let training_config = TrainingConfig {
-        min_samples_before_training: 100,
-        train_batch_size: 32,
-        unroll_k: 5,
-        max_replay_trajectories: 1_000,
-        checkpoint_interval: 50,
-        ..TrainingConfig::default()
-    };
-    let mut training = TrainingThread::new(trajectory_rx, version_tx, training_config);
+    // 5. Spawn training thread backed by the Python Trainer.
+    println!("[selfplay] Creating Python Trainer...");
+    let mut training = PyTrainingThread::from_default_config("cpu", trajectory_rx, version_tx, weight_tx)
+        .expect("Failed to create PyTrainingThread — is hyzero Python package installed?");
     tokio::spawn(async move {
         training.run().await;
     });
 
-    // 5. Create evaluator and coordinator
+    // 6. Spawn weight loader: watch for new weights and push them into the InferenceServer.
+    let mut weight_rx_task = weight_rx;
+    tokio::spawn(async move {
+        while weight_rx_task.changed().await.is_ok() {
+            let maybe_weights = weight_rx_task.borrow_and_update().clone();
+            if let Some(bytes) = maybe_weights {
+                Python::attach(|py| {
+                    let py_bytes = PyBytes::new(py, &bytes);
+                    if let Err(e) = server_for_weights.call_method1(py, "load_weights", (py_bytes,)) {
+                        eprintln!("[selfplay] load_weights error: {e}");
+                    }
+                });
+            }
+        }
+        println!("[selfplay] Weight loader stopped");
+    });
+
+    // 7. Create evaluator and coordinator.
     let evaluator: Arc<dyn hyzero::mcts::evaluator::Evaluator> =
         Arc::new(ChannelEvaluator::new(inference_tx));
 
