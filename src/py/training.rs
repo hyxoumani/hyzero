@@ -278,17 +278,18 @@ impl PyTrainingThread {
     /// broadcasting the restored weights so game loops use them immediately.
     pub fn load_checkpoint(&mut self, path: &str) -> PyResult<()> {
         let (model_version, weights) = Python::attach(|py| -> PyResult<(u64, Vec<u8>)> {
-            let result = self.trainer.call_method1(py, "load_checkpoint", (path,))?;
-            let bound = result.bind(py);
-            let version: u64 = bound.get_item("model_version")?.extract()?;
+            // Call load_checkpoint (ignore the return value — it's just eval_metrics)
+            self.trainer.call_method1(py, "load_checkpoint", (path,))?;
+            // Read model_version from the trainer object attribute (Python sets self.model_version during load)
+            let version: u64 = self.trainer.getattr(py, "model_version")?.extract(py)?;
             let raw = self.trainer.call_method0(py, "get_weights")?;
             let bytes: Vec<u8> = raw.bind(py).extract()?;
             Ok((version, bytes))
         })?;
 
         self.model_version = model_version;
-        let _ = self.version_tx.send(self.model_version);
         let _ = self.weight_tx.send(Some(weights));
+        let _ = self.version_tx.send(self.model_version);
         println!("[py_training] Resumed from checkpoint: {path} (model v{})", self.model_version);
         Ok(())
     }
@@ -587,7 +588,9 @@ mod tests {
         let dir = tempfile::tempdir().expect("failed to create tempdir");
         let ckpt_path = dir.path().join("model_v000042.pt").to_string_lossy().to_string();
 
-        // Create an initial trainer, train 0 steps, set version to 42, save checkpoint
+        // Create an initial trainer, call train_batch 42 times to advance model_version to 42,
+        // then save a checkpoint. Production code does NOT insert model_version into metrics —
+        // save_checkpoint writes self.model_version from the trainer object directly.
         let trainer_py = Python::attach(|py| -> PyResult<Py<PyAny>> {
             let config = PyModule::import(py, "hyzero.config")?
                 .getattr("DEFAULT_CONFIG")?
@@ -596,9 +599,11 @@ mod tests {
             let cls = PyModule::import(py, "hyzero.training.trainer")?.getattr("Trainer")?;
             let trainer: Py<PyAny> = cls.call1((config, "cpu"))?.unbind();
 
-            // save_checkpoint(path, metrics) — metrics dict can include model_version
+            // Set model_version=42 directly on the Python object (simulates 42 training steps)
+            trainer.setattr(py, "model_version", 42u64)?;
+
+            // save_checkpoint(path, metrics) — pass empty metrics dict (production behavior)
             let metrics = PyDict::new(py);
-            metrics.set_item("model_version", 42u64)?;
             trainer.call_method1(py, "save_checkpoint", (&ckpt_path, metrics))?;
             Ok(trainer)
         })

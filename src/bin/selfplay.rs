@@ -10,7 +10,7 @@ use hyzero::py::{PyO3Backend, PyTrainingThread};
 use hyzero::selfplay::{
     InferenceBatcher, BatcherConfig, ChannelEvaluator,
     SelfPlayConfig, SelfPlayCoordinator,
-    EvaluationConfig, EvaluationTask, RandomEvaluator,
+    EvaluationConfig, EvaluationTask,
 };
 use hyzero::selfplay::game_task::GameConfig;
 use hyzero::mcts::evaluator::Evaluator;
@@ -159,6 +159,8 @@ async fn main() {
     });
 
     // 7. Create evaluator and coordinator.
+    // Clone inference_tx so the evaluation task can also send requests to the same batcher.
+    let eval_inference_tx = inference_tx.clone();
     let evaluator: Arc<dyn Evaluator> =
         Arc::new(ChannelEvaluator::new(inference_tx));
 
@@ -179,8 +181,8 @@ async fn main() {
         selfplay_config,
     );
 
-    // 8. Spawn evaluation task — runs games against itself to track learning signal.
-    let eval_evaluator: Arc<dyn Evaluator> = Arc::new(RandomEvaluator);
+    // 8. Spawn evaluation task — runs model-vs-itself games to track learning signal.
+    let eval_evaluator: Arc<dyn Evaluator> = Arc::new(ChannelEvaluator::new(eval_inference_tx));
     let eval_config = EvaluationConfig {
         eval_interval_steps: config.eval_interval_steps,
         eval_games: config.eval_games,

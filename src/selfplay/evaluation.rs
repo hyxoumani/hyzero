@@ -143,7 +143,7 @@ impl EvaluationTask {
 
             println!(
                 "[eval] v{version} white_wins={ww} black_wins={bw} draws={draws} \
-                 white_win_rate={wwr:.2} decisive_ratio={dr:.2} avg_length={avg:.1} vs_self",
+                 white_win_rate={wwr:.2} decisive_ratio={dr:.2} avg_length={avg:.1} self_play",
                 version = current_version,
                 ww = white_wins,
                 bw = black_wins,
