@@ -1,7 +1,7 @@
-use crate::{Color, CastleOption, Piece};
+use crate::create_own_board;
 use crate::game::Move;
 use crate::PieceType;
-use crate::create_own_board;
+use crate::{CastleOption, Color, Piece};
 use std::io::{self, Write};
 
 #[derive(Debug, Clone)]
@@ -13,7 +13,6 @@ pub struct Player {
 }
 
 impl Player {
-
     pub fn init_player(is_white: bool) -> Self {
         if is_white {
             Self::new_white()
@@ -36,7 +35,7 @@ impl Player {
             color: Color::White,
             pieces_bb: bbs,
             pieces: 0x000000000000FFFF,
-            own_board: create_own_board(Color::White)
+            own_board: create_own_board(Color::White),
         }
     }
 
@@ -76,21 +75,22 @@ impl Player {
             None
         };
 
-        let promotion_piece_type = if piece_type == Some(PieceType::Pawn) && (to_rank == 7 || to_rank == 0) {
-            if chars.len() == 5 {
-                match chars[4] {
-                    'q' | 'Q' => Some(PieceType::Queen),
-                    'r' | 'R' => Some(PieceType::Rook),
-                    'b' | 'B' => Some(PieceType::Bishop),
-                    'n' | 'N' => Some(PieceType::Knight),
-                    _ => Some(PieceType::Queen),
+        let promotion_piece_type =
+            if piece_type == Some(PieceType::Pawn) && (to_rank == 7 || to_rank == 0) {
+                if chars.len() == 5 {
+                    match chars[4] {
+                        'q' | 'Q' => Some(PieceType::Queen),
+                        'r' | 'R' => Some(PieceType::Rook),
+                        'b' | 'B' => Some(PieceType::Bishop),
+                        'n' | 'N' => Some(PieceType::Knight),
+                        _ => Some(PieceType::Queen),
+                    }
+                } else {
+                    Some(PieceType::Queen)
                 }
             } else {
-                Some(PieceType::Queen)
-            }
-        } else {
-            None
-        };
+                None
+            };
 
         Move {
             from: from_idx.into(),
@@ -115,7 +115,7 @@ impl Player {
             color: Color::Black,
             pieces_bb: bbs,
             pieces: 0xFFFF000000000000,
-            own_board: create_own_board(Color::Black)
+            own_board: create_own_board(Color::Black),
         }
     }
 
