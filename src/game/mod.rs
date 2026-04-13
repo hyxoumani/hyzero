@@ -1,12 +1,14 @@
 pub mod board;
-pub mod playerobj;
 pub mod externplayer;
+pub mod fen;
 pub mod history;
+pub mod playerobj;
 
-pub use playerobj::Player;
-pub use board::GameBoard;
-use crate::{PieceType, Square, CastleOption};
 use crate::PrecomputedItems;
+use crate::{CastleOption, PieceType, Square};
+pub use board::GameBoard;
+pub use fen::board_from_fen;
+pub use playerobj::Player;
 use std::sync::Arc;
 
 #[derive(Default, Copy, Debug, Clone)]
@@ -24,7 +26,11 @@ pub struct GameState {
 }
 
 impl GameState {
-    pub fn init_game_state(precomputed_items: Arc<PrecomputedItems>, player1: Player, player2: Player) -> Self {
+    pub fn init_game_state(
+        precomputed_items: Arc<PrecomputedItems>,
+        player1: Player,
+        player2: Player,
+    ) -> Self {
         Self {
             game_state: GameBoard::init_game_board(precomputed_items, player1, player2),
         }
