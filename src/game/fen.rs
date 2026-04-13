@@ -152,7 +152,7 @@ pub fn board_from_fen(
 
     // ---- Assemble the board ----
     let combined_pieces = white_combined | black_combined;
-    let board = GameBoard {
+    let mut board = GameBoard {
         player1,
         player2,
         board_arr,
@@ -174,6 +174,8 @@ pub fn board_from_fen(
         position_history: HashMap::new(),
         zobrist_hash,
     };
+    // Count the initial position as the first occurrence
+    board.position_history.insert(board.zobrist_hash, 1);
 
     Ok((board, side_to_move, fullmove_number))
 }

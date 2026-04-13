@@ -45,7 +45,7 @@ pub fn perft(
 }
 
 /// Collect all legal moves for the given color, including all promotion types.
-fn get_legal_moves_for_perft(board: &GameBoard, color: Color) -> Vec<Move> {
+pub fn get_legal_moves_for_perft(board: &GameBoard, color: Color) -> Vec<Move> {
     let mut moves = Vec::new();
     let combined = board.white_pieces | board.black_pieces;
 
