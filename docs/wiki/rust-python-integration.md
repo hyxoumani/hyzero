@@ -38,7 +38,7 @@ RootSetup:   observations[B,19,8,8] → hidden[B,64,8,8], policies[B,4096], valu
 ExpandLeaf:  hidden[B,64,8,8] + actions[B,3,8,8] → next_hidden, rewards[B], policies[B,4096], values[B]
 ```
 
-## Weight Sync
+## Weight Sync & Checkpointing
 
 ```
 Trainer.train_batch() → Trainer.get_weights() → bytes (torch.save)
@@ -47,6 +47,20 @@ InferenceServer.load_weights(bytes) → deserialize → load state dicts
 ```
 
 Model version tracked via `watch::Sender<u64>`. Brief stale-weight lag is acceptable.
+
+### Checkpoint Save
+
+Every `checkpoint_interval_steps` training steps (default 50):
+1. `trainer.save_checkpoint(path)` — saves full model state to disk (zero-padded filename: `model_v000050.pt`)
+2. Rust tracks saved files in `VecDeque<PathBuf>`, prunes oldest when count exceeds `checkpoint_keep_last` (default 5)
+
+### Checkpoint Load (Resume)
+
+`PyTrainingThread::load_checkpoint(path)`:
+1. Python: `trainer = load_checkpoint(path)` — deserializes model state from disk
+2. PyO3: Read `model_version` from trainer object attribute (`trainer.getattr("model_version")`)
+3. Return `(model_version, weights)` to Rust
+4. Weights pushed to InferenceServer via watch channel; game tasks resume with loaded model
 
 ## PyO3 Implementation (DONE)
 

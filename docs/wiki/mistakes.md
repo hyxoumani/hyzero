@@ -159,6 +159,32 @@ Copy-paste error from earlier code that may have predated Queen sliding piece su
 
 ---
 
+## 2026-04-13: PyO3 Test Mock Data — Production Code Mismatch
+
+**Date**: 2026-04-13
+**Agent**: Implementation agent (Task 32.3 — checkpoint resume)
+**Domain**: Rust-Python Integration (PyO3)
+**Error Type**: Quality — test setup masking production bug
+
+**What happened**: `test_resume_checkpoint_restores_model_version` passed, but production `load_checkpoint()` was reading `model_version` from the wrong source. Test constructed a mock Python return dict and manually inserted `"model_version"` into it. Production code attempted to read from this dict, but the Python trainer object never populated it. The bug would have caused a panic at runtime with real checkpoints.
+
+**Root Cause**: Test setup did not match production Python behavior. Production `load_checkpoint()` in Python trainer saves model state but does not return model_version in a dict. Instead, it's available as a trainer object attribute (`trainer.model_version`). The test mocked a return dict, and production code was written to read from it. The mock made the test pass, but the code would fail at runtime.
+
+```rust
+// WRONG (what was written):
+let version_dict: Py<PyDict> = ...;  // mock dict with "model_version" key
+let version: u64 = version_dict.getattr(py, "model_version")?.extract(py)?;
+
+// RIGHT (what was fixed):
+let version: u64 = self.trainer.getattr(py, "model_version")?.extract(py)?;
+```
+
+**Fix**: Changed `load_checkpoint()` to read `model_version` directly from the trainer object attribute via `trainer.getattr("model_version")` instead of expecting it in a return dict. Updated test to match.
+
+**Escalation Tier**: Rule — add to `.claude/rules/testing.md` or create new `.claude/rules/pyo3.md`: "When testing PyO3 return values, verify the test setup matches what production Python code actually returns. Don't manually insert values that production code never provides. Mock data should mirror real Python behavior or use a fixture that does."
+
+---
+
 ## Escalation Tiers
 
 Mistakes escalate from manual avoidance to automation:

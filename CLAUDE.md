@@ -15,8 +15,8 @@ coordinator) with a Python neural network layer (PyTorch models) bridged via PyO
 cargo build
 
 # Test
-cargo test                   # Rust tests (80 tests)
-cargo test --release -- --ignored  # + slow perft tests
+cargo test                   # Rust tests (89 total: 82 pass, 7 ignored)
+cargo test --release -- --ignored  # + slow perft and Python-dependent tests
 python3 scripts/cross_validate.py --all  # vs python-chess oracle
 cd python && pytest          # Python tests
 bash scripts/e2e_test.sh     # End-to-end validation
@@ -31,6 +31,9 @@ cargo run --bin server       # game server
 cargo run --bin client       # client
 cargo run --bin selfplay     # self-play training loop
 cargo run --release --bin perft -- <FEN> <depth>  # perft CLI
+
+# Baseline
+bash scripts/run_baseline.sh 1800    # 30-min training run, outputs score to logs/baseline_score.json
 ```
 
 ## Architecture
@@ -94,10 +97,13 @@ subtask being worked on, and any test commands or error output from the most rec
 
 ## Metric
 
-- **Name**: `_TBD_`
-- **Direction**: `_TBD_` (lower/higher is better)
-- **Run command**: `_TBD_`
-- **Extract command**: `_TBD_`
-- **Time budget**: `300s`
+- **Name**: `training_score`
+- **Direction**: higher is better
+- **Formula**: `(8.55 - final_policy_loss) + (decisive_ratio * 10) - (avg_game_length / 100)`
+- **Run command**: `bash scripts/run_baseline.sh 1800`
+- **Extract command**: `python3 -c "import json; print(json.load(open('logs/baseline_score.json'))['score'])"`
+- **Time budget**: `1800s`
+- **Baseline**: `4.78` (commit c1e5cdc, 2026-04-13)
+- **Components**: Policy loss decrease (network learning), decisive game ratio (tactical play), shorter games (efficiency)
 
 <!-- BOOTSTRAPPED: Do not remove this marker. /bootstrap uses it to detect re-runs. -->

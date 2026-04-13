@@ -26,11 +26,31 @@ Ring buffer (`VecDeque<GameTrajectory>`) with K-step sampling: pick random traje
 
 ## Self-Play Coordinator
 
-Spawns N concurrent games (semaphore gated). Each game: root setup → MCTS → move selection → step record, repeating until terminal (or 300-move limit). Returns GameTrajectory with outcome and model_version. TrainingThread receives trajectories, adds to replay buffer, periodically samples batches for training and publishes model version updates.
+Spawns N persistent long-lived tokio game loop tasks (no semaphore gating). Each task loops indefinitely: read current `model_version` from watch channel → play one game → send GameTrajectory → repeat. Each game: root setup → MCTS → move selection → step record, repeating until terminal (or 300-move limit). GameTrajectory tagged with model_version and outcome. Awaits all JoinHandles on shutdown.
+
+**Design**: No semaphore — tasks are persistent, not spawned per game. This reduces overhead and scales cleanly to many concurrent games. Watch channel updates when trainer publishes new weights, ensuring game tasks always use current model.
 
 ### Root Noise for Exploration
 
 Dirichlet(0.03) noise added to root policy before move selection. Implemented via Marsaglia-Tsang Gamma sampling (MuZero paper). **WARNING**: Slow in debug mode; use `--release` builds for end-to-end testing.
+
+## Checkpoint Management
+
+`PyTrainingThread` manages rolling window of saved checkpoints with zero-padded filenames (`model_v000050.pt`). Every `checkpoint_interval_steps` training steps (default 50), saves weights to disk. Maintains list of saved files in `VecDeque<PathBuf>`, prunes oldest when window size exceeds `checkpoint_keep_last` (default 5).
+
+### Resume from Checkpoint
+
+`from_default_config(resume_checkpoint: Option<&str>)` loads a prior checkpoint. PyO3 call loads weights into trainer, reads `model_version` from trainer object attribute, returns both. Weights pushed to InferenceServer, `model_version` published via watch channel. All inference and game tasks resume from the loaded model state.
+
+## Evaluation Task
+
+Separate async task watches `model_version` via watch channel. When version advances by `eval_interval_steps` (default 200), spawns `eval_games` (default 10) self-play games using the current model playing against itself (ChannelEvaluator, not random). After all games complete, logs statistics:
+- `white_wins`, `black_wins`, `draws`
+- `white_win_rate` (white_wins / total)
+- `decisive_ratio` ((white_wins + black_wins) / total)
+- `avg_length` (mean game length)
+
+Provides continuous signal of model quality during training. Runs in parallel with main self-play loop.
 
 ## Action Encoding
 
