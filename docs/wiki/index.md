@@ -18,5 +18,6 @@ session findings, reviewer feedback, experiments, and architectural decisions.
 - [Rust-Python Integration](rust-python-integration.md) — FFI boundary, data flow, PyO3 status
 
 ## Development
+- [Testing Procedures](testing.md) — commands, cross-validation, perft CLI, edge cases
 - [Dev Workflow & Framework](dev-workflow.md) — orchestration, agents, worktree patterns, memory system
 - [Mistakes Log](mistakes.md) — agent failure cases with root cause analysis, error classification, escalation tiers
