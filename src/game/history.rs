@@ -19,8 +19,14 @@ impl GameHistory {
         }
     }
 
-    pub fn record_move(&mut self, color_prefix: &str, notation: &str, board_state: [Option<Piece>; 64]) {
-        self.move_history.push(format!("{}: {}", color_prefix, notation));
+    pub fn record_move(
+        &mut self,
+        color_prefix: &str,
+        notation: &str,
+        board_state: [Option<Piece>; 64],
+    ) {
+        self.move_history
+            .push(format!("{}: {}", color_prefix, notation));
         self.board_snapshots.push(board_state);
     }
 }
