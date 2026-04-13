@@ -2,99 +2,62 @@
 
 ## Board Representation
 
-**Bitboards**: `u64` where bit position = square (rank-major: `sq = rank*8 + file`, A1=0, H8=63)
+**Bitboards**: `u64` where bit position = square (rank-major: `sq = rank*8 + file`, A1=0, H8=63). Per-player: `pieces_bb[6]` (one per PieceType). Mailbox fallback: `own_board[64]` for validation.
 
-**Magic bitboards**: Pre-computed lookup tables for rook/bishop move generation (O(1) per piece):
-- `RookEntry` / `BishopEntry` contain: `mask`, `magic_num`, `sig_bits`, `magic_table`
-- Lookup: `table[(mask & occupancy).wrapping_mul(magic) >> (64 - sig_bits)]`
-- Pre-calculated at startup via `PrecomputedItems::begin_precomputing()` (takes ~1s)
+**Zobrist hashing**: 781 pseudo-random 64-bit values (splitmix64-seeded), one per piece/square combo. Maintained incrementally across all operations. Collision probability < 1 in 10^9. Replaces old `wrapping_mul` hash.
 
-**Piece representation**:
-- Per-player: `pieces_bb[6]` (u64 array, one per PieceType)
-- Mailbox fallback: `own_board[64]` (Option<Piece>), used for move validation
+**Magic bitboards** (O(1) move gen): Pre-computed tables indexed by occupancy. Rook/bishop entries contain `mask`, `magic_num`, `sig_bits`, `magic_table`. Pre-calculated at startup (~1s).
 
 ## Move Generation
 
-**Entry point**: `GameBoard::get_move_mask(square, color)` — dispatches by piece type
+**Entry point**: `GameBoard::get_move_mask(square, color)` — dispatches by piece type.
 
-**Sliding pieces** (Rook, Bishop, Queen):
-- Call `get_sliding_moves()` with piece type
-- Use magic bitboard table indexed by occupancy
-- Returns bitboard of legal moves for that piece
+**Sliding pieces** (Rook, Bishop, Queen): Use magic bitboard tables indexed by occupancy.
 
-**Knight/King**: Pre-computed lookup tables in `PrecomputedItems`
+**Knight/King**: Pre-computed lookup tables. **King limitation**: `get_move_mask` returns only 1-square moves. Castling generated separately via `get_castling_moves()`.
 
-**Pawn moves**:
-- Capture diagonally one square (forward based on color)
-- Push forward one square (empty square check)
-- Double-push from starting rank (rank 2 for White, rank 7 for Black)
-- Promotion: always defaults to Queen (underpromotion added later as 4672 actions)
+**Pawn moves**: Diagonals (capture), forward push, double-push from rank 2/7, promotion defaults to Queen.
 
-**Special moves encoded in `Move` struct**:
-- `castle_option`: Some(WK/WQ/BK/BQ) for castling
-- `en_passant`: true if EP capture
-- `promotion_piece_type`: Some(Queen/Rook/Bishop/Knight)
+**Special move flags** in `Move`: `castle_option`, `en_passant`, `promotion_piece_type`. Details in [Special Moves & Draw Rules](special-moves-draws.md).
 
 ## Move Validation
 
-**Pseudo-legal check** (before applying):
-- From square has own piece
-- To square empty or enemy piece
-- Piece can reach to square (via move generation)
+**Pseudo-legal check**: From/to piece validation + piece can reach to square.
 
-**Legal check** (after clone + apply):
-- Simulate the move on a cloned board
-- Recalculate all pins
-- Check if own king in check
-- If so, undo and reject
+**Legal check**: Clone board, apply move, recalculate pins, check if own king in check.
 
-**Pin detection** (`calculate_pins()`):
-- For each enemy slider (rook/bishop), use precomputed ray masks
-- Ray from enemy to own king: if friendly piece blocks, it's pinned
-- Pinned pieces stored in `pin_masks[to_sq]` bitboard
+**Pin detection**: For each enemy slider, check precomputed ray masks. Friendly piece blocking ray = pinned.
 
-## Special Moves
+## Board Initialization from FEN
 
-**Castling**:
-- King-side: `castle_squares = [F1, G1, F8, G8]` (must be empty)
-- Queen-side: `castle_squares = [B1, D1, B8, D8]` (must be empty)
-- Path squares also checked empty
-- Castling rights tracked per side (updated after king/rook moves)
-- King moves 2 squares, rook moves to adjacent square
+`board_from_fen()` creates arbitrary positions from FEN. **Rank mapping**: FEN rank 8 = board rank 7, FEN rank 1 = board rank 0. Square = `board_rank * 8 + file`. Supports full FEN syntax (placement, color, castling, EP, clocks).
 
-**En passant**:
-- `en_passant_target: Option<Square>` set after pawn double-push
-- If opponent pawn on (from_sq ± 1), capture with EP move
-- Captured pawn removed from `update_board()` (offset by rank)
+## Test Coverage
 
-**Promotion**:
-- Only on last rank (7 for White, 0 for Black)
-- Pawn removed, new piece added to promoted square
-- Promotion type in `Move` struct
+**Unit tests (14)**: Move generation (all pieces), special moves, game status (check/mate/stalemate), draw rules.
 
-## Draw Rules
-
-**50-move rule**: Halfmove clock incremented after every move (reset on pawn move or capture). Game drawn if clock ≥ 100.
-
-**Threefold repetition**: Hash of board position after each move. Game drawn if same position appears 3x.
-
-**Insufficient material**: Neither side has queen, rook, or pawn; only kings and knights/bishops. Game drawn.
+**Perft validation (10)**: Kiwipete, positions 3/5, known-correct depths (startpos: 20 moves, 400 at d=2).
 
 ## Key Gotchas
 
-1. **Square indexing rank-major**: Magic table base offsets baked in. Convert carefully between bitboard value and square index: `trailing_zeros() as usize`.
+1. **Square indexing**: Convert bitboard values to indices: `trailing_zeros() as usize`. Magic table offsets baked in.
+2. **Occupancy masks**: Exclude target square edges. Mistakes = hash collisions.
+3. **Array + bitboard sync**: `update_board()` modifies both. Forget one = subtle bugs (pin detection, check). Always update in pairs.
+4. **King square lookup**: `get_king_sq()` returns bitboard (e.g., `1 << 60`), NOT index. Use `.trailing_zeros()` before array access.
+5. **Castling not in move mask**: `get_move_mask` returns 1-square moves only. Castling via `get_castling_moves()` separately.
+6. **En passant flag cosmetic**: `Move.en_passant` is unused. `update_board()` checks `en_passant_target` directly.
 
-2. **Occupancy in magic lookup**: The mask and occupancy both exclude target square edges. Get this wrong = hash collisions.
+## Related
 
-3. **Array + bitboard sync**: `update_board()` modifies both bitboards and mailbox. If one is forgotten, subtle bugs (e.g., pin detection fails). Always update in pairs.
-
-4. **in_check field unused**: Computed dynamically instead of cached. Not a bug, but means recalculation on every validation.
-
-5. **King square lookup**: `get_king_sq()` returns a bitboard (e.g., `1 << 60`), NOT a square index. Convert with `.trailing_zeros()` before array indexing. Bug: direct cast to `usize` causes array out-of-bounds with bitboard value (e.g., `1 << 60 = 1152921504606846976` instead of `60`). Correct pattern: `get_king_sq(color).trailing_zeros() as usize`. See src/game/board.rs lines 266, 292 for example usage.
+- [Special Moves & Draw Rules](special-moves-draws.md) — castling, en passant, promotion, game termination
+- [MCTS & Self-Play](mcts-selfplay.md) — how engine is used in game loops
+- [Rust-Python Integration](rust-python-integration.md) — action encoding and decoding
 
 ## Related Files
 
-- `src/lib.rs` — types, precomputation
-- `src/game/board.rs` — move generation, validation, pins, check/mate
+- `src/lib.rs` — ZobristTable, splitmix64, PrecomputedItems
+- `src/game/board.rs` — move generation, validation, pins, check/mate, zobrist updates, 18 tests
+- `src/game/fen.rs` — FEN parser with 5 tests
+- `src/game/perft.rs` — perft driver with 10 tests
 - `src/game/playerobj.rs` — per-player bitboards
 - `src/pieces/{rook,bishop}.rs` — magic table generation

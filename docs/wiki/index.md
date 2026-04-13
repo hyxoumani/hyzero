@@ -8,6 +8,7 @@ session findings, reviewer feedback, experiments, and architectural decisions.
 
 ## Engine Core
 - [Chess Engine](chess-engine.md) — board representation, move generation, validation gotchas
+- [Special Moves & Draw Rules](special-moves-draws.md) — castling, en passant, promotion, game termination
 
 ## Learning Pipeline
 - [MCTS & Self-Play](mcts-selfplay.md) — tree search, self-play coordination, replay buffer
@@ -18,3 +19,4 @@ session findings, reviewer feedback, experiments, and architectural decisions.
 
 ## Development
 - [Dev Workflow & Framework](dev-workflow.md) — orchestration, agents, worktree patterns, memory system
+- [Mistakes Log](mistakes.md) — agent failure cases with root cause analysis, error classification, escalation tiers

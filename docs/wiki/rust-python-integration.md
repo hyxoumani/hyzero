@@ -66,10 +66,11 @@ Same-process via `InferenceBackend` trait. One GIL acquisition per batch (~32 re
 
 ## Known Gotchas
 
-1. **Visit distribution padding**: StepRecord visit_distribution is sparse (length = num_visits < 4096). PyTrainingThread zero-pads to 4096 for batch assembly. Trainer.train_batch() expects dense [B, K+1, 4096] array.
-2. **PyO3 reference counting**: InferenceServer Py<PyAny> handle must be cloned with `clone_ref()` (not `clone()`) to share between PyO3Backend and weight loading task. Regular `clone()` fails.
-3. **pyo3 0.28 vs 0.22**: Version 0.28 is cleaner — no abi3-py38 needed, works with Python 3.9+. abi3 mode adds complexity; unnecessary here.
-4. **GIL per batch**: One GIL acquisition per 32 requests (~800/move), not per MCTS node. If bottleneck detected, swap for ProcessBackend (Unix socket subprocess, no Rust changes needed).
+1. **action_to_move signature changed**: Now requires `(action, board, color)` instead of just `action`. The board state and active color are necessary to correctly reconstruct castling and en passant moves. Callers in encoding.rs already updated.
+2. **Visit distribution padding**: StepRecord visit_distribution is sparse (length = num_visits < 4096). PyTrainingThread zero-pads to 4096 for batch assembly. Trainer.train_batch() expects dense [B, K+1, 4096] array.
+3. **PyO3 reference counting**: InferenceServer Py<PyAny> handle must be cloned with `clone_ref()` (not `clone()`) to share between PyO3Backend and weight loading task. Regular `clone()` fails.
+4. **pyo3 0.28 vs 0.22**: Version 0.28 is cleaner — no abi3-py38 needed, works with Python 3.9+. abi3 mode adds complexity; unnecessary here.
+5. **GIL per batch**: One GIL acquisition per 32 requests (~800/move), not per MCTS node. If bottleneck detected, swap for ProcessBackend (Unix socket subprocess, no Rust changes needed).
 
 ## Related Files
 
