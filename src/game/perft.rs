@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use crate::game::board::GameResult;
 use crate::game::{GameBoard, Move};
 use crate::{BitIterator, CastleOption, Color, PieceType, PrecomputedItems, Square};
 
@@ -37,17 +36,9 @@ pub fn perft(
     let turn_count = if color == Color::White { 0 } else { 1 };
 
     for mv in legal_moves {
-        if board.result() != GameResult::Ongoing {
-            break;
-        }
         let mut new_board = board.clone();
         new_board.compute_turn_items(turn_count, mv);
-        if new_board.result() == GameResult::Ongoing {
-            nodes += perft(&new_board, next_color, depth - 1, precomputed);
-        } else {
-            // Terminal position counts as a leaf
-            nodes += 1;
-        }
+        nodes += perft(&new_board, next_color, depth - 1, precomputed);
     }
 
     nodes
@@ -266,6 +257,18 @@ mod tests {
                 4
             ),
             197_281
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn test_perft_startpos_d5() {
+        assert_eq!(
+            perft_fen(
+                "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+                5
+            ),
+            4_865_609
         );
     }
 
