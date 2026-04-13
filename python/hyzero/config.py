@@ -8,6 +8,4 @@ DEFAULT_CONFIG = {
     "action_planes": 3,       # spatial action encoding planes
     "lr": 1e-3,
     "weight_decay": 1e-4,
-    "value_loss_weight": 10.0,
-    "reward_loss_weight": 10.0,
 }

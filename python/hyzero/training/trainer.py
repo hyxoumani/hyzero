@@ -119,9 +119,7 @@ class Trainer:
         avg_value_loss = total_value_loss / n_steps
         avg_reward_loss = total_reward_loss / k_steps
 
-        vlw = self.config.get("value_loss_weight", 1.0)
-        rlw = self.config.get("reward_loss_weight", 1.0)
-        total_loss = avg_policy_loss + vlw * avg_value_loss + rlw * avg_reward_loss
+        total_loss = avg_policy_loss + avg_value_loss + avg_reward_loss
 
         total_loss.backward()
         self.optimizer.step()
