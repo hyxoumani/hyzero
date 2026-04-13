@@ -10,15 +10,25 @@ Current state and next steps for hyzero.
 - **Task 27**: MCTS value negation — fixed backpropagation to negate values per ply (two-player zero-sum)
 - **Task 28**: PyO3 integration — full Rust↔Python bridge (PyO3Backend, PyTrainingThread, batch assembly, weight sync)
 - **Task 29**: End-to-end validation — full loop tested (5 games, 13 training steps, loss 8.52→7.04); Dirichlet noise implemented; max game length added; multi-step training enabled
-- **Zobrist hashing**: Replaced collision-prone position hash with proper Zobrist tables (781 splitmix64-seeded values). Maintained incrementally across all board ops.
-- **FEN parser**: New `board_from_fen()` function for creating arbitrary board positions from FEN notation.
-- **action_to_move fix**: Signature changed to `(action, board, color)` for correct castling/en passant reconstruction with board context.
-- **Engine unit tests**: 14 tests covering move generation, special moves, check/mate/stalemate, draw rules (4 Zobrist + 14 game logic).
-- **Perft validation**: Perft driver + 10 tests against known-correct counts (startpos, Kiwipete, positions 3/5).
+- **Task 30 (Engine Foundation)**:
+  - **Zobrist hashing**: Replaced collision-prone `wrapping_mul` hash with proper Zobrist tables (781 splitmix64-seeded values). Maintained incrementally via XOR in `update_board()`.
+  - **FEN parser**: New `board_from_fen()` function for arbitrary board positions from FEN notation.
+  - **action_to_move fix**: Signature changed to `(action, board, color)` for correct castling/en passant reconstruction.
+  - **Unit tests**: 24 tests (4 zobrist + 14 game logic + 6 encoding); 4 zobrist consistency tests; pin detection tests; move validation tests.
+  - **Perft validation**: Driver + 13 tests (10 pass, 3 ignored for speed) against known-correct counts (startpos d1-d5, Kiwipete d1-d3, position 3, position 5). Terminal counting bug fixed (removed incorrect +1 per checkmate).
+  - **calculate_pins() queen fix**: Missing queen from enemy_sliders caused false negatives in checkmate/stalemate detection. Fixed.
+  - **Test counts**: 63 Rust (6 ignored), 27 Python, 3 integration with PyO3. All pass.
 - **Clippy**: Zero warnings, stalemate bitboard-index bug found and fixed
-- **Test Suite**: 63 Rust + 27 Python tests (5 new perft tests in ignore list); 3 integration tests with PyO3
 - **Framework**: v0.2.0 — wiki, agent memory, tool-augmented review gates, orchestrator persistence
 - **Infrastructure**: e2e_test.sh (autonomous validation) and run_experiment.sh (experiment runner) added
+- **Task 31 (Engine Validation)**:
+  - **Perft CLI**: `src/bin/perft.rs` with `--divide`, `--moves`, `--status` modes for batch validation and debugging.
+  - **Cross-validation script**: `scripts/cross_validate.py` — python-chess comparisons (perft, legal moves, termination status, fuzz testing with 5500+ random positions).
+  - **Stalemate castling bug**: `calculate_stalemate()` never checked castling as escape move. Fixed by calling `validate_move()` for both castle options after king 1-square loop. Added 2 tests.
+  - **Stalemate parameter ordering bug**: `calculate_stalemate()` passed `(friendly_bits, opponent_bits)` to `get_move_mask()` which expects `(white_pieces, black_pieces)`. For Black-to-move, bits were swapped. Fixed by deriving canonical white/black from color at function entry. Added 7 tests.
+  - **Threefold repetition off-by-one**: `position_history` started empty; initial position never counted as first occurrence, requiring 4 repetitions instead of 3. Fixed by inserting `board.position_history.insert(board.zobrist_hash, 1)` after board construction. Added 2 tests.
+  - **Test counts**: 80 Rust (6 ignored), perft 28/28 (6 positions × multiple depths, ~53M nodes), termination 13/13 vs python-chess, fuzz 5500+ random positions.
+  - **Infrastructure**: Perft CLI for local debugging; cross_validate.py for continuous validation against reference engine.
 
 ## What's Next
 
@@ -47,6 +57,7 @@ Current state and next steps for hyzero.
 - **Array/bitboard sync**: `board_arr` and `pieces_bb` must stay in sync — `update_board()` is complex
 - **Visit distribution padding**: StepRecord visit_distribution may be < 4096 — must zero-pad for batch consistency
 - **Stdout buffering**: `cargo run` buffers output; run binary directly (`target/release/selfplay`) for proper log capture in scripts
+- **Perft reference verification**: Cross-validated against python-chess for perft (28 positions tested), moves (10 edge cases), and termination status (13 draws + checkmate cases). All match. Future heavy perft work should cross-check with Stockfish as independent verification.
 
 ## Related
 - [Neural Networks](neural-networks.md) — model architecture details

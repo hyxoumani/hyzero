@@ -66,7 +66,7 @@ Same-process via `InferenceBackend` trait. One GIL acquisition per batch (~32 re
 
 ## Known Gotchas
 
-1. **action_to_move signature changed**: Now requires `(action, board, color)` instead of just `action`. The board state and active color are necessary to correctly reconstruct castling and en passant moves. Callers in encoding.rs already updated.
+1. **action_to_move signature changed**: Now requires `(action, board, color)` to reconstruct castling/en passant flags correctly. The board state and active color determine whether a king move is a castle (checking king file-diff) and whether a pawn capture is en passant (checking en_passant_target). Updated in encoding.rs; callers in selfplay and inference already compatible.
 2. **Visit distribution padding**: StepRecord visit_distribution is sparse (length = num_visits < 4096). PyTrainingThread zero-pads to 4096 for batch assembly. Trainer.train_batch() expects dense [B, K+1, 4096] array.
 3. **PyO3 reference counting**: InferenceServer Py<PyAny> handle must be cloned with `clone_ref()` (not `clone()`) to share between PyO3Backend and weight loading task. Regular `clone()` fails.
 4. **pyo3 0.28 vs 0.22**: Version 0.28 is cleaner — no abi3-py38 needed, works with Python 3.9+. abi3 mode adds complexity; unnecessary here.

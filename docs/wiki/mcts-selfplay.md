@@ -47,7 +47,7 @@ Action space: 4096 (64×64 from/to, queen default promotion). Encoding: `action 
 7. **Action space mismatch**: 4096 logits vs ~40 legal moves. Network learns suppression.
 8. **Visit distribution sparsity**: replay buffer stores StepRecord with visit counts for each move. Array is sparse (length = num_visits). PyTrainingThread zero-pads to 4096 before passing to trainer.
 9. **Stdout buffering in scripts**: `cargo run` buffers output. For log capture in shell scripts, run the binary directly: `target/release/selfplay` instead of `cargo run --bin selfplay`.
-10. **action_to_move requires board context**: `action_to_move(action, board, color)` signature now requires the board state and active color to correctly reconstruct castling and en passant moves. The selfplay game_task.rs already handles this correctly.
+10. **action_to_move signature**: `action_to_move(action, board, color)` requires board state and active color to correctly reconstruct castling and en passant moves. The selfplay game_task.rs already handles this correctly; only direct callers of action_to_move need updating.
 
 ## Related Files
 
