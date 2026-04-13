@@ -2,6 +2,7 @@ pub mod board;
 pub mod externplayer;
 pub mod fen;
 pub mod history;
+pub mod perft;
 pub mod playerobj;
 
 use crate::PrecomputedItems;
