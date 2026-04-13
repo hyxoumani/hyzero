@@ -1,3 +1,6 @@
+use std::collections::VecDeque;
+use std::path::PathBuf;
+
 use numpy::{IntoPyArray, PyArrayMethods};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -172,6 +175,9 @@ pub struct PyTrainingThread {
     min_samples: usize,
     train_steps_per_game: usize,
     total_train_steps: u64,
+    checkpoint_interval_steps: usize,
+    checkpoint_keep_last: usize,
+    checkpoint_files: VecDeque<PathBuf>,
 }
 
 impl PyTrainingThread {
@@ -187,6 +193,8 @@ impl PyTrainingThread {
     /// * `unroll_k` - MuZero unroll depth (K).
     /// * `min_samples` - Minimum total steps before training starts.
     /// * `train_steps_per_game` - Number of training steps to run per game received.
+    /// * `checkpoint_interval_steps` - Save a checkpoint every N training steps.
+    /// * `checkpoint_keep_last` - Rolling window: keep at most this many checkpoint files.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         trainer: Py<PyAny>,
@@ -198,6 +206,8 @@ impl PyTrainingThread {
         unroll_k: usize,
         min_samples: usize,
         train_steps_per_game: usize,
+        checkpoint_interval_steps: usize,
+        checkpoint_keep_last: usize,
     ) -> Self {
         Self {
             trainer,
@@ -211,6 +221,9 @@ impl PyTrainingThread {
             min_samples,
             train_steps_per_game,
             total_train_steps: 0,
+            checkpoint_interval_steps,
+            checkpoint_keep_last,
+            checkpoint_files: VecDeque::new(),
         }
     }
 
@@ -218,11 +231,16 @@ impl PyTrainingThread {
     ///
     /// Imports `hyzero.config.DEFAULT_CONFIG` and `hyzero.training.trainer.Trainer`,
     /// then calls `Trainer(config, device)`.
+    ///
+    /// If `resume_checkpoint` is `Some(path)`, loads that checkpoint before returning,
+    /// restoring `model_version` and pushing the loaded weights into `weight_tx` so
+    /// the `InferenceServer` starts with restored weights instead of random initialization.
     pub fn from_default_config(
         device: &str,
         trajectory_rx: mpsc::Receiver<GameTrajectory>,
         version_tx: watch::Sender<u64>,
         weight_tx: watch::Sender<Option<Vec<u8>>>,
+        resume_checkpoint: Option<&str>,
     ) -> PyResult<Self> {
         let trainer = Python::attach(|py| {
             let config = PyModule::import(py, "hyzero.config")?
@@ -235,7 +253,7 @@ impl PyTrainingThread {
             Ok::<Py<PyAny>, PyErr>(trainer)
         })?;
 
-        Ok(Self::new(
+        let mut thread = Self::new(
             trainer,
             trajectory_rx,
             version_tx,
@@ -245,7 +263,34 @@ impl PyTrainingThread {
             5,      // unroll_k
             200,    // min_samples
             4,      // train_steps_per_game
-        ))
+            50,     // checkpoint_interval_steps
+            5,      // checkpoint_keep_last
+        );
+
+        if let Some(path) = resume_checkpoint {
+            thread.load_checkpoint(path)?;
+        }
+
+        Ok(thread)
+    }
+
+    /// Load a checkpoint from `path` via PyO3, updating `model_version` and
+    /// broadcasting the restored weights so game loops use them immediately.
+    pub fn load_checkpoint(&mut self, path: &str) -> PyResult<()> {
+        let (model_version, weights) = Python::attach(|py| -> PyResult<(u64, Vec<u8>)> {
+            let result = self.trainer.call_method1(py, "load_checkpoint", (path,))?;
+            let bound = result.bind(py);
+            let version: u64 = bound.get_item("model_version")?.extract()?;
+            let raw = self.trainer.call_method0(py, "get_weights")?;
+            let bytes: Vec<u8> = raw.bind(py).extract()?;
+            Ok((version, bytes))
+        })?;
+
+        self.model_version = model_version;
+        let _ = self.version_tx.send(self.model_version);
+        let _ = self.weight_tx.send(Some(weights));
+        println!("[py_training] Resumed from checkpoint: {path} (model v{})", self.model_version);
+        Ok(())
     }
 
     /// Run the training loop until the trajectory channel closes.
@@ -324,18 +369,43 @@ impl PyTrainingThread {
                         }
                     }
 
-                    // Checkpoint every 50 training steps
-                    if self.total_train_steps.is_multiple_of(50) {
+                    // Checkpoint every `checkpoint_interval_steps` training steps
+                    if self.checkpoint_interval_steps > 0
+                        && self.total_train_steps.is_multiple_of(self.checkpoint_interval_steps as u64)
+                    {
                         let _ = std::fs::create_dir_all("checkpoints");
-                        let path = format!("checkpoints/model_v{}.pt", self.model_version);
+                        let path_str = format!(
+                            "checkpoints/model_v{:06}.pt",
+                            self.model_version
+                        );
+                        let path = PathBuf::from(&path_str);
                         let ckpt_result = Python::attach(|py| -> PyResult<()> {
                             let metrics = pyo3::types::PyDict::new(py);
                             self.trainer
-                                .call_method1(py, "save_checkpoint", (&path, metrics))?;
+                                .call_method1(py, "save_checkpoint", (&path_str, metrics))?;
                             Ok(())
                         });
                         match ckpt_result {
-                            Ok(()) => println!("[py_training] Checkpoint saved: {path}"),
+                            Ok(()) => {
+                                println!("[py_training] Checkpoint saved: {path_str}");
+                                self.checkpoint_files.push_back(path);
+                                // Prune oldest if window exceeded
+                                if self.checkpoint_files.len() > self.checkpoint_keep_last {
+                                    if let Some(oldest) = self.checkpoint_files.pop_front() {
+                                        if let Err(e) = std::fs::remove_file(&oldest) {
+                                            eprintln!(
+                                                "[py_training] Failed to delete old checkpoint {}: {e}",
+                                                oldest.display()
+                                            );
+                                        } else {
+                                            println!(
+                                                "[py_training] Pruned old checkpoint: {}",
+                                                oldest.display()
+                                            );
+                                        }
+                                    }
+                                }
+                            }
                             Err(e) => eprintln!("[py_training] Checkpoint error: {e}"),
                         }
                     }
@@ -457,6 +527,112 @@ mod tests {
                 arrays.target_policies[i]
             );
         }
+    }
+
+    /// Simulate the checkpoint window pruning logic without needing Python.
+    ///
+    /// Creates empty files in a temp directory, then drives the same
+    /// `checkpoint_files` / `checkpoint_keep_last` logic used in `run()` directly,
+    /// and verifies that after 6 saves with keep_last=5 the oldest file is deleted
+    /// and only the 5 most-recent files remain on disk.
+    #[test]
+    fn test_checkpoint_window_prunes_oldest() {
+        let dir = tempfile::tempdir().expect("failed to create tempdir");
+        let base = dir.path();
+
+        let keep_last: usize = 5;
+        let mut files: VecDeque<PathBuf> = VecDeque::new();
+
+        // Simulate 6 checkpoint saves
+        for i in 1usize..=6 {
+            let path = base.join(format!("model_v{:06}.pt", i));
+            // "Save" by creating an empty file
+            std::fs::write(&path, b"").expect("write failed");
+
+            files.push_back(path.clone());
+
+            if files.len() > keep_last {
+                if let Some(oldest) = files.pop_front() {
+                    std::fs::remove_file(&oldest).ok();
+                }
+            }
+        }
+
+        // After 6 saves with keep_last=5 the window should contain saves 2..=6
+        assert_eq!(files.len(), 5, "expected 5 files in window");
+
+        // File for version 1 must have been deleted
+        assert!(
+            !base.join("model_v000001.pt").exists(),
+            "oldest checkpoint should have been pruned"
+        );
+
+        // Files 2..=6 must still exist
+        for i in 2usize..=6 {
+            assert!(
+                base.join(format!("model_v{:06}.pt", i)).exists(),
+                "checkpoint {} should still exist",
+                i
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "requires hyzero Python package"]
+    fn test_resume_checkpoint_restores_model_version() {
+        // Save a checkpoint with a known model_version, then construct a new
+        // PyTrainingThread with resume_checkpoint and verify the version is restored.
+        use tokio::sync::{mpsc, watch};
+
+        let dir = tempfile::tempdir().expect("failed to create tempdir");
+        let ckpt_path = dir.path().join("model_v000042.pt").to_string_lossy().to_string();
+
+        // Create an initial trainer, train 0 steps, set version to 42, save checkpoint
+        let trainer_py = Python::attach(|py| -> PyResult<Py<PyAny>> {
+            let config = PyModule::import(py, "hyzero.config")?
+                .getattr("DEFAULT_CONFIG")?
+                .into_pyobject(py)?
+                .unbind();
+            let cls = PyModule::import(py, "hyzero.training.trainer")?.getattr("Trainer")?;
+            let trainer: Py<PyAny> = cls.call1((config, "cpu"))?.unbind();
+
+            // save_checkpoint(path, metrics) — metrics dict can include model_version
+            let metrics = PyDict::new(py);
+            metrics.set_item("model_version", 42u64)?;
+            trainer.call_method1(py, "save_checkpoint", (&ckpt_path, metrics))?;
+            Ok(trainer)
+        })
+        .expect("failed to create Trainer / save checkpoint");
+        drop(trainer_py);
+
+        // Now construct a new PyTrainingThread with resume_checkpoint
+        let (traj_tx, traj_rx) = mpsc::channel::<crate::data::GameTrajectory>(8);
+        let (version_tx, version_rx) = watch::channel(1u64);
+        let (weight_tx, _weight_rx) = watch::channel(None::<Vec<u8>>);
+
+        let thread = PyTrainingThread::from_default_config(
+            "cpu",
+            traj_rx,
+            version_tx,
+            weight_tx,
+            Some(&ckpt_path),
+        )
+        .expect("from_default_config with resume failed");
+
+        // version_rx should now reflect the restored model_version from the checkpoint
+        assert_eq!(
+            *version_rx.borrow(),
+            thread.model_version,
+            "version channel should match restored model_version"
+        );
+        // model_version must be > 1 (the default starting value)
+        assert!(
+            thread.model_version > 1,
+            "model_version should be restored from checkpoint, got {}",
+            thread.model_version
+        );
+
+        drop(traj_tx);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use tokio::sync::{mpsc, watch, Semaphore};
+use tokio::sync::{mpsc, watch};
 
 use crate::PrecomputedItems;
 use crate::data::GameTrajectory;
@@ -23,8 +23,9 @@ impl Default for SelfPlayConfig {
     }
 }
 
-/// Orchestrates continuous self-play: spawns game tasks up to concurrency limit,
-/// sends completed trajectories to the training thread.
+/// Orchestrates continuous self-play: spawns N persistent game loops, each
+/// playing games independently and sending completed trajectories to the
+/// training thread.
 pub struct SelfPlayCoordinator {
     precomputed: Arc<PrecomputedItems>,
     evaluator: Arc<dyn Evaluator>,
@@ -50,35 +51,39 @@ impl SelfPlayCoordinator {
         }
     }
 
-    /// Run the coordinator loop. Spawns games continuously, limited by semaphore.
-    /// Returns when the trajectory channel is closed (receiver dropped).
+    /// Run N persistent game loops. Each loop plays games independently, reading
+    /// the current model version at the start of each game and sending the resulting
+    /// trajectory to the training thread. Returns when all loops terminate (i.e.,
+    /// the trajectory channel is closed and receivers are dropped).
     pub async fn run(&self) {
-        let semaphore = Arc::new(Semaphore::new(self.config.max_concurrent_games));
+        let mut handles = Vec::new();
 
-        loop {
-            let permit = match semaphore.clone().acquire_owned().await {
-                Ok(p) => p,
-                Err(_) => return, // Semaphore closed
-            };
-
+        for _ in 0..self.config.max_concurrent_games {
             let precomputed = self.precomputed.clone();
             let evaluator = self.evaluator.clone();
             let trajectory_tx = self.trajectory_tx.clone();
-            let model_version = *self.model_version.borrow();
+            let model_version_rx = self.model_version.clone();
             let game_config = self.config.game_config.clone();
 
-            tokio::spawn(async move {
-                let trajectory = play_game(
-                    precomputed,
-                    evaluator,
-                    model_version,
-                    game_config,
-                ).await;
+            handles.push(tokio::spawn(async move {
+                loop {
+                    let version = *model_version_rx.borrow();
+                    let traj = play_game(
+                        precomputed.clone(),
+                        evaluator.clone(),
+                        version,
+                        game_config.clone(),
+                    ).await;
+                    if trajectory_tx.send(traj).await.is_err() {
+                        break; // Channel closed, stop
+                    }
+                }
+            }));
+        }
 
-                // Send trajectory; if receiver is dropped, just discard
-                let _ = trajectory_tx.send(trajectory).await;
-                drop(permit);
-            });
+        // Wait for all tasks (they run until channel closes)
+        for handle in handles {
+            let _ = handle.await;
         }
     }
 }
@@ -125,10 +130,10 @@ mod tests {
             precomputed, evaluator, traj_tx, version_rx, config,
         );
 
-        // Run coordinator in background
+        // Run coordinator in background; N=2 persistent tasks each play games
         let coord_handle = tokio::spawn(async move { coordinator.run().await });
 
-        // Collect a few trajectories
+        // Collect at least 2 trajectories — one from each game loop
         let mut count = 0;
         while count < 2 {
             match tokio::time::timeout(
@@ -143,8 +148,13 @@ mod tests {
             }
         }
 
-        // Drop receiver to stop coordinator
+        // Dropping the receiver closes the channel; each game loop exits on next
+        // send error, then the coordinator's run() returns after all handles join.
         drop(traj_rx);
-        coord_handle.abort();
+        // Give tasks a moment to detect the closed channel and exit cleanly
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(120),
+            coord_handle,
+        ).await;
     }
 }
