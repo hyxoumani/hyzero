@@ -1078,6 +1078,15 @@ mod tests {
         GameBoard::init_game_board(precomputed, p1, p2)
     }
 
+    fn precomputed() -> Arc<PrecomputedItems> {
+        Arc::new(PrecomputedItems::begin_precomputing())
+    }
+
+    fn board_from_fen_unwrap(fen: &str) -> (GameBoard, Color) {
+        let (board, color, _) = crate::game::fen::board_from_fen(fen, precomputed()).unwrap();
+        (board, color)
+    }
+
     #[test]
     fn test_zobrist_starting_position() {
         let board1 = make_board();
@@ -1123,5 +1132,377 @@ mod tests {
         board2.en_passant_target = Some(20); // e3
         board2.zobrist_hash ^= zt.en_passant_file[4]; // e-file = index 4
         assert_ne!(board1.zobrist_hash, board2.zobrist_hash);
+    }
+
+    // --- Move generation tests ---
+
+    #[test]
+    fn test_initial_white_pawn_moves() {
+        let board = make_board();
+        let combined = board.combined_pieces;
+        let white = board.white_pieces;
+        let black = board.black_pieces;
+        let mut total_moves = 0u32;
+        for sq in 8..16usize {
+            let mask =
+                board.get_move_mask(sq, Color::White, PieceType::Pawn, combined, white, black);
+            assert_eq!(
+                mask.count_ones(),
+                2,
+                "pawn on sq {sq} should have exactly 2 moves, got {}",
+                mask.count_ones()
+            );
+            total_moves += mask.count_ones();
+        }
+        assert_eq!(
+            total_moves, 16,
+            "total white pawn moves in starting position should be 16"
+        );
+    }
+
+    #[test]
+    fn test_knight_moves_center() {
+        // White knight on e4 (sq 28), nothing blocking
+        let (board, _) = board_from_fen_unwrap("4k3/8/8/8/4N3/8/8/4K3 w - - 0 1");
+        let combined = board.combined_pieces;
+        let white = board.white_pieces;
+        let black = board.black_pieces;
+        let mask = board.get_move_mask(28, Color::White, PieceType::Knight, combined, white, black);
+        assert_eq!(
+            mask.count_ones(),
+            8,
+            "knight on e4 should have 8 moves, got {}",
+            mask.count_ones()
+        );
+    }
+
+    #[test]
+    fn test_knight_moves_corner() {
+        // White knight on a1 (sq 0)
+        let (board, _) = board_from_fen_unwrap("4k3/8/8/8/8/8/8/N3K3 w - - 0 1");
+        let combined = board.combined_pieces;
+        let white = board.white_pieces;
+        let black = board.black_pieces;
+        let mask = board.get_move_mask(0, Color::White, PieceType::Knight, combined, white, black);
+        assert_eq!(
+            mask.count_ones(),
+            2,
+            "knight on a1 should have 2 moves, got {}",
+            mask.count_ones()
+        );
+        // b3 = sq 17, c2 = sq 10
+        assert_ne!(mask & (1u64 << 17), 0, "knight should reach b3 (sq 17)");
+        assert_ne!(mask & (1u64 << 10), 0, "knight should reach c2 (sq 10)");
+    }
+
+    #[test]
+    fn test_bishop_blocked_by_own_pieces() {
+        // Starting position: bishop on c1 (sq 2) is surrounded by own pawns
+        let board = make_board();
+        let combined = board.combined_pieces;
+        let white = board.white_pieces;
+        let black = board.black_pieces;
+        let mask = board.get_move_mask(2, Color::White, PieceType::Bishop, combined, white, black);
+        assert_eq!(
+            mask, 0,
+            "bishop on c1 in starting position should have 0 moves"
+        );
+    }
+
+    #[test]
+    fn test_rook_open_file() {
+        // Rook on a1 (sq 0), own king on e1 (sq 4)
+        let (board, _) = board_from_fen_unwrap("4k3/8/8/8/8/8/8/R3K3 w - - 0 1");
+        let combined = board.combined_pieces;
+        let white = board.white_pieces;
+        let black = board.black_pieces;
+        let mask = board.get_move_mask(0, Color::White, PieceType::Rook, combined, white, black);
+        // a2-a8 = 7 squares, b1-d1 = 3 squares (e1 has own king, blocked)
+        assert_eq!(
+            mask.count_ones(),
+            10,
+            "rook on a1 should reach 10 squares, got {}",
+            mask.count_ones()
+        );
+    }
+
+    // --- Special move tests ---
+
+    #[test]
+    fn test_castling_kingside_white() {
+        // King on e1 (sq 4), rook on h1 (sq 7), kingside rights
+        let (mut board, _) = board_from_fen_unwrap("4k3/8/8/8/8/8/8/4K2R w K - 0 1");
+        let castle_mv = Move {
+            from: Square::E1,
+            to: Square::G1,
+            promotion_piece_type: None,
+            castle_option: Some(CastleOption::Kingside),
+            en_passant: false,
+        };
+        let combined = board.combined_pieces;
+        let white = board.white_pieces;
+        let black = board.black_pieces;
+        assert!(
+            board.validate_move(castle_mv, Color::White, combined, white, black),
+            "kingside castling should be valid"
+        );
+        board.compute_turn_items(0, castle_mv);
+        // King should now be on g1 (sq 6)
+        assert_eq!(
+            board.player1.pieces_bb[PieceType::King as usize],
+            1u64 << 6,
+            "king should be on g1 after kingside castle"
+        );
+        // Rook should now be on f1 (sq 5)
+        assert_eq!(
+            board.player1.pieces_bb[PieceType::Rook as usize],
+            1u64 << 5,
+            "rook should be on f1 after kingside castle"
+        );
+        assert_eq!(board.board_arr[6].unwrap().piece_type, PieceType::King);
+        assert_eq!(board.board_arr[5].unwrap().piece_type, PieceType::Rook);
+    }
+
+    #[test]
+    fn test_castling_queenside_white() {
+        // King on e1 (sq 4), rook on a1 (sq 0), queenside rights
+        let (mut board, _) = board_from_fen_unwrap("4k3/8/8/8/8/8/8/R3K3 w Q - 0 1");
+        let castle_mv = Move {
+            from: Square::E1,
+            to: Square::C1,
+            promotion_piece_type: None,
+            castle_option: Some(CastleOption::Queenside),
+            en_passant: false,
+        };
+        let combined = board.combined_pieces;
+        let white = board.white_pieces;
+        let black = board.black_pieces;
+        assert!(
+            board.validate_move(castle_mv, Color::White, combined, white, black),
+            "queenside castling should be valid"
+        );
+        board.compute_turn_items(0, castle_mv);
+        // King should now be on c1 (sq 2)
+        assert_eq!(
+            board.player1.pieces_bb[PieceType::King as usize],
+            1u64 << 2,
+            "king should be on c1 after queenside castle"
+        );
+        // Rook should now be on d1 (sq 3)
+        assert_eq!(
+            board.player1.pieces_bb[PieceType::Rook as usize],
+            1u64 << 3,
+            "rook should be on d1 after queenside castle"
+        );
+        assert_eq!(board.board_arr[2].unwrap().piece_type, PieceType::King);
+        assert_eq!(board.board_arr[3].unwrap().piece_type, PieceType::Rook);
+    }
+
+    #[test]
+    fn test_en_passant_capture() {
+        // White pawn on e5 (sq 36), black pawn on d5 (sq 35), EP target d6 (sq 43)
+        let (mut board, _) = board_from_fen_unwrap("4k3/8/8/3pP3/8/8/8/4K3 w - d6 0 1");
+        // Verify the EP target was set correctly: d6 = rank 5, file 3 = 43
+        assert_eq!(board.en_passant_target, Some(43));
+        // White pawn e5 -> d6 (en passant)
+        let ep_mv = Move {
+            from: Square::E5,
+            to: Square::D6,
+            promotion_piece_type: None,
+            castle_option: None,
+            en_passant: true,
+        };
+        let combined = board.combined_pieces;
+        let white = board.white_pieces;
+        let black = board.black_pieces;
+        assert!(
+            board.validate_move(ep_mv, Color::White, combined, white, black),
+            "en passant capture should be valid"
+        );
+        board.compute_turn_items(0, ep_mv);
+        // Black pawn on d5 (sq 35) should be gone
+        assert!(
+            board.board_arr[35].is_none(),
+            "captured pawn on d5 should be removed"
+        );
+        assert_eq!(
+            board.player2.pieces_bb[PieceType::Pawn as usize],
+            0,
+            "black should have no pawns left"
+        );
+    }
+
+    #[test]
+    fn test_promotion() {
+        // White pawn on a7 (sq 48), king on e1 (sq 4), black king on e8 (sq 60)
+        let (mut board, _) = board_from_fen_unwrap("4k3/P7/8/8/8/8/8/4K3 w - - 0 1");
+        // a7 = sq 48, a8 = sq 56
+        let promo_mv = Move {
+            from: Square::A7,
+            to: Square::A8,
+            promotion_piece_type: Some(PieceType::Queen),
+            castle_option: None,
+            en_passant: false,
+        };
+        let combined = board.combined_pieces;
+        let white = board.white_pieces;
+        let black = board.black_pieces;
+        assert!(
+            board.validate_move(promo_mv, Color::White, combined, white, black),
+            "promotion should be valid"
+        );
+        board.compute_turn_items(0, promo_mv);
+        // Pawn should be gone from white's pawn bb
+        assert_eq!(
+            board.player1.pieces_bb[PieceType::Pawn as usize],
+            0,
+            "white should have no pawns after promotion"
+        );
+        // Queen should appear on a8 (sq 56)
+        assert_ne!(
+            board.player1.pieces_bb[PieceType::Queen as usize],
+            0,
+            "white should have a queen after promotion"
+        );
+        assert_eq!(
+            board.player1.pieces_bb[PieceType::Queen as usize],
+            1u64 << 56,
+            "queen should be on a8 (sq 56)"
+        );
+        assert_eq!(board.board_arr[56].unwrap().piece_type, PieceType::Queen);
+        assert_eq!(board.board_arr[56].unwrap().color, Color::White);
+    }
+
+    // --- Check / Checkmate / Stalemate tests ---
+
+    #[test]
+    fn test_checkmate_fools_mate() {
+        // Fool's mate position — white is in checkmate
+        // FEN: rnb1kbnr/pppp1ppp/8/4p3/6Pq/5P2/PPPPP2P/RNBQKBNR w KQkq - 1 3
+        let (mut board, _) =
+            board_from_fen_unwrap("rnb1kbnr/pppp1ppp/8/4p3/6Pq/5P2/PPPPP2P/RNBQKBNR w KQkq - 1 3");
+        // Recalculate pins before checking checkmate
+        board.calculate_pins(
+            Color::White,
+            board.combined_pieces,
+            board.white_pieces,
+            board.black_pieces,
+        );
+        assert!(
+            board.calculate_checkmate(Color::White),
+            "white should be checkmated in fool's mate position"
+        );
+    }
+
+    #[test]
+    fn test_not_checkmate_can_escape() {
+        // Black queen on f3 (sq 21), white king on e1 (sq 4) — king can escape
+        let (mut board, _) = board_from_fen_unwrap("4k3/8/8/8/8/5q2/8/4K3 w - - 0 1");
+        board.calculate_pins(
+            Color::White,
+            board.combined_pieces,
+            board.white_pieces,
+            board.black_pieces,
+        );
+        assert!(
+            !board.calculate_checkmate(Color::White),
+            "white should NOT be checkmated when king has escape squares"
+        );
+    }
+
+    #[test]
+    fn test_stalemate() {
+        // Stalemate: black king on a8 (sq 56), white queen on c7 (sq 50), white king on b6 (sq 41)
+        // "k7/2Q5/1K6/8/8/8/8/8 b - - 0 1"
+        // Black king on A8 (56): moves B8(57), A7(48), B7(49)
+        //   B8(57): white queen on C7(50) attacks diagonally (rank diff=1, file diff=-1). BLOCKED.
+        //   A7(48): white king on B6(41) attacks adjacently (rank diff=1, file diff=-1). BLOCKED.
+        //   B7(49): white queen on C7(50) attacks along rank 7 (same rank). BLOCKED.
+        //             also white king on B6(41) attacks adjacently (rank diff=1, file diff=0). BLOCKED.
+        // Black king is NOT in check (C7 queen can't reach A8 diagonally or by rank/file check).
+        // This is genuine stalemate for black.
+        let (mut board, _) = board_from_fen_unwrap("k7/2Q5/1K6/8/8/8/8/8 b - - 0 1");
+        board.calculate_pins(
+            Color::White,
+            board.combined_pieces,
+            board.white_pieces,
+            board.black_pieces,
+        );
+        board.calculate_pins(
+            Color::Black,
+            board.combined_pieces,
+            board.white_pieces,
+            board.black_pieces,
+        );
+        let result = board.calculate_stalemate(
+            Color::Black,
+            Color::White,
+            board.combined_pieces,
+            board.black_pieces,
+            board.white_pieces,
+            board.black_pins,
+        );
+        assert!(
+            result,
+            "black king on a8 with white queen on c7 and white king on b6 should be stalemate"
+        );
+    }
+
+    // --- Draw rule tests ---
+
+    #[test]
+    fn test_insufficient_material_k_vs_k() {
+        // K vs K — apply a move so compute_turn_items checks insufficient material
+        let (mut board, _) = board_from_fen_unwrap("4k3/8/8/8/8/8/8/4K3 w - - 0 1");
+        // Move the white king one step; both sides have only kings
+        let mv = Move {
+            from: Square::E1,
+            to: Square::D1,
+            promotion_piece_type: None,
+            castle_option: None,
+            en_passant: false,
+        };
+        board.compute_turn_items(0, mv);
+        assert_eq!(
+            board.game_result,
+            GameResult::InsufficientMaterial,
+            "K vs K should result in InsufficientMaterial"
+        );
+    }
+
+    #[test]
+    fn test_fifty_move_rule() {
+        // Start from a position with halfmove_clock=98; two non-pawn non-capture moves triggers the rule
+        // Rook on a1 (sq 0), white king on e1 (sq 4), black king on e8 (sq 60)
+        let (mut board, _) = board_from_fen_unwrap("4k3/8/8/8/8/8/8/R3K3 w - - 98 1");
+        assert_eq!(board.halfmove_clock, 98);
+
+        // Move 1: rook a1 -> b1 (non-capture, non-pawn)
+        let mv1 = Move {
+            from: Square::A1,
+            to: Square::B1,
+            promotion_piece_type: None,
+            castle_option: None,
+            en_passant: false,
+        };
+        board.compute_turn_items(0, mv1);
+        assert_eq!(board.halfmove_clock, 99);
+        assert_eq!(board.game_result, GameResult::Ongoing);
+
+        // Move 2: rook b1 -> c1 (non-capture, non-pawn) — clock hits 100
+        let mv2 = Move {
+            from: Square::B1,
+            to: Square::C1,
+            promotion_piece_type: None,
+            castle_option: None,
+            en_passant: false,
+        };
+        board.compute_turn_items(1, mv2);
+        assert_eq!(board.halfmove_clock, 100);
+        assert_eq!(
+            board.game_result,
+            GameResult::FiftyMoveRule,
+            "fifty-move rule should trigger after 100 halfmoves"
+        );
     }
 }
