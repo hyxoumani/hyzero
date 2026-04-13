@@ -107,6 +107,60 @@ pub struct Piece {
 
 use crate::pieces::bishop::BishopEntry;
 use crate::pieces::mod_rook::RookEntry;
+
+/// Zobrist hashing table for chess position hashing.
+///
+/// Indexed as: `piece_sq[color][piece_type][square]`
+/// where color 0 = White, 1 = Black; piece_type follows `PieceType` enum order.
+#[derive(Debug)]
+pub struct ZobristTable {
+    /// Random values for each piece on each square: `[color][piece_type][square]`
+    pub piece_sq: [[[u64; 64]; 6]; 2],
+    /// XOR in when Black is to move
+    pub side_to_move: u64,
+    /// Castling rights: [WK, WQ, BK, BQ]
+    pub castling: [u64; 4],
+    /// En passant file: one value per file (a–h)
+    pub en_passant_file: [u64; 8],
+}
+
+fn splitmix64(state: &mut u64) -> u64 {
+    *state = state.wrapping_add(0x9e3779b97f4a7c15);
+    let mut z = *state;
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d049bb133111eb);
+    z ^ (z >> 31)
+}
+
+impl ZobristTable {
+    fn new() -> Self {
+        let mut seed: u64 = 0x517cc1b727220a95;
+
+        let mut piece_sq = [[[0u64; 64]; 6]; 2];
+        for color_arr in piece_sq.iter_mut() {
+            for pt_arr in color_arr.iter_mut() {
+                for val in pt_arr.iter_mut() {
+                    *val = splitmix64(&mut seed);
+                }
+            }
+        }
+
+        let side_to_move = splitmix64(&mut seed);
+
+        let mut castling = [0u64; 4];
+        for c in castling.iter_mut() {
+            *c = splitmix64(&mut seed);
+        }
+
+        let mut en_passant_file = [0u64; 8];
+        for ep in en_passant_file.iter_mut() {
+            *ep = splitmix64(&mut seed);
+        }
+
+        ZobristTable { piece_sq, side_to_move, castling, en_passant_file }
+    }
+}
+
 #[derive(Debug)]
 pub struct PrecomputedItems {
     pub knight_moves: [u64; 64],
@@ -121,6 +175,7 @@ pub struct PrecomputedItems {
     pub lines: [[u64; 64]; 64],
     pub castle_empty_squares: [[u64; 2]; 2],
     pub castle_path_squares: [[u64; 2]; 2],
+    pub zobrist: ZobristTable,
 }
 
 impl PrecomputedItems {
@@ -323,7 +378,8 @@ impl PrecomputedItems {
             castle_path_squares: {
                 let (_, path) = PrecomputedItems::precompute_castle_squares();
                 path
-            }
+            },
+            zobrist: ZobristTable::new(),
         }
     }
 }

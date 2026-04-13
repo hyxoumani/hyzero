@@ -52,8 +52,8 @@ impl GameBoard {
         // Compute initial Zobrist hash from scratch
         let mut zobrist_hash = 0u64;
         let zt = &precomputed_items.zobrist;
-        for sq in 0..64usize {
-            if let Some(piece) = board_arr[sq] {
+        for (sq, slot) in board_arr.iter().enumerate() {
+            if let Some(piece) = slot {
                 let color_idx = piece.color as usize;
                 let pt_idx = piece.piece_type as usize;
                 zobrist_hash ^= zt.piece_sq[color_idx][pt_idx][sq];
