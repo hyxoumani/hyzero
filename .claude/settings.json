@@ -2,6 +2,16 @@
   "hooks": {
     "PreToolUse": [
       {
+        "matcher": "Agent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/agent-trace.sh",
+            "timeout": 2000
+          }
+        ]
+      },
+      {
         "matcher": "Write|Edit|MultiEdit",
         "hooks": [
           {
@@ -29,6 +39,16 @@
     ],
     "PostToolUse": [
       {
+        "matcher": "Agent",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/agent-trace-output.sh",
+            "timeout": 5000
+          }
+        ]
+      },
+      {
         "matcher": "Write|Edit|MultiEdit",
         "hooks": [
           {
@@ -54,26 +74,11 @@
   "env": {},
   "permissions": {
     "allow": [
-      "Edit(file_path:CLAUDE.md)",
-      "Write(file_path:CLAUDE.md)",
-      "Edit(file_path:**/CLAUDE.md)",
-      "Write(file_path:**/CLAUDE.md)",
-      "Edit(file_path:.claude/rules/*.md)",
-      "Write(file_path:.claude/rules/*.md)",
-      "Edit(file_path:**/.claude/rules/*.md)",
-      "Write(file_path:**/.claude/rules/*.md)",
-      "Edit(file_path:docs/**/*.md)",
-      "Write(file_path:docs/**/*.md)",
-      "Edit(file_path:**/docs/**/*.md)",
-      "Write(file_path:**/docs/**/*.md)",
-      "Edit(file_path:results.tsv)",
-      "Write(file_path:results.tsv)",
-      "Edit(file_path:**/results.tsv)",
-      "Write(file_path:**/results.tsv)",
-      "Edit(file_path:.claude/agent-memory/**/*.md)",
-      "Write(file_path:.claude/agent-memory/**/*.md)",
-      "Edit(file_path:**/.claude/agent-memory/**/*.md)",
-      "Write(file_path:**/.claude/agent-memory/**/*.md)"
+      "Bash",
+      "Glob",
+      "Grep",
+      "Edit",
+      "Write"
     ],
     "deny": []
   }
