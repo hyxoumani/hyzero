@@ -15,7 +15,9 @@ coordinator) with a Python neural network layer (PyTorch models) bridged via PyO
 cargo build
 
 # Test
-cargo test                   # Rust tests
+cargo test                   # Rust tests (80 tests)
+cargo test --release -- --ignored  # + slow perft tests
+python3 scripts/cross_validate.py --all  # vs python-chess oracle
 cd python && pytest          # Python tests
 bash scripts/e2e_test.sh     # End-to-end validation
 
@@ -28,6 +30,7 @@ cargo run                    # main binary
 cargo run --bin server       # game server
 cargo run --bin client       # client
 cargo run --bin selfplay     # self-play training loop
+cargo run --release --bin perft -- <FEN> <depth>  # perft CLI
 ```
 
 ## Architecture
