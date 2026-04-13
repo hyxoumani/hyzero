@@ -300,14 +300,16 @@ impl GameBoard {
                 white_pieces,
                 player2.pieces_bb[PieceType::King as usize]
                     | player2.pieces_bb[PieceType::Rook as usize]
-                    | player2.pieces_bb[PieceType::Bishop as usize],
+                    | player2.pieces_bb[PieceType::Bishop as usize]
+                    | player2.pieces_bb[PieceType::Queen as usize],
             ),
             Color::Black => (
                 player2.pieces_bb[PieceType::King as usize],
                 black_pieces,
                 player1.pieces_bb[PieceType::King as usize]
                     | player1.pieces_bb[PieceType::Rook as usize]
-                    | player1.pieces_bb[PieceType::Bishop as usize],
+                    | player1.pieces_bb[PieceType::Bishop as usize]
+                    | player1.pieces_bb[PieceType::Queen as usize],
             ),
         };
 
