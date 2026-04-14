@@ -95,18 +95,7 @@ pub fn assemble_batch_arrays(samples: &[TrainingSample], unroll_k: usize) -> Bat
             }
             // Entries for actions not in legal_moves stay 0.0 from initialization
 
-            // Outcome-based value target: game_outcome is from white's perspective
-            // (+1 = white wins, -1 = black wins, 0 = draw).
-            // Observation plane 101 encodes side-to-move: 1.0 = white, 0.0 = black.
-            // The target value is from the perspective of the side to move at step k:
-            //   white-to-move: target = +game_outcome
-            //   black-to-move: target = -game_outcome
-            // We read side-to-move from the observation rather than relying on k%2,
-            // because the sample window may start at any ply (even or odd).
-            const SIDE_TO_MOVE_PLANE: usize = 101;
-            let side_to_move_val = step.observation.planes[SIDE_TO_MOVE_PLANE * 64];
-            let sign: f32 = if side_to_move_val > 0.5 { 1.0 } else { -1.0 };
-            target_values[bi * kp1 + k] = sign * sample.game_outcome;
+            target_values[bi * kp1 + k] = step.root_value;
             target_rewards[bi * kp1 + k] = step.reward;
         }
 
@@ -484,96 +473,6 @@ mod tests {
                 .collect(),
             game_outcome: 1.0,
         }
-    }
-
-    fn make_step_with_side_to_move(white_to_move: bool) -> StepRecord {
-        let mut obs = BoardObservation::default();
-        // Plane 101 (side-to-move): 1.0 = white, 0.0 = black
-        let plane_101_start = 101 * 64;
-        let val = if white_to_move { 1.0f32 } else { 0.0f32 };
-        for sq in 0..64 {
-            obs.planes[plane_101_start + sq] = val;
-        }
-        StepRecord {
-            observation: obs,
-            action: 42,
-            visit_distribution: vec![1.0],
-            root_value: 0.5,
-            reward: 0.0,
-            legal_moves: vec![42],
-        }
-    }
-
-    /// Verify that outcome-based value targets alternate sign correctly for a white-wins game.
-    /// Sample window starts at k=0 = white-to-move (plane 101 = 1.0).
-    /// Expected targets: +1.0, -1.0, +1.0, ... (K+1 values)
-    #[test]
-    fn test_batch_assembly_outcome_value_targets() {
-        let k = 2usize;
-
-        // Alternate sides: k=0 white, k=1 black, k=2 white
-        let steps = vec![
-            make_step_with_side_to_move(true),  // k=0: white-to-move
-            make_step_with_side_to_move(false), // k=1: black-to-move
-            make_step_with_side_to_move(true),  // k=2: white-to-move
-        ];
-        let sample = TrainingSample { steps, game_outcome: 1.0 };
-        let arrays = assemble_batch_arrays(&[sample], k);
-
-        // target_values[0] = +1.0 * 1.0 = +1.0 (white-to-move, white wins)
-        assert!(
-            (arrays.target_values[0] - 1.0).abs() < 1e-6,
-            "k=0 white-to-move, white wins: expected 1.0, got {}",
-            arrays.target_values[0]
-        );
-        // target_values[1] = -1.0 * 1.0 = -1.0 (black-to-move, black loses)
-        assert!(
-            (arrays.target_values[1] + 1.0).abs() < 1e-6,
-            "k=1 black-to-move, white wins: expected -1.0, got {}",
-            arrays.target_values[1]
-        );
-        // target_values[2] = +1.0 * 1.0 = +1.0 (white-to-move, white wins)
-        assert!(
-            (arrays.target_values[2] - 1.0).abs() < 1e-6,
-            "k=2 white-to-move, white wins: expected 1.0, got {}",
-            arrays.target_values[2]
-        );
-    }
-
-    /// Verify sign alternation for a black-wins game starting at black-to-move (odd ply).
-    /// Expected targets: -1.0, +1.0, -1.0 (black wins, but sign flips per side).
-    #[test]
-    fn test_outcome_value_black_wins() {
-        let k = 2usize;
-
-        // Sample starts at black-to-move (odd ply in original trajectory)
-        let steps = vec![
-            make_step_with_side_to_move(false), // k=0: black-to-move
-            make_step_with_side_to_move(true),  // k=1: white-to-move
-            make_step_with_side_to_move(false), // k=2: black-to-move
-        ];
-        let sample = TrainingSample { steps, game_outcome: -1.0 };
-        let arrays = assemble_batch_arrays(&[sample], k);
-
-        // k=0: black-to-move, game_outcome=-1 → target = -1 * (-1) = +1.0
-        // (black is in a winning position from its own perspective)
-        assert!(
-            (arrays.target_values[0] - 1.0).abs() < 1e-6,
-            "k=0 black-to-move, black wins: expected +1.0, got {}",
-            arrays.target_values[0]
-        );
-        // k=1: white-to-move, game_outcome=-1 → target = +1 * (-1) = -1.0
-        assert!(
-            (arrays.target_values[1] + 1.0).abs() < 1e-6,
-            "k=1 white-to-move, black wins: expected -1.0, got {}",
-            arrays.target_values[1]
-        );
-        // k=2: black-to-move, game_outcome=-1 → target = -1 * (-1) = +1.0
-        assert!(
-            (arrays.target_values[2] - 1.0).abs() < 1e-6,
-            "k=2 black-to-move, black wins: expected +1.0, got {}",
-            arrays.target_values[2]
-        );
     }
 
     #[test]
