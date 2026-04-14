@@ -22,7 +22,7 @@ class Trainer:
         h: RepresentationNetwork.
         g: DynamicsNetwork.
         f: PredictionNetwork.
-        optimizer: Shared Adam optimizer over all three networks.
+        optimizer: Shared AdamW optimizer over all three networks.
     """
 
     def __init__(self, config: dict = None, device: str = "cpu") -> None:
@@ -52,7 +52,7 @@ class Trainer:
             + list(self.g.parameters())
             + list(self.f.parameters())
         )
-        self.optimizer = torch.optim.Adam(
+        self.optimizer = torch.optim.AdamW(
             all_params,
             lr=cfg["lr"],
             weight_decay=cfg["weight_decay"],
