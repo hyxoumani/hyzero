@@ -2,7 +2,7 @@ use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple};
 
-use crate::data::{BoardObservation, HiddenState, Policy, NUM_ACTIONS};
+use crate::data::{BoardObservation, HiddenState, Policy, NUM_ACTIONS, NUM_OBS_PLANES};
 use crate::selfplay::inference::{InferenceBackend, InferenceRequest};
 
 /// PyO3 backend that delegates batch inference to the Python InferenceServer.
@@ -94,23 +94,23 @@ impl InferenceBackend for PyO3Backend {
             // --- RootSetup batch ---
             if !root_obs.is_empty() {
                 let b = root_obs.len();
-                // Stack observations: each planes Vec<f32> length 19*64 = 1216
-                let mut flat: Vec<f32> = Vec::with_capacity(b * 19 * 64);
+                // Stack observations: each planes Vec<f32> length NUM_OBS_PLANES*64
+                let mut flat: Vec<f32> = Vec::with_capacity(b * NUM_OBS_PLANES * 64);
                 for obs in &root_obs {
                     flat.extend_from_slice(&obs.planes);
                 }
 
                 let result: PyResult<()> = (|| {
-                    // Create numpy array [B*19*64] then reshape to [B, 19, 8, 8]
+                    // Create numpy array [B*NUM_OBS_PLANES*64] then reshape to [B, NUM_OBS_PLANES, 8, 8]
                     let arr = flat.into_pyarray(py);
-                    let obs_np = arr.reshape([b, 19, 8, 8])?;
+                    let obs_np = arr.reshape([b, NUM_OBS_PLANES, 8, 8])?;
 
                     let ret = self
                         .server
                         .call_method1(py, "root_setup_batch", (obs_np,))?;
                     let tuple = ret.cast_bound::<PyTuple>(py)?;
 
-                    // Unpack: (hidden [B,64,8,8], policies [B,4096], values [B])
+                    // Unpack: (hidden [B,64,8,8], policies [B,NUM_ACTIONS], values [B])
                     // Call .flatten() via Python to get a 1-D contiguous array we can read
                     let hidden_flat: PyReadonlyArray1<f32> = tuple
                         .get_item(0)?

@@ -8,16 +8,17 @@ use tokio::sync::{mpsc, watch};
 
 use crate::data::{
     encode_action_spatial, GameTrajectory, ReplayBuffer, TrainingSample, NUM_ACTIONS,
+    NUM_OBS_PLANES,
 };
 
 /// Flat arrays assembled from a batch of `TrainingSample` for Python training.
 ///
 /// Array shapes (all float32):
-///   observations:    [B, 19, 8, 8]  stored flat as B * 1216
+///   observations:    [B, 103, 8, 8]  stored flat as B * NUM_OBS_PLANES * 64
 ///   actions:         [B, K, 3, 8, 8] stored flat as B * K * 192
-///   target_policies: [B, K+1, 4096] stored flat as B * (K+1) * 4096
-///   target_values:   [B, K+1]       stored flat as B * (K+1)
-///   target_rewards:  [B, K+1]       stored flat as B * (K+1)
+///   target_policies: [B, K+1, 4672]  stored flat as B * (K+1) * NUM_ACTIONS
+///   target_values:   [B, K+1]        stored flat as B * (K+1)
+///   target_rewards:  [B, K+1]        stored flat as B * (K+1)
 pub struct BatchArrays {
     pub observations: Vec<f32>,
     pub actions: Vec<f32>,
@@ -39,9 +40,9 @@ pub fn assemble_batch_arrays(samples: &[TrainingSample], unroll_k: usize) -> Bat
     let b = samples.len();
     let kp1 = unroll_k + 1; // K+1
 
-    let obs_stride = 19 * 64; // 1216
-    let act_stride = 3 * 64;  // 192
-    let pol_stride = NUM_ACTIONS; // 4096
+    let obs_stride = NUM_OBS_PLANES * 64; // 103 * 64 = 6592
+    let act_stride = 3 * 64;             // 192
+    let pol_stride = NUM_ACTIONS;         // 4672
 
     let mut observations = vec![0.0f32; b * obs_stride];
     let mut actions = vec![0.0f32; b * unroll_k * act_stride];
@@ -109,8 +110,9 @@ pub struct TrainResult {
 
 /// Call `trainer.train_batch(batch_dict)` through the GIL and return all loss components.
 ///
-/// Converts flat Rust `Vec<f32>` arrays into shaped numpy arrays, builds the
-/// Python dict, calls `train_batch`, and extracts all four loss values.
+/// Converts flat Rust `Vec<f32>` arrays into shaped numpy arrays (`[B, 103, 8, 8]` obs,
+/// `[B, K+1, 4672]` policies), builds the Python dict, calls `train_batch`, and extracts
+/// all four loss values.
 pub fn train_batch_python(
     py: Python<'_>,
     trainer: &Py<PyAny>,
@@ -124,7 +126,7 @@ pub fn train_batch_python(
 
     // Build shaped numpy arrays
     let obs_arr = arrays.observations.into_pyarray(py);
-    let obs_np = obs_arr.reshape([b, 19, 8, 8])?;
+    let obs_np = obs_arr.reshape([b, NUM_OBS_PLANES, 8, 8])?;
 
     let act_arr = arrays.actions.into_pyarray(py);
     let actions_np = act_arr.reshape([b, k, 3, 8, 8])?;
@@ -262,7 +264,7 @@ impl PyTrainingThread {
             256,    // train_batch_size
             5,      // unroll_k
             200,    // min_samples
-            4,      // train_steps_per_game
+            8,      // train_steps_per_game
             50,     // checkpoint_interval_steps
             5,      // checkpoint_keep_last
         );
@@ -460,9 +462,9 @@ mod tests {
 
         assert_eq!(
             arrays.observations.len(),
-            b * 19 * 64,
-            "observations length should be B * 19 * 64 = {}",
-            b * 19 * 64
+            b * NUM_OBS_PLANES * 64,
+            "observations length should be B * NUM_OBS_PLANES * 64 = {}",
+            b * NUM_OBS_PLANES * 64
         );
         assert_eq!(
             arrays.actions.len(),
@@ -473,7 +475,7 @@ mod tests {
         assert_eq!(
             arrays.target_policies.len(),
             b * kp1 * NUM_ACTIONS,
-            "target_policies length should be B * (K+1) * 4096 = {}",
+            "target_policies length should be B * (K+1) * NUM_ACTIONS = {}",
             b * kp1 * NUM_ACTIONS
         );
         assert_eq!(
@@ -498,7 +500,7 @@ mod tests {
         let k = 2usize;
         let kp1 = k + 1;
 
-        // Create a sample where visit_distribution has only 10 entries (not 4096)
+        // Create a sample where visit_distribution has only 10 entries (not NUM_ACTIONS)
         let sample = TrainingSample {
             steps: (0..kp1)
                 .map(|_| make_step_with_dist(vec![0.1f32; short_dist_len]))
@@ -508,7 +510,7 @@ mod tests {
 
         let arrays = assemble_batch_arrays(&[sample], k);
 
-        // Total policy entries: B=1 * (K+1) * 4096
+        // Total policy entries: B=1 * (K+1) * NUM_ACTIONS
         assert_eq!(arrays.target_policies.len(), kp1 * NUM_ACTIONS);
 
         // First `short_dist_len` entries of step 0's policy should be 0.1
