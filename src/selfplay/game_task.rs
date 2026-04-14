@@ -1,9 +1,10 @@
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 use crate::{PrecomputedItems, Color, PieceType, BitIterator, CastleOption, Square};
 use crate::data::{
-    ActionIndex, StepRecord, GameTrajectory,
-    encode_board, move_to_action,
+    ActionIndex, BoardSnapshot, StepRecord, GameTrajectory,
+    encode_board, board_to_snapshot, move_to_action, NUM_BASE_ACTIONS,
 };
 use crate::game::{Move, GameBoard, Player};
 use crate::game::board::GameResult;
@@ -43,6 +44,8 @@ pub async fn play_game(
     let mut steps: Vec<StepRecord> = Vec::new();
     let mut turn_count: usize = 0;
     let mut side_to_move = Color::White;
+    // History buffer for encode_board: stores up to 7 past snapshots (oldest first).
+    let mut history: VecDeque<BoardSnapshot> = VecDeque::with_capacity(7);
 
     const MAX_GAME_LENGTH: usize = 300;
 
@@ -61,7 +64,8 @@ pub async fn play_game(
             break;
         }
 
-        let observation = encode_board(&board, side_to_move);
+        let hist_slice = history.make_contiguous();
+        let observation = encode_board(&board, side_to_move, hist_slice);
         let legal_actions = get_legal_moves(&board, side_to_move);
 
         if legal_actions.is_empty() {
@@ -103,8 +107,11 @@ pub async fn play_game(
             legal_moves: legal_actions,
         });
 
+        // Snapshot position before applying the move (for history encoding on next turn)
+        let snapshot = board_to_snapshot(&board);
+
         // Convert action to move notation and apply
-        let move_str = action_to_notation(action);
+        let move_str = action_to_notation(action, side_to_move);
         match board.process_move(&move_str, side_to_move, turn_count) {
             Ok(_) => {}
             Err(_) => {
@@ -113,6 +120,12 @@ pub async fn play_game(
                 break;
             }
         }
+
+        // Add pre-move snapshot to history buffer (oldest first); keep at most 7
+        if history.len() == 7 {
+            history.pop_front();
+        }
+        history.push_back(snapshot);
 
         // Alternate sides
         side_to_move = if side_to_move == Color::White { Color::Black } else { Color::White };
@@ -138,8 +151,42 @@ pub async fn play_game(
     }
 }
 
-/// Convert an ActionIndex (from*64 + to) to coordinate notation string (e.g., "e2e4").
-fn action_to_notation(action: ActionIndex) -> String {
+/// Convert an ActionIndex to coordinate notation string (e.g., "e2e4").
+///
+/// For underpromotion actions (>= NUM_BASE_ACTIONS) the from/to squares are
+/// derived from the encoded file indices and the color's promotion rank.
+/// The suffix is "n", "b", or "r" for knight/bishop/rook underpromotion.
+fn action_to_notation(action: ActionIndex, color: Color) -> String {
+    if action as usize >= NUM_BASE_ACTIONS {
+        // Decode underpromotion: piece_idx encodes suffix, from_file and to_file
+        // give from/to squares at the promotion rank for this color.
+        let offset = action as usize - NUM_BASE_ACTIONS;
+        let piece_idx = offset / 192;
+        let remainder = offset % 192;
+        let from_file = (remainder / 24) as u8;
+        let to_file_slot = (remainder % 24) as u8;
+        // to_file_slot 0-7 encodes to_file directly (clamped to 0-7)
+        let to_file = to_file_slot.min(7);
+
+        let (from_rank_char, to_rank_char) = if color == Color::White {
+            ('7', '8') // White pawn on rank 7 promotes to rank 8
+        } else {
+            ('2', '1') // Black pawn on rank 2 promotes to rank 1
+        };
+
+        let from_file_char = (b'a' + from_file) as char;
+        let to_file_char = (b'a' + to_file) as char;
+
+        let suffix = match piece_idx {
+            0 => 'n', // Knight
+            1 => 'b', // Bishop
+            2 => 'r', // Rook
+            _ => 'q', // Fallback (shouldn't happen)
+        };
+
+        return format!("{}{}{}{}{}", from_file_char, from_rank_char, to_file_char, to_rank_char, suffix);
+    }
+
     let from_sq = (action / 64) as u8;
     let to_sq = (action % 64) as u8;
 
@@ -181,29 +228,44 @@ fn get_legal_moves(board: &GameBoard, color: Color) -> Vec<ActionIndex> {
             let from = Square::from(sq as u8);
             let to = Square::from(to_sq as u8);
 
-            // Detect promotion
             let to_rank = to_sq / 8;
-            let promotion = if piece.piece_type == PieceType::Pawn && (to_rank == 7 || to_rank == 0) {
-                Some(PieceType::Queen)
-            } else {
-                None
-            };
+            let is_promotion = piece.piece_type == PieceType::Pawn && (to_rank == 7 || to_rank == 0);
 
             // Detect en passant
             let en_passant = piece.piece_type == PieceType::Pawn
                 && board.en_passant_target == Some(to_sq)
                 && (sq % 8 != to_sq % 8); // diagonal move to EP square
 
-            let candidate = Move {
-                from,
-                to,
-                promotion_piece_type: promotion,
-                castle_option: None,
-                en_passant,
-            };
-
-            if board.validate_move(candidate, color, combined, board.white_pieces, board.black_pieces) {
-                legal.push(move_to_action(&candidate));
+            if is_promotion {
+                // Emit all 4 promotion types (queen + 3 underpromotions)
+                for &promo_type in &[
+                    PieceType::Queen,
+                    PieceType::Knight,
+                    PieceType::Bishop,
+                    PieceType::Rook,
+                ] {
+                    let candidate = Move {
+                        from,
+                        to,
+                        promotion_piece_type: Some(promo_type),
+                        castle_option: None,
+                        en_passant: false,
+                    };
+                    if board.validate_move(candidate, color, combined, board.white_pieces, board.black_pieces) {
+                        legal.push(move_to_action(&candidate));
+                    }
+                }
+            } else {
+                let candidate = Move {
+                    from,
+                    to,
+                    promotion_piece_type: None,
+                    castle_option: None,
+                    en_passant,
+                };
+                if board.validate_move(candidate, color, combined, board.white_pieces, board.black_pieces) {
+                    legal.push(move_to_action(&candidate));
+                }
             }
         }
 
@@ -303,11 +365,90 @@ mod tests {
     #[test]
     fn test_action_to_notation() {
         // e2 = sq 12, e4 = sq 28 → action = 12*64 + 28 = 796
-        let notation = action_to_notation(796);
+        let notation = action_to_notation(796, Color::White);
         assert_eq!(notation, "e2e4");
 
         // a7 = sq 48, a8 = sq 56 → action = 48*64 + 56 = 3128 (promotion)
-        let notation = action_to_notation(3128);
+        let notation = action_to_notation(3128, Color::White);
         assert_eq!(notation, "a7a8q");
+    }
+
+    #[test]
+    fn test_action_to_notation_underpromotion_white() {
+        use crate::data::encoding::move_to_action as m2a;
+        use crate::game::Move;
+
+        // White pawn e7→e8 with knight underpromotion
+        // from_sq = 52 (e7), to_sq = 60 (e8)
+        let mv = Move {
+            from: Square::E7,
+            to: Square::E8,
+            promotion_piece_type: Some(PieceType::Knight),
+            castle_option: None,
+            en_passant: false,
+        };
+        let action = m2a(&mv);
+        assert!(action as usize >= NUM_BASE_ACTIONS, "expected underpromo action, got {action}");
+        let notation = action_to_notation(action, Color::White);
+        assert_eq!(notation, "e7e8n");
+    }
+
+    #[test]
+    fn test_action_to_notation_underpromotion_rook_white() {
+        use crate::data::encoding::move_to_action as m2a;
+        use crate::game::Move;
+
+        // White pawn a7→a8 with rook underpromotion
+        let mv = Move {
+            from: Square::A7,
+            to: Square::A8,
+            promotion_piece_type: Some(PieceType::Rook),
+            castle_option: None,
+            en_passant: false,
+        };
+        let action = m2a(&mv);
+        assert!(action as usize >= NUM_BASE_ACTIONS);
+        let notation = action_to_notation(action, Color::White);
+        assert_eq!(notation, "a7a8r");
+    }
+
+    #[test]
+    fn test_legal_moves_promotion_position() {
+        use crate::game::fen::board_from_fen;
+        use crate::PrecomputedItems;
+        use std::sync::Arc;
+
+        // FEN: white pawn on e7, white king on a1, black king on h1. White to move.
+        // e8 is empty so the pawn can push straight → 4 promotion types (Q, N, B, R).
+        let precomputed = Arc::new(PrecomputedItems::begin_precomputing());
+        let (board, _, _) = board_from_fen(
+            "8/4P3/8/8/8/8/8/K6k w - - 0 1",
+            precomputed,
+        )
+        .expect("invalid FEN");
+
+        let moves = get_legal_moves(&board, Color::White);
+
+        // King has ≤5 moves, pawn has 4 promotions. Only care that pawn promotions are present.
+        // Identify queen promotions: actions in base range (< NUM_BASE_ACTIONS) where to_sq is
+        // on rank 8 (to_sq / 8 == 7) and from_sq is on rank 7 (from_sq / 8 == 6).
+        let queen_promos: Vec<_> = moves
+            .iter()
+            .copied()
+            .filter(|&a| {
+                if (a as usize) >= NUM_BASE_ACTIONS { return false; }
+                let from_sq = (a / 64) as u8;
+                let to_sq = (a % 64) as u8;
+                from_sq / 8 == 6 && to_sq / 8 == 7
+            })
+            .collect();
+        let underpromos: Vec<_> = moves
+            .iter()
+            .copied()
+            .filter(|&a| (a as usize) >= NUM_BASE_ACTIONS)
+            .collect();
+
+        assert_eq!(queen_promos.len(), 1, "Expected 1 queen promotion in all moves {:?}", moves);
+        assert_eq!(underpromos.len(), 3, "Expected 3 underpromotion moves in all moves {:?}", moves);
     }
 }

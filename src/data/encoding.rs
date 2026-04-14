@@ -1,19 +1,31 @@
-use super::types::{ActionIndex, BoardObservation, NUM_ACTIONS};
+use super::types::{ActionIndex, BoardObservation, BoardSnapshot, NUM_ACTIONS, NUM_BASE_ACTIONS};
 use crate::game::{GameBoard, Move};
 use crate::{BitIterator, CastleOption, Color, Piece, PieceType, Square};
 
 /// Encode a GameBoard into a BoardObservation for the representation network.
-pub fn encode_board(board: &GameBoard, side_to_move: Color) -> BoardObservation {
+///
+/// Produces 103 planes: 8 positions × 12 piece planes + 7 game-state planes.
+///
+/// # Arguments
+/// * `board`        — current board state
+/// * `side_to_move` — whose turn it is
+/// * `history`      — slice of up to 7 past `BoardSnapshot`s, oldest first.
+///                    If fewer than 7 are provided, missing positions are all-zeros.
+pub fn encode_board(
+    board: &GameBoard,
+    side_to_move: Color,
+    history: &[BoardSnapshot],
+) -> BoardObservation {
     let mut obs = BoardObservation::default();
 
-    // Planes 0-5: White pieces (Pawn=0, Knight=1, Bishop=2, Rook=3, Queen=4, King=5)
+    // Planes 0-11: Current position pieces
+    // Planes 0-5:  White pieces (Pawn=0, Knight=1, Bishop=2, Rook=3, Queen=4, King=5)
     for pt in 0..6 {
         let bb = board.player1.pieces_bb[pt];
         for sq in BitIterator::new(bb) {
             obs.planes[pt * 64 + sq] = 1.0;
         }
     }
-
     // Planes 6-11: Black pieces
     for pt in 0..6 {
         let bb = board.player2.pieces_bb[pt];
@@ -22,7 +34,28 @@ pub fn encode_board(board: &GameBoard, side_to_move: Color) -> BoardObservation 
         }
     }
 
-    // Planes 12-15: Castling rights (constant plane — all 64 squares set to 1.0 if right available)
+    // Planes 12-95: Past positions (up to 7), each encoded as 12 piece planes.
+    // history[0] is the oldest position provided; we place it at the earliest available slot.
+    // If history has N entries (N <= 7), they fill planes 12..12+N*12; remainder is zeros.
+    for (i, snap) in history.iter().enumerate() {
+        let plane_base = (1 + i) * 12; // position slot 1..=7
+                                       // White pieces (6 planes)
+        for pt in 0..6 {
+            let bb = snap.white_pieces_bb[pt];
+            for sq in BitIterator::new(bb) {
+                obs.planes[(plane_base + pt) * 64 + sq] = 1.0;
+            }
+        }
+        // Black pieces (6 planes)
+        for pt in 0..6 {
+            let bb = snap.black_pieces_bb[pt];
+            for sq in BitIterator::new(bb) {
+                obs.planes[(plane_base + 6 + pt) * 64 + sq] = 1.0;
+            }
+        }
+    }
+
+    // Planes 96-99: Castling rights (current position only — constant planes)
     let castling = [
         board.white_kingside,
         board.white_queenside,
@@ -31,29 +64,29 @@ pub fn encode_board(board: &GameBoard, side_to_move: Color) -> BoardObservation 
     ];
     for (i, &has_right) in castling.iter().enumerate() {
         if has_right {
-            let plane_offset = (12 + i) * 64;
+            let plane_offset = (96 + i) * 64;
             for sq in 0..64 {
                 obs.planes[plane_offset + sq] = 1.0;
             }
         }
     }
 
-    // Plane 16: En passant target (one-hot)
+    // Plane 100: En passant target (one-hot, current position only)
     if let Some(ep_sq) = board.en_passant_target {
-        obs.planes[16 * 64 + ep_sq] = 1.0;
+        obs.planes[100 * 64 + ep_sq] = 1.0;
     }
 
-    // Plane 17: Side to move (all 1.0 if white, all 0.0 if black)
+    // Plane 101: Side to move (all 1.0 if white, all 0.0 if black)
     if side_to_move == Color::White {
-        let plane_offset = 17 * 64;
+        let plane_offset = 101 * 64;
         for sq in 0..64 {
             obs.planes[plane_offset + sq] = 1.0;
         }
     }
 
-    // Plane 18: Halfmove clock (normalized by 100)
+    // Plane 102: Halfmove clock (normalized by 100)
     let clock_val = board.halfmove_clock as f32 / 100.0;
-    let plane_offset = 18 * 64;
+    let plane_offset = 102 * 64;
     for sq in 0..64 {
         obs.planes[plane_offset + sq] = clock_val;
     }
@@ -61,15 +94,100 @@ pub fn encode_board(board: &GameBoard, side_to_move: Color) -> BoardObservation 
     obs
 }
 
-/// Encode a Move as an ActionIndex (from_square * 64 + to_square).
-/// Default queen promotion — underpromotion support added later.
+/// Snapshot the current board into a lightweight `BoardSnapshot` for the history buffer.
+pub fn board_to_snapshot(board: &GameBoard) -> BoardSnapshot {
+    BoardSnapshot {
+        white_pieces_bb: board.player1.pieces_bb,
+        black_pieces_bb: board.player2.pieces_bb,
+    }
+}
+
+/// Underpromotion encoding (actions 4096..4671):
+///
+/// For non-queen promotions, the action index is:
+///   action = NUM_BASE_ACTIONS + piece_idx * 192 + from_file * 24 + to_file_slot
+///
+/// where:
+///   piece_idx:    0 = Knight, 1 = Bishop, 2 = Rook
+///   from_file:    0-7 (file of the promoting pawn)
+///   to_file_slot: encodes the destination file relative to from_file:
+///                 0-7:   to_file = 0-7 (straight-ahead, only slot 0 == from_file is legal)
+///                 8-15:  reserved (not used, network learns to suppress)
+///                 16-23: reserved (not used, network learns to suppress)
+///
+/// In practice only 3 destinations per from_file are legal:
+///   from_file (straight), from_file-1 (left capture), from_file+1 (right capture).
+/// We encode to_file directly (0-7) in to_file_slot so round-tripping is clean.
+/// The 576 slots include many illegal (from_file, to_file) combinations — the
+/// network learns to suppress them, just as it does for illegal base moves.
+fn encode_underpromo_action(piece_type: PieceType, from_sq: u8, to_sq: u8) -> ActionIndex {
+    let piece_idx: usize = match piece_type {
+        PieceType::Knight => 0,
+        PieceType::Bishop => 1,
+        PieceType::Rook => 2,
+        _ => panic!("encode_underpromo_action: unexpected piece type"),
+    };
+    let from_file = (from_sq % 8) as usize;
+    let to_file = (to_sq % 8) as usize;
+    (NUM_BASE_ACTIONS + piece_idx * 192 + from_file * 24 + to_file) as ActionIndex
+}
+
+/// Decode an underpromotion action (>= NUM_BASE_ACTIONS) into its components.
+/// Returns (piece_type, from_file, to_file).
+fn decode_underpromo_action(action: ActionIndex) -> (PieceType, u8, u8) {
+    let offset = action as usize - NUM_BASE_ACTIONS;
+    let piece_idx = offset / 192;
+    let remainder = offset % 192;
+    let from_file = (remainder / 24) as u8;
+    let to_file = (remainder % 24) as u8;
+
+    let piece_type = match piece_idx {
+        0 => PieceType::Knight,
+        1 => PieceType::Bishop,
+        2 => PieceType::Rook,
+        _ => panic!("decode_underpromo_action: invalid piece_idx {piece_idx}"),
+    };
+    (piece_type, from_file, to_file)
+}
+
+/// Encode a Move as an ActionIndex.
+///
+/// For queen promotions and non-promotion moves: `from_sq * 64 + to_sq` (base range 0..4095).
+/// For knight/bishop/rook promotions: underpromotion encoding in range 4096..4671.
 pub fn move_to_action(mv: &Move) -> ActionIndex {
-    (mv.from as u16) * 64 + (mv.to as u16)
+    match mv.promotion_piece_type {
+        Some(PieceType::Knight) | Some(PieceType::Bishop) | Some(PieceType::Rook) => {
+            encode_underpromo_action(mv.promotion_piece_type.unwrap(), mv.from as u8, mv.to as u8)
+        }
+        _ => (mv.from as u16) * 64 + (mv.to as u16),
+    }
 }
 
 /// Decode an ActionIndex back to a Move, using board context to detect castling and en passant.
-/// Promotion defaults to Queen when a pawn reaches the back rank.
-pub fn action_to_move(action: ActionIndex, board: &GameBoard, _color: Color) -> Move {
+///
+/// For actions in the underpromotion range (>= NUM_BASE_ACTIONS), reconstructs the move
+/// from the encoded from_file and to_file, inferring the correct rank from the color.
+pub fn action_to_move(action: ActionIndex, board: &GameBoard, color: Color) -> Move {
+    // Handle underpromotion range
+    if action as usize >= NUM_BASE_ACTIONS {
+        let (piece_type, from_file, to_file) = decode_underpromo_action(action);
+        // Determine from_rank and to_rank based on color
+        let (from_rank, to_rank): (u8, u8) = if color == Color::White {
+            (6, 7) // White pawn promotes from rank 7 (sq 48-55) to rank 8 (sq 56-63)
+        } else {
+            (1, 0) // Black pawn promotes from rank 2 (sq 8-15) to rank 1 (sq 0-7)
+        };
+        let from_sq = from_rank * 8 + from_file;
+        let to_sq = to_rank * 8 + to_file;
+        return Move {
+            from: Square::from(from_sq),
+            to: Square::from(to_sq),
+            promotion_piece_type: Some(piece_type),
+            castle_option: None,
+            en_passant: false,
+        };
+    }
+
     let from_sq = (action / 64) as u8;
     let to_sq = (action % 64) as u8;
     let from_file = (from_sq % 8) as i8;
@@ -121,18 +239,33 @@ pub fn action_to_move(action: ActionIndex, board: &GameBoard, _color: Color) -> 
 /// Plane 0: source square one-hot (8x8)
 /// Plane 1: destination square one-hot (8x8)
 /// Plane 2: promotion flag (all 1s if promotion, all 0s otherwise)
+///
+/// For underpromotion actions (>= NUM_BASE_ACTIONS), the from/to squares are derived
+/// from the encoded from_file and to_file. Since these always involve a promotion,
+/// the promotion flag plane is always set for underpromotion actions.
 pub fn encode_action_spatial(action: ActionIndex) -> [f32; 3 * 64] {
     let mut planes = [0.0f32; 3 * 64];
-    let from_sq = (action / 64) as usize;
-    let to_sq = (action % 64) as usize;
+
+    let (from_sq, to_sq, is_promo) = if action as usize >= NUM_BASE_ACTIONS {
+        // Underpromotion: decode file indices; use rank 6→7 (white perspective) for spatial encoding
+        let (_piece_type, from_file, to_file) = decode_underpromo_action(action);
+        let from_sq = 6 * 8 + from_file as usize; // rank 7 (0-indexed 6)
+        let to_sq = 7 * 8 + to_file as usize; // rank 8 (0-indexed 7)
+        (from_sq, to_sq, true)
+    } else {
+        let from_sq = (action / 64) as usize;
+        let to_sq = (action % 64) as usize;
+        let to_rank = to_sq / 8;
+        let is_promo = to_rank == 7 || to_rank == 0;
+        (from_sq, to_sq, is_promo)
+    };
 
     // Plane 0: source square
     planes[from_sq] = 1.0;
     // Plane 1: destination square
     planes[64 + to_sq] = 1.0;
     // Plane 2: promotion flag
-    let to_rank = to_sq / 8;
-    if to_rank == 7 || to_rank == 0 {
+    if is_promo {
         for sq in 0..64 {
             planes[128 + sq] = 1.0;
         }
@@ -149,7 +282,8 @@ pub fn num_actions() -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::game::{GameBoard, Player};
+    use crate::data::{NUM_OBS_PLANES, NUM_UNDERPROMO_ACTIONS};
+    use crate::game::{GameBoard, Move, Player};
     use crate::{Color, Piece, PieceType, PrecomputedItems, Square};
     use std::sync::Arc;
 
@@ -240,5 +374,215 @@ mod tests {
         board.en_passant_target = Some(43);
         let mv = action_to_move(36 * 64 + 44, &board, Color::White);
         assert!(!mv.en_passant);
+    }
+
+    #[test]
+    fn test_move_to_action_knight_promotion() {
+        // White pawn e7 (sq 52) → e8 (sq 60) with Knight promotion
+        let mv = Move {
+            from: Square::E7,
+            to: Square::E8,
+            promotion_piece_type: Some(PieceType::Knight),
+            castle_option: None,
+            en_passant: false,
+        };
+        let action = move_to_action(&mv);
+        assert!(
+            action as usize >= NUM_BASE_ACTIONS
+                && (action as usize) < NUM_BASE_ACTIONS + NUM_UNDERPROMO_ACTIONS,
+            "knight promotion action {action} out of underpromo range"
+        );
+    }
+
+    #[test]
+    fn test_move_to_action_bishop_promotion() {
+        // White pawn e7 → e8 with Bishop promotion
+        let mv = Move {
+            from: Square::E7,
+            to: Square::E8,
+            promotion_piece_type: Some(PieceType::Bishop),
+            castle_option: None,
+            en_passant: false,
+        };
+        let action = move_to_action(&mv);
+        assert!(
+            action as usize >= NUM_BASE_ACTIONS
+                && (action as usize) < NUM_BASE_ACTIONS + NUM_UNDERPROMO_ACTIONS,
+            "bishop promotion action {action} out of underpromo range"
+        );
+    }
+
+    #[test]
+    fn test_move_to_action_rook_promotion() {
+        // White pawn e7 → e8 with Rook promotion
+        let mv = Move {
+            from: Square::E7,
+            to: Square::E8,
+            promotion_piece_type: Some(PieceType::Rook),
+            castle_option: None,
+            en_passant: false,
+        };
+        let action = move_to_action(&mv);
+        assert!(
+            action as usize >= NUM_BASE_ACTIONS
+                && (action as usize) < NUM_BASE_ACTIONS + NUM_UNDERPROMO_ACTIONS,
+            "rook promotion action {action} out of underpromo range"
+        );
+    }
+
+    #[test]
+    fn test_move_to_action_queen_promotion_stays_in_base_range() {
+        // Queen promotion must stay in base (from*64+to) range
+        let mv = Move {
+            from: Square::E7,
+            to: Square::E8,
+            promotion_piece_type: Some(PieceType::Queen),
+            castle_option: None,
+            en_passant: false,
+        };
+        let action = move_to_action(&mv);
+        assert!(
+            (action as usize) < NUM_BASE_ACTIONS,
+            "queen promotion action {action} should be < NUM_BASE_ACTIONS"
+        );
+    }
+
+    #[test]
+    fn test_action_to_move_knight_underpromo_roundtrip_white() {
+        // Encode then decode: white pawn e7 → e8 knight underpromotion
+        let original = Move {
+            from: Square::E7,
+            to: Square::E8,
+            promotion_piece_type: Some(PieceType::Knight),
+            castle_option: None,
+            en_passant: false,
+        };
+        let action = move_to_action(&original);
+        let board = make_board();
+        let decoded = action_to_move(action, &board, Color::White);
+
+        assert_eq!(decoded.promotion_piece_type, Some(PieceType::Knight));
+        assert_eq!(decoded.from, Square::E7);
+        assert_eq!(decoded.to, Square::E8);
+        assert!(decoded.castle_option.is_none());
+        assert!(!decoded.en_passant);
+    }
+
+    #[test]
+    fn test_action_to_move_rook_underpromo_roundtrip_white() {
+        // Encode then decode: white pawn e7 → e8 rook underpromotion
+        let original = Move {
+            from: Square::E7,
+            to: Square::E8,
+            promotion_piece_type: Some(PieceType::Rook),
+            castle_option: None,
+            en_passant: false,
+        };
+        let action = move_to_action(&original);
+        let board = make_board();
+        let decoded = action_to_move(action, &board, Color::White);
+
+        assert_eq!(decoded.promotion_piece_type, Some(PieceType::Rook));
+        assert_eq!(decoded.from, Square::E7);
+        assert_eq!(decoded.to, Square::E8);
+    }
+
+    #[test]
+    fn test_action_to_move_black_underpromo_knight() {
+        // Black pawn h2 (sq 15) → h1 (sq 7) with knight underpromotion
+        // h2 = rank 2 (0-indexed 1), file h (7), sq = 1*8+7 = 15
+        // h1 = rank 1 (0-indexed 0), file h (7), sq = 0*8+7 = 7
+        let original = Move {
+            from: Square::H2,
+            to: Square::H1,
+            promotion_piece_type: Some(PieceType::Knight),
+            castle_option: None,
+            en_passant: false,
+        };
+        let action = move_to_action(&original);
+        let board = make_board();
+        let decoded = action_to_move(action, &board, Color::Black);
+
+        assert_eq!(decoded.promotion_piece_type, Some(PieceType::Knight));
+        assert_eq!(decoded.from, Square::H2);
+        assert_eq!(decoded.to, Square::H1);
+    }
+
+    #[test]
+    fn test_different_underpromo_pieces_have_distinct_actions() {
+        // Knight, Bishop, Rook promotions for same from/to must have distinct actions
+        let mk_mv = |pt: PieceType| Move {
+            from: Square::D7,
+            to: Square::D8,
+            promotion_piece_type: Some(pt),
+            castle_option: None,
+            en_passant: false,
+        };
+        let knight_action = move_to_action(&mk_mv(PieceType::Knight));
+        let bishop_action = move_to_action(&mk_mv(PieceType::Bishop));
+        let rook_action = move_to_action(&mk_mv(PieceType::Rook));
+
+        assert_ne!(
+            knight_action, bishop_action,
+            "Knight and Bishop promotions must differ"
+        );
+        assert_ne!(
+            bishop_action, rook_action,
+            "Bishop and Rook promotions must differ"
+        );
+        assert_ne!(
+            knight_action, rook_action,
+            "Knight and Rook promotions must differ"
+        );
+    }
+
+    #[test]
+    fn test_encode_board_plane_count() {
+        let board = make_board();
+        let obs = encode_board(&board, Color::White, &[]);
+        assert_eq!(
+            obs.planes.len(),
+            NUM_OBS_PLANES * 64,
+            "encode_board output length should be NUM_OBS_PLANES * 64 = {}",
+            NUM_OBS_PLANES * 64
+        );
+    }
+
+    #[test]
+    fn test_encode_board_no_history_planes_are_zero() {
+        let board = make_board();
+        let obs = encode_board(&board, Color::White, &[]);
+        // Planes 12-95 (past positions) should all be zero when no history provided
+        for plane in 12..96 {
+            for sq in 0..64 {
+                assert_eq!(
+                    obs.planes[plane * 64 + sq],
+                    0.0,
+                    "plane {plane} sq {sq} should be 0 with empty history"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_encode_board_with_history_plane_matches_snapshot() {
+        let board = make_board();
+        let snap = board_to_snapshot(&board);
+        // Provide one snapshot (past position 1 → planes 12-23)
+        let obs = encode_board(&board, Color::White, &[snap.clone()]);
+
+        // Planes 12-17 should match white pieces of the snapshot
+        for pt in 0..6 {
+            let bb = snap.white_pieces_bb[pt];
+            for sq in 0..64usize {
+                let expected = if (bb >> sq) & 1 == 1 { 1.0f32 } else { 0.0f32 };
+                let plane = 12 + pt;
+                assert_eq!(
+                    obs.planes[plane * 64 + sq],
+                    expected,
+                    "white piece plane {plane} sq {sq} mismatch"
+                );
+            }
+        }
     }
 }
