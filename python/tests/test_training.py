@@ -8,16 +8,20 @@ import numpy as np
 import pytest
 import torch
 
+from hyzero.config import DEFAULT_CONFIG
 from hyzero.training import Trainer
+
+INPUT_PLANES = DEFAULT_CONFIG["input_planes"]   # 103
+NUM_ACTIONS = DEFAULT_CONFIG["num_actions"]     # 4672
 
 
 def make_random_batch(batch_size: int = 4, k_steps: int = 3) -> dict:
     """Create a random batch compatible with Trainer.train_batch."""
     return {
-        "observations": np.random.randn(batch_size, 19, 8, 8).astype(np.float32),
+        "observations": np.random.randn(batch_size, INPUT_PLANES, 8, 8).astype(np.float32),
         "actions": np.random.randn(batch_size, k_steps, 3, 8, 8).astype(np.float32),
         "target_policies": np.full(
-            (batch_size, k_steps + 1, 4096), 1.0 / 4096, dtype=np.float32
+            (batch_size, k_steps + 1, NUM_ACTIONS), 1.0 / NUM_ACTIONS, dtype=np.float32
         ),
         "target_values": np.random.uniform(-1, 1, (batch_size, k_steps + 1)).astype(
             np.float32

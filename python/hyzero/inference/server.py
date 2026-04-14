@@ -49,25 +49,36 @@ class InferenceServer:
         ).to(device).eval()
 
     @torch.no_grad()
-    def root_setup_batch(self, observations: np.ndarray) -> tuple:
+    def root_setup_batch(
+        self,
+        observations: np.ndarray,
+        legal_masks: np.ndarray | None = None,
+    ) -> tuple:
         """Encode observations and predict policy + value for root nodes.
 
         Args:
-            observations: [B, 19, 8, 8] float32 numpy array.
+            observations: [B, 103, 8, 8] float32 numpy array.
+            legal_masks:  [B, 4672] bool numpy array or None.
+                          If provided, illegal actions are masked to -inf before softmax
+                          so the returned policy is non-zero only on legal moves.
 
         Returns:
             Tuple of numpy float32 arrays:
                 hidden_states: [B, 64, 8, 8]
-                policies:      [B, 4096]  (softmax-normalized)
+                policies:      [B, 4672]  (softmax-normalized, masked if legal_masks provided)
                 values:        [B]
         """
-        # observations: [B, 19, 8, 8] -> tensor on device
+        # observations: [B, 103, 8, 8] -> tensor on device
         obs_t = torch.from_numpy(observations).to(self.device)
 
         hidden = self.h(obs_t)                    # [B, 64, 8, 8]
-        policy_logits, value = self.f(hidden)     # [B, 4096], [B, 1]
+        policy_logits, value = self.f(hidden)     # [B, 4672], [B, 1]
 
-        policies = F.softmax(policy_logits, dim=-1)  # [B, 4096]
+        if legal_masks is not None:
+            mask_t = torch.from_numpy(legal_masks).to(self.device)  # [B, 4672] bool
+            policy_logits = policy_logits.masked_fill(~mask_t, float('-inf'))
+
+        policies = F.softmax(policy_logits, dim=-1)  # [B, 4672]
 
         return (
             hidden.cpu().numpy().astype(np.float32),
@@ -83,6 +94,9 @@ class InferenceServer:
     ) -> tuple:
         """Expand leaf nodes: dynamics step then prediction.
 
+        Note: no legal-move mask is applied here. At depth > 0 the engine operates
+        in the learned latent space where there is no real board to derive legal moves from.
+
         Args:
             hidden_states: [B, 64, 8, 8] float32 numpy array.
             actions:       [B, 3, 8, 8]  float32 numpy action planes.
@@ -91,7 +105,7 @@ class InferenceServer:
             Tuple of numpy float32 arrays:
                 new_hidden: [B, 64, 8, 8]
                 rewards:    [B]
-                policies:   [B, 4096]  (softmax-normalized)
+                policies:   [B, 4672]  (softmax-normalized, unmasked)
                 values:     [B]
         """
         # hidden_states: [B, 64, 8, 8], actions: [B, 3, 8, 8] -> tensors

@@ -65,22 +65,32 @@ class Trainer:
 
         Args:
             batch: Dictionary of numpy arrays:
-                "observations":    [B, 19, 8, 8]
+                "observations":    [B, 103, 8, 8]
                 "actions":         [B, K, 3, 8, 8]
-                "target_policies": [B, K+1, 4096]
+                "target_policies": [B, K+1, 4672]
                 "target_values":   [B, K+1]
                 "target_rewards":  [B, K+1]
+                "legal_masks":     [B, 4672] bool (optional) — if present, illegal
+                                   actions are masked to -inf in the policy loss so
+                                   gradients do not push logits at illegal positions.
 
         Returns:
             dict with keys: total_loss, policy_loss, value_loss, reward_loss, model_version
             (all loss values are Python floats).
         """
         # Convert numpy arrays to tensors on the target device.
-        obs = torch.from_numpy(batch["observations"]).to(self.device)          # [B, 19, 8, 8]
+        obs = torch.from_numpy(batch["observations"]).to(self.device)          # [B, 103, 8, 8]
         actions = torch.from_numpy(batch["actions"]).to(self.device)           # [B, K, 3, 8, 8]
-        tgt_policies = torch.from_numpy(batch["target_policies"]).to(self.device)  # [B, K+1, 4096]
+        tgt_policies = torch.from_numpy(batch["target_policies"]).to(self.device)  # [B, K+1, 4672]
         tgt_values = torch.from_numpy(batch["target_values"]).to(self.device)  # [B, K+1]
         tgt_rewards = torch.from_numpy(batch["target_rewards"]).to(self.device)  # [B, K+1]
+        # Legal mask (root step only): [B, 4672] bool, or None if not provided.
+        legal_mask_np = batch.get("legal_masks")
+        legal_mask = (
+            torch.from_numpy(legal_mask_np).to(self.device)
+            if legal_mask_np is not None
+            else None
+        )
 
         k_steps = actions.shape[1]  # K
 
@@ -92,10 +102,12 @@ class Trainer:
 
         # Step 0: encode observation, predict (policy, value).
         hidden = self.h(obs)  # [B, 64, 8, 8]
-        policy_logits, value = self.f(hidden)  # [B, 4096], [B, 1]
+        policy_logits, value = self.f(hidden)  # [B, 4672], [B, 1]
 
-        # Policy loss at step 0.
-        total_policy_loss = total_policy_loss + self._policy_loss(policy_logits, tgt_policies[:, 0])
+        # Policy loss at step 0 — apply legal mask if provided.
+        total_policy_loss = total_policy_loss + self._policy_loss(
+            policy_logits, tgt_policies[:, 0], legal_mask
+        )
         # Value loss at step 0.
         total_value_loss = total_value_loss + F.mse_loss(value.squeeze(-1), tgt_values[:, 0])
 
@@ -107,8 +119,9 @@ class Trainer:
             # MuZero: scale gradient at dynamics boundary (Appendix G) to stabilize K-step unroll
             hidden.register_hook(lambda grad: grad * 0.5)
 
-            policy_logits, value = self.f(hidden)  # [B, 4096], [B, 1]
+            policy_logits, value = self.f(hidden)  # [B, 4672], [B, 1]
 
+            # No mask for latent steps (operating in learned latent space, not real board)
             total_policy_loss = total_policy_loss + self._policy_loss(policy_logits, tgt_policies[:, k])
             total_value_loss = total_value_loss + F.mse_loss(value.squeeze(-1), tgt_values[:, k])
             total_reward_loss = total_reward_loss + F.mse_loss(reward.squeeze(-1), tgt_rewards[:, k])
@@ -134,16 +147,26 @@ class Trainer:
             "model_version": self.model_version,
         }
 
-    def _policy_loss(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+    def _policy_loss(
+        self,
+        logits: torch.Tensor,
+        targets: torch.Tensor,
+        legal_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         """Cross-entropy between logits and a target probability distribution.
 
         Args:
-            logits:  [B, num_actions]
-            targets: [B, num_actions]  (soft probability distribution summing to 1)
+            logits:      [B, num_actions]
+            targets:     [B, num_actions]  (soft probability distribution summing to 1)
+            legal_mask:  [B, num_actions] bool or None.
+                         If provided, illegal positions are masked to -inf before
+                         log_softmax so gradients do not push logits at illegal positions.
 
         Returns:
             Scalar tensor (mean over batch).
         """
+        if legal_mask is not None:
+            logits = logits.masked_fill(~legal_mask, float('-inf'))
         return -torch.sum(targets * F.log_softmax(logits, dim=-1), dim=-1).mean()
 
     def get_weights(self) -> bytes:
