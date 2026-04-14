@@ -10,7 +10,7 @@ use crate::{BitIterator, CastleOption, Color, Piece, PieceType, Square};
 /// * `board`        — current board state
 /// * `side_to_move` — whose turn it is
 /// * `history`      — slice of up to 7 past `BoardSnapshot`s, oldest first.
-///                    If fewer than 7 are provided, missing positions are all-zeros.
+///   If fewer than 7 are provided, missing positions are all-zeros.
 pub fn encode_board(
     board: &GameBoard,
     side_to_move: Color,
@@ -569,7 +569,7 @@ mod tests {
         let board = make_board();
         let snap = board_to_snapshot(&board);
         // Provide one snapshot (past position 1 → planes 12-23)
-        let obs = encode_board(&board, Color::White, &[snap.clone()]);
+        let obs = encode_board(&board, Color::White, std::slice::from_ref(&snap));
 
         // Planes 12-17 should match white pieces of the snapshot
         for pt in 0..6 {

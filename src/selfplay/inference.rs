@@ -253,7 +253,7 @@ mod tests {
 
         // With batch size 4 and 4 concurrent requests, should be 1-2 batches
         let batches = batch_count.load(Ordering::SeqCst);
-        assert!(batches >= 1 && batches <= 2, "Expected 1-2 batches, got {}", batches);
+        assert!((1..=2).contains(&batches), "Expected 1-2 batches, got {}", batches);
 
         drop(tx);
         let _ = batcher_handle.await;
