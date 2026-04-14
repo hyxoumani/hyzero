@@ -35,7 +35,7 @@ impl Default for RunConfig {
     fn default() -> Self {
         Self {
             max_concurrent_games: 4,
-            num_simulations: 50,
+            num_simulations: 40,
             temperature_moves: 15,
             max_batch_size: 32,
             batch_timeout_ms: 10,
