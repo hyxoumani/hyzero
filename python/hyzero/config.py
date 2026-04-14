@@ -7,5 +7,5 @@ DEFAULT_CONFIG = {
     "num_actions": 4672,      # 4096 base (from×to) + 576 underpromotion slots
     "action_planes": 3,       # spatial action encoding planes
     "lr": 1e-3,
-    "weight_decay": 5e-4,
+    "weight_decay": 1e-4,
 }
