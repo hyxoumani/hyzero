@@ -2,7 +2,7 @@ use std::env;
 use std::sync::Arc;
 
 use pyo3::prelude::*;
-use pyo3::types::PyBytes;
+use pyo3::types::{PyBytes, PyDict};
 use tokio::sync::{mpsc, watch};
 
 use hyzero::PrecomputedItems;
@@ -99,30 +99,38 @@ async fn main() {
     // 3. Create the Python InferenceServer first so we can share it.
     //    We need one reference for the backend and a clone for the weight loader.
     println!("[selfplay] Creating Python InferenceServer...");
-    let server: Py<PyAny> = Python::attach(|py| {
+    let (server, hidden_channels): (Py<PyAny>, usize) = Python::attach(|py| {
         let config_obj = PyModule::import(py, "hyzero.config")
             .expect("hyzero Python package not found — ensure it is installed")
             .getattr("DEFAULT_CONFIG")
             .expect("DEFAULT_CONFIG missing from hyzero.config")
             .into_pyobject(py)
-            .expect("into_pyobject failed")
-            .unbind();
+            .expect("into_pyobject failed");
+        let hidden_channels: usize = config_obj
+            .cast::<PyDict>()
+            .expect("DEFAULT_CONFIG is not a dict")
+            .get_item("hidden_channels")
+            .expect("hidden_channels lookup failed")
+            .expect("hidden_channels not in DEFAULT_CONFIG")
+            .extract()
+            .expect("hidden_channels is not a usize");
+        let config_unbound = config_obj.unbind();
         let cls = PyModule::import(py, "hyzero.inference.server")
             .expect("hyzero.inference.server not found")
             .getattr("InferenceServer")
             .expect("InferenceServer class not found");
         let srv: Py<PyAny> = cls
-            .call1((config_obj, "cpu"))
+            .call1((config_unbound, "cpu"))
             .expect("InferenceServer() constructor failed")
             .unbind();
-        srv
+        (srv, hidden_channels)
     });
 
     // Clone the Py<PyAny> ref-counted handle for the weight loader task.
     let server_for_weights: Py<PyAny> = Python::attach(|py| server.clone_ref(py));
 
     // 4. Spawn inference batcher with the PyO3Backend.
-    let backend = Box::new(PyO3Backend::new(server, 64));
+    let backend = Box::new(PyO3Backend::new(server, hidden_channels));
     let batcher_config = BatcherConfig {
         max_batch_size: config.max_batch_size,
         batch_timeout_ms: config.batch_timeout_ms,
