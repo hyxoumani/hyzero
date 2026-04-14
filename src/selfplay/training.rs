@@ -84,6 +84,8 @@ impl TrainingThread {
                 let batch = self.replay_buffer.sample_batch(
                     self.config.train_batch_size,
                     self.config.unroll_k,
+                    self.current_version,
+                    0.0, // no recency decay in stub training thread
                 );
 
                 if !batch.is_empty() {

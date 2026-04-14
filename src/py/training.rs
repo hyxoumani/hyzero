@@ -205,6 +205,7 @@ pub struct PyTrainingThread {
     checkpoint_interval_steps: usize,
     checkpoint_keep_last: usize,
     checkpoint_files: VecDeque<PathBuf>,
+    replay_decay: f64,
 }
 
 impl PyTrainingThread {
@@ -222,6 +223,8 @@ impl PyTrainingThread {
     /// * `train_steps_per_game` - Number of training steps to run per game received.
     /// * `checkpoint_interval_steps` - Save a checkpoint every N training steps.
     /// * `checkpoint_keep_last` - Rolling window: keep at most this many checkpoint files.
+    /// * `replay_decay` - Exponential decay rate for recency-weighted replay sampling.
+    ///   Set to 0.0 for uniform (length-only) weighting.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         trainer: Py<PyAny>,
@@ -235,6 +238,7 @@ impl PyTrainingThread {
         train_steps_per_game: usize,
         checkpoint_interval_steps: usize,
         checkpoint_keep_last: usize,
+        replay_decay: f64,
     ) -> Self {
         Self {
             trainer,
@@ -251,6 +255,7 @@ impl PyTrainingThread {
             checkpoint_interval_steps,
             checkpoint_keep_last,
             checkpoint_files: VecDeque::new(),
+            replay_decay,
         }
     }
 
@@ -268,6 +273,7 @@ impl PyTrainingThread {
         version_tx: watch::Sender<u64>,
         weight_tx: watch::Sender<Option<Vec<u8>>>,
         resume_checkpoint: Option<&str>,
+        replay_decay: f64,
     ) -> PyResult<Self> {
         let trainer = Python::attach(|py| {
             let config = PyModule::import(py, "hyzero.config")?
@@ -292,6 +298,7 @@ impl PyTrainingThread {
             8,      // train_steps_per_game
             50,     // checkpoint_interval_steps
             5,      // checkpoint_keep_last
+            replay_decay,
         );
 
         if let Some(path) = resume_checkpoint {
@@ -344,9 +351,12 @@ impl PyTrainingThread {
 
             if self.replay_buffer.total_steps() >= self.min_samples {
                 for step_i in 0..self.train_steps_per_game {
-                    let batch = self
-                        .replay_buffer
-                        .sample_batch(self.train_batch_size, self.unroll_k);
+                    let batch = self.replay_buffer.sample_batch(
+                        self.train_batch_size,
+                        self.unroll_k,
+                        self.model_version,
+                        self.replay_decay,
+                    );
 
                     if batch.is_empty() {
                         break;
@@ -663,6 +673,7 @@ mod tests {
             version_tx,
             weight_tx,
             Some(&ckpt_path),
+            0.1,
         )
         .expect("from_default_config with resume failed");
 

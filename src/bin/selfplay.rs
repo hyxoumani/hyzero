@@ -29,6 +29,8 @@ struct RunConfig {
     eval_interval_steps: u64,
     eval_games: usize,
     eval_num_simulations: u32,
+    // Training
+    replay_decay: f64,
 }
 
 impl Default for RunConfig {
@@ -42,6 +44,7 @@ impl Default for RunConfig {
             eval_interval_steps: 200,
             eval_games: 10,
             eval_num_simulations: 50,
+            replay_decay: 0.1,
         }
     }
 }
@@ -84,6 +87,10 @@ async fn main() {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(defaults.eval_num_simulations),
+        replay_decay: env::var("HYZERO_REPLAY_DECAY")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(defaults.replay_decay),
     };
 
     // 1. Precompute move tables
@@ -135,8 +142,15 @@ async fn main() {
 
     // 5. Spawn training thread backed by the Python Trainer.
     println!("[selfplay] Creating Python Trainer...");
-    let mut training = PyTrainingThread::from_default_config("cpu", trajectory_rx, version_tx, weight_tx, None)
-        .expect("Failed to create PyTrainingThread — is hyzero Python package installed?");
+    let mut training = PyTrainingThread::from_default_config(
+        "cpu",
+        trajectory_rx,
+        version_tx,
+        weight_tx,
+        None,
+        config.replay_decay,
+    )
+    .expect("Failed to create PyTrainingThread — is hyzero Python package installed?");
     tokio::spawn(async move {
         training.run().await;
     });
