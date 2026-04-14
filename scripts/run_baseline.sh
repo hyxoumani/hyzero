@@ -4,7 +4,9 @@ set +m
 
 # ── Configuration ──────────────────────────────────────────────
 DURATION=${1:-1800}          # 30 minutes default
-EVAL_INTERVAL=${HYZERO_EVAL_INTERVAL:-50}
+EVAL_INTERVAL=${HYZERO_EVAL_INTERVAL:-25}
+EVAL_GAMES=${HYZERO_EVAL_GAMES:-5}
+EVAL_SIMS=${HYZERO_EVAL_SIMS:-25}
 BASELINE_FILE="logs/baseline_score.json"
 LOG_DIR="logs"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
@@ -14,7 +16,7 @@ mkdir -p "$LOG_DIR"
 
 echo "=== hyzero Baseline Run ==="
 echo "Duration: ${DURATION}s"
-echo "Eval interval: every ${EVAL_INTERVAL} training steps"
+echo "Eval: every ${EVAL_INTERVAL} versions × ${EVAL_GAMES} games × ${EVAL_SIMS} sims"
 echo "Log: ${LOG_FILE}"
 
 # ── Build ──────────────────────────────────────────────────────
@@ -23,7 +25,10 @@ cargo build --release --bin selfplay 2>&1 | tail -1
 
 # ── Run ────────────────────────────────────────────────────────
 echo "[2/5] Running selfplay for ${DURATION}s..."
-HYZERO_EVAL_INTERVAL=$EVAL_INTERVAL target/release/selfplay > "$LOG_FILE" 2>&1 &
+HYZERO_EVAL_INTERVAL=$EVAL_INTERVAL \
+HYZERO_EVAL_GAMES=$EVAL_GAMES \
+HYZERO_EVAL_SIMS=$EVAL_SIMS \
+target/release/selfplay > "$LOG_FILE" 2>&1 &
 PID=$!
 sleep "$DURATION"
 kill -TERM $PID 2>/dev/null || true
@@ -151,6 +156,8 @@ cat > "$BASELINE_FILE" << EOF
     },
     "config": {
         "eval_interval_steps": $EVAL_INTERVAL,
+        "eval_games": $EVAL_GAMES,
+        "eval_sims": $EVAL_SIMS,
         "concurrent_games": ${HYZERO_GAMES:-4},
         "simulations": ${HYZERO_SIMS:-50}
     },
