@@ -108,7 +108,7 @@ impl EvaluationTask {
             // Play eval_games games using the model evaluator (model vs itself).
             let game_config = GameConfig {
                 num_simulations: self.config.num_simulations,
-                exploration_constant: 1.5,
+                exploration_constant: 2.0,
                 temperature_moves: self.config.temperature_moves,
             };
 
