@@ -5,7 +5,7 @@ set +m
 # ── Configuration ──────────────────────────────────────────────
 DURATION=${1:-1800}          # 30 minutes default
 EVAL_INTERVAL=${HYZERO_EVAL_INTERVAL:-25}
-EVAL_GAMES=${HYZERO_EVAL_GAMES:-5}
+EVAL_GAMES=${HYZERO_EVAL_GAMES:-10}
 EVAL_SIMS=${HYZERO_EVAL_SIMS:-25}
 BASELINE_FILE="logs/baseline_score.json"
 LOG_DIR="logs"
