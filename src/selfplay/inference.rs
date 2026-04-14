@@ -9,6 +9,8 @@ use crate::mcts::evaluator::Evaluator;
 pub enum InferenceRequest {
     RootSetup {
         observation: BoardObservation,
+        /// Boolean mask of length NUM_ACTIONS; `true` means the action is legal.
+        legal_mask: Vec<bool>,
         reply: oneshot::Sender<(HiddenState, Policy, f32)>,
     },
     ExpandLeaf {
@@ -51,6 +53,7 @@ impl InferenceBackend for RandomBackend {
                 }
             }
         }
+
     }
 }
 
@@ -127,10 +130,11 @@ impl ChannelEvaluator {
 
 #[async_trait]
 impl Evaluator for ChannelEvaluator {
-    async fn root_setup(&self, observation: &BoardObservation) -> (HiddenState, Policy, f32) {
+    async fn root_setup(&self, observation: &BoardObservation, legal_mask: &[bool]) -> (HiddenState, Policy, f32) {
         let (reply_tx, reply_rx) = oneshot::channel();
         let req = InferenceRequest::RootSetup {
             observation: observation.clone(),
+            legal_mask: legal_mask.to_vec(),
             reply: reply_tx,
         };
         self.tx.send(req).await.expect("inference channel closed");
@@ -166,7 +170,8 @@ mod tests {
         let batcher_handle = tokio::spawn(async move { batcher.run().await });
 
         let obs = BoardObservation::default();
-        let (hs, policy, value) = evaluator.root_setup(&obs).await;
+        let mask = vec![true; NUM_ACTIONS];
+        let (hs, policy, value) = evaluator.root_setup(&obs, &mask).await;
 
         assert_eq!(hs.channels, 64);
         assert_eq!(hs.data.len(), 64 * 64);
@@ -243,7 +248,8 @@ mod tests {
         for _ in 0..4 {
             let eval = ChannelEvaluator::new(tx.clone());
             handles.push(tokio::spawn(async move {
-                eval.root_setup(&BoardObservation::default()).await
+                let mask = vec![true; NUM_ACTIONS];
+                eval.root_setup(&BoardObservation::default(), &mask).await
             }));
         }
 

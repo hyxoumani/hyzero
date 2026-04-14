@@ -72,8 +72,14 @@ pub async fn play_game(
             break;
         }
 
+        // Build legal mask: true for each action that is legal in this position.
+        let mut legal_mask = vec![false; crate::data::NUM_ACTIONS];
+        for &a in &legal_actions {
+            legal_mask[a as usize] = true;
+        }
+
         // Root setup: encode board into latent space
-        let (hidden_state, policy, value) = evaluator.root_setup(&observation).await;
+        let (hidden_state, policy, value) = evaluator.root_setup(&observation, &legal_mask).await;
 
         // Build MCTS tree and run search
         let mut tree = MCTSTree::new(
@@ -308,7 +314,7 @@ mod tests {
 
     #[async_trait]
     impl Evaluator for RandomEvaluator {
-        async fn root_setup(&self, _obs: &BoardObservation) -> (HiddenState, Policy, f32) {
+        async fn root_setup(&self, _obs: &BoardObservation, _legal_mask: &[bool]) -> (HiddenState, Policy, f32) {
             let policy = vec![1.0 / NUM_ACTIONS as f32; NUM_ACTIONS];
             (HiddenState::new(64), policy, 0.0)
         }

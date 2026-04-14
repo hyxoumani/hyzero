@@ -13,7 +13,7 @@ pub struct RandomEvaluator;
 
 #[async_trait]
 impl Evaluator for RandomEvaluator {
-    async fn root_setup(&self, _obs: &BoardObservation) -> (HiddenState, Policy, f32) {
+    async fn root_setup(&self, _obs: &BoardObservation, _legal_mask: &[bool]) -> (HiddenState, Policy, f32) {
         let policy = vec![1.0 / NUM_ACTIONS as f32; NUM_ACTIONS];
         (HiddenState::new(64), policy, 0.0)
     }

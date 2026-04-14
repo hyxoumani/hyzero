@@ -167,7 +167,12 @@ class Trainer:
         """
         if legal_mask is not None:
             logits = logits.masked_fill(~legal_mask, float('-inf'))
-        return -torch.sum(targets * F.log_softmax(logits, dim=-1), dim=-1).mean()
+        log_probs = F.log_softmax(logits, dim=-1)
+        # Replace -inf (from masked illegal actions) with 0.0 before multiplying by targets.
+        # Since targets are always 0.0 at illegal positions, 0.0 * 0.0 = 0.0 is correct.
+        # This avoids 0.0 * (-inf) = NaN in IEEE 754 arithmetic.
+        log_probs = log_probs.nan_to_num(nan=0.0, neginf=0.0)
+        return -torch.sum(targets * log_probs, dim=-1).mean()
 
     def get_weights(self) -> bytes:
         """Serialize network weights to bytes for inference server transfer.

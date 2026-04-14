@@ -64,6 +64,7 @@ impl InferenceBackend for PyO3Backend {
     fn evaluate_batch(&mut self, requests: Vec<InferenceRequest>) {
         // Separate requests by type, preserving reply senders.
         let mut root_obs: Vec<BoardObservation> = Vec::new();
+        let mut root_masks: Vec<Vec<bool>> = Vec::new();
         let mut root_replies: Vec<tokio::sync::oneshot::Sender<(HiddenState, Policy, f32)>> =
             Vec::new();
 
@@ -74,8 +75,13 @@ impl InferenceBackend for PyO3Backend {
 
         for req in requests {
             match req {
-                InferenceRequest::RootSetup { observation, reply } => {
+                InferenceRequest::RootSetup {
+                    observation,
+                    legal_mask,
+                    reply,
+                } => {
                     root_obs.push(observation);
+                    root_masks.push(legal_mask);
                     root_replies.push(reply);
                 }
                 InferenceRequest::ExpandLeaf {
@@ -105,9 +111,17 @@ impl InferenceBackend for PyO3Backend {
                     let arr = flat.into_pyarray(py);
                     let obs_np = arr.reshape([b, NUM_OBS_PLANES, 8, 8])?;
 
-                    let ret = self
-                        .server
-                        .call_method1(py, "root_setup_batch", (obs_np,))?;
+                    // Build legal-mask array [B * NUM_ACTIONS] -> reshape to [B, NUM_ACTIONS]
+                    let mut flat_masks: Vec<bool> = Vec::with_capacity(b * NUM_ACTIONS);
+                    for mask in &root_masks {
+                        flat_masks.extend_from_slice(mask);
+                    }
+                    let mask_arr = flat_masks.into_pyarray(py);
+                    let masks_np = mask_arr.reshape([b, NUM_ACTIONS])?;
+
+                    let ret =
+                        self.server
+                            .call_method1(py, "root_setup_batch", (obs_np, masks_np))?;
                     let tuple = ret.cast_bound::<PyTuple>(py)?;
 
                     // Unpack: (hidden [B,64,8,8], policies [B,NUM_ACTIONS], values [B])
@@ -318,6 +332,7 @@ mod tests {
         let obs = BoardObservation::default();
         let req = InferenceRequest::RootSetup {
             observation: obs,
+            legal_mask: vec![true; NUM_ACTIONS],
             reply: tx,
         };
 

@@ -13,18 +13,21 @@ use crate::data::{
 
 /// Flat arrays assembled from a batch of `TrainingSample` for Python training.
 ///
-/// Array shapes (all float32):
-///   observations:    [B, 103, 8, 8]  stored flat as B * NUM_OBS_PLANES * 64
-///   actions:         [B, K, 3, 8, 8] stored flat as B * K * 192
-///   target_policies: [B, K+1, 4672]  stored flat as B * (K+1) * NUM_ACTIONS
-///   target_values:   [B, K+1]        stored flat as B * (K+1)
-///   target_rewards:  [B, K+1]        stored flat as B * (K+1)
+/// Array shapes:
+///   observations:    [B, 103, 8, 8]  stored flat as B * NUM_OBS_PLANES * 64 (f32)
+///   actions:         [B, K, 3, 8, 8] stored flat as B * K * 192 (f32)
+///   target_policies: [B, K+1, 4672]  stored flat as B * (K+1) * NUM_ACTIONS (f32)
+///   target_values:   [B, K+1]        stored flat as B * (K+1) (f32)
+///   target_rewards:  [B, K+1]        stored flat as B * (K+1) (f32)
+///   legal_masks:     [B, 4672]        stored flat as B * NUM_ACTIONS (bool)
 pub struct BatchArrays {
     pub observations: Vec<f32>,
     pub actions: Vec<f32>,
     pub target_policies: Vec<f32>,
     pub target_values: Vec<f32>,
     pub target_rewards: Vec<f32>,
+    /// Boolean mask derived from `steps[0].legal_moves`; shape [B, NUM_ACTIONS].
+    pub legal_masks: Vec<bool>,
     pub batch_size: usize,
     pub unroll_k: usize,
 }
@@ -49,6 +52,7 @@ pub fn assemble_batch_arrays(samples: &[TrainingSample], unroll_k: usize) -> Bat
     let mut target_policies = vec![0.0f32; b * kp1 * pol_stride];
     let mut target_values = vec![0.0f32; b * kp1];
     let mut target_rewards = vec![0.0f32; b * kp1];
+    let mut legal_masks = vec![false; b * pol_stride];
 
     for (bi, sample) in samples.iter().enumerate() {
         let steps = &sample.steps;
@@ -77,15 +81,31 @@ pub fn assemble_batch_arrays(samples: &[TrainingSample], unroll_k: usize) -> Bat
         for k in 0..kp1 {
             let step = &steps[k];
 
-            // Zero-pad visit_distribution to NUM_ACTIONS (4096)
+            // Map visit_distribution entries to their action indices.
+            // visit_distribution[i] corresponds to legal_moves[i], so write to
+            // target_policies[pol_base + legal_moves[i]] rather than pol_base + i.
             let pol_base = (bi * kp1 + k) * pol_stride;
-            let dist_len = step.visit_distribution.len().min(pol_stride);
-            target_policies[pol_base..pol_base + dist_len]
-                .copy_from_slice(&step.visit_distribution[..dist_len]);
-            // remaining entries stay 0.0 from initialization
+            for (slot, &prob) in step.visit_distribution.iter().enumerate() {
+                if let Some(&action) = step.legal_moves.get(slot) {
+                    let idx = action as usize;
+                    if idx < pol_stride {
+                        target_policies[pol_base + idx] = prob;
+                    }
+                }
+            }
+            // Entries for actions not in legal_moves stay 0.0 from initialization
 
             target_values[bi * kp1 + k] = step.root_value;
             target_rewards[bi * kp1 + k] = step.reward;
+        }
+
+        // legal_masks[bi]: derive from steps[0].legal_moves (root position only)
+        let mask_base = bi * pol_stride;
+        for &action in &steps[0].legal_moves {
+            let idx = action as usize;
+            if idx < pol_stride {
+                legal_masks[mask_base + idx] = true;
+            }
         }
     }
 
@@ -95,6 +115,7 @@ pub fn assemble_batch_arrays(samples: &[TrainingSample], unroll_k: usize) -> Bat
         target_policies,
         target_values,
         target_rewards,
+        legal_masks,
         batch_size: b,
         unroll_k,
     }
@@ -140,6 +161,9 @@ pub fn train_batch_python(
     let rew_arr = arrays.target_rewards.into_pyarray(py);
     let rewards_np = rew_arr.reshape([b, kp1])?;
 
+    let mask_arr = arrays.legal_masks.into_pyarray(py);
+    let masks_np = mask_arr.reshape([b, NUM_ACTIONS])?;
+
     // Build batch dict
     let batch_dict = PyDict::new(py);
     batch_dict.set_item("observations", obs_np)?;
@@ -147,6 +171,7 @@ pub fn train_batch_python(
     batch_dict.set_item("target_policies", policies_np)?;
     batch_dict.set_item("target_values", values_np)?;
     batch_dict.set_item("target_rewards", rewards_np)?;
+    batch_dict.set_item("legal_masks", masks_np)?;
 
     // Call train_batch
     let result_dict = trainer.call_method1(py, "train_batch", (batch_dict,))?;
@@ -495,16 +520,26 @@ mod tests {
     }
 
     #[test]
-    fn test_batch_assembly_pads_short_policies() {
-        let short_dist_len = 10usize;
+    fn test_batch_assembly_maps_visit_dist_to_action_indices() {
         let k = 2usize;
         let kp1 = k + 1;
 
-        // Create a sample where visit_distribution has only 10 entries (not NUM_ACTIONS)
+        // Step with 3 legal moves at action indices 10, 42, 100
+        // and visit distribution [0.2, 0.5, 0.3]
+        let legal_moves = vec![10u16, 42u16, 100u16];
+        let visit_dist = vec![0.2f32, 0.5f32, 0.3f32];
+
+        let step = StepRecord {
+            observation: BoardObservation::default(),
+            action: 42,
+            visit_distribution: visit_dist.clone(),
+            root_value: 0.5,
+            reward: 0.1,
+            legal_moves: legal_moves.clone(),
+        };
+
         let sample = TrainingSample {
-            steps: (0..kp1)
-                .map(|_| make_step_with_dist(vec![0.1f32; short_dist_len]))
-                .collect(),
+            steps: (0..kp1).map(|_| step.clone()).collect(),
             game_outcome: 1.0,
         };
 
@@ -513,23 +548,28 @@ mod tests {
         // Total policy entries: B=1 * (K+1) * NUM_ACTIONS
         assert_eq!(arrays.target_policies.len(), kp1 * NUM_ACTIONS);
 
-        // First `short_dist_len` entries of step 0's policy should be 0.1
-        for i in 0..short_dist_len {
-            assert!(
-                (arrays.target_policies[i] - 0.1).abs() < 1e-6,
-                "entry {i} should be 0.1, got {}",
-                arrays.target_policies[i]
-            );
+        // Step 0's policy: probability mass at the correct action indices
+        assert!((arrays.target_policies[10] - 0.2).abs() < 1e-6, "action 10 should be 0.2");
+        assert!((arrays.target_policies[42] - 0.5).abs() < 1e-6, "action 42 should be 0.5");
+        assert!((arrays.target_policies[100] - 0.3).abs() < 1e-6, "action 100 should be 0.3");
+
+        // All other positions should be 0.0
+        for i in 0..NUM_ACTIONS {
+            if i != 10 && i != 42 && i != 100 {
+                assert_eq!(
+                    arrays.target_policies[i], 0.0,
+                    "entry {i} should be 0.0, got {}",
+                    arrays.target_policies[i]
+                );
+            }
         }
 
-        // Entries beyond `short_dist_len` up to NUM_ACTIONS should be zero-padded
-        for i in short_dist_len..NUM_ACTIONS {
-            assert_eq!(
-                arrays.target_policies[i], 0.0,
-                "entry {i} should be 0.0 (zero-padded), got {}",
-                arrays.target_policies[i]
-            );
-        }
+        // Legal mask for step 0 should have true only at positions 10, 42, 100
+        assert!(arrays.legal_masks[10], "legal_masks[10] should be true");
+        assert!(arrays.legal_masks[42], "legal_masks[42] should be true");
+        assert!(arrays.legal_masks[100], "legal_masks[100] should be true");
+        assert!(!arrays.legal_masks[0], "legal_masks[0] should be false");
+        assert!(!arrays.legal_masks[50], "legal_masks[50] should be false");
     }
 
     /// Simulate the checkpoint window pruning logic without needing Python.
