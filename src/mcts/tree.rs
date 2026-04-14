@@ -87,9 +87,8 @@ impl Default for MCTSConfig {
 
 /// Transient MCTS tree built fresh for each move.
 /// After search, extract the visit distribution, then discard the tree.
-/// Optionally carried forward via `reuse_subtree` to preserve search work.
 pub struct MCTSTree {
-    pub root: MCTSNode,
+    root: MCTSNode,
     config: MCTSConfig,
 }
 
@@ -232,27 +231,6 @@ impl MCTSTree {
         self.root.q_value()
     }
 
-    /// Advance the tree by consuming the subtree rooted at the child for `action`.
-    ///
-    /// Returns `Some(new_tree)` if the child for `action` was already expanded
-    /// (non-None). Returns `None` if `action` is not in `legal_actions` or the
-    /// child was never expanded. Fresh Dirichlet noise is mixed into the reused
-    /// root's priors to maintain exploration diversity.
-    pub fn reuse_subtree(mut self, action: ActionIndex) -> Option<MCTSTree> {
-        let idx = self.root.legal_actions.iter().position(|&a| a == action)?;
-        let child_box = self.root.children[idx].take()?;
-        let mut new_root = *child_box;
-        // Mix fresh Dirichlet noise into the reused root priors.
-        let n = new_root.priors.len();
-        if n > 0 {
-            let noise = dirichlet_noise(n);
-            for (prior, eta) in new_root.priors.iter_mut().zip(noise.iter()) {
-                *prior = (1.0 - NOISE_EPSILON) * *prior + NOISE_EPSILON * eta;
-            }
-        }
-        Some(MCTSTree { root: new_root, config: self.config })
-    }
-
     /// Select an action based on visit counts and temperature.
     /// temperature=0 picks the most-visited action deterministically.
     /// temperature>0 samples proportionally to visit_count^(1/temperature).
@@ -390,94 +368,5 @@ mod tests {
         let action1 = tree.select_action(0.0);
         let action2 = tree.select_action(0.0);
         assert_eq!(action1, action2);
-    }
-
-    #[tokio::test]
-    async fn test_reuse_subtree_returns_some_for_expanded_child() {
-        let policy = vec![1.0 / NUM_ACTIONS as f32; NUM_ACTIONS];
-        let legal_actions: Vec<ActionIndex> = (0..10).collect();
-        let config = MCTSConfig {
-            num_simulations: 10,
-            exploration_constant: 1.5,
-        };
-
-        let mut tree = MCTSTree::new(
-            HiddenState::new(64),
-            &policy,
-            0.5,
-            legal_actions.clone(),
-            config,
-        );
-
-        tree.run_simulations(&MockEvaluator).await;
-
-        // Find any expanded child (non-None)
-        let expanded_action = legal_actions
-            .iter()
-            .zip(tree.root.children.iter())
-            .find(|(_, c)| c.is_some())
-            .map(|(&a, _)| a)
-            .expect("at least one child should be expanded after 10 sims");
-
-        let reused = tree.reuse_subtree(expanded_action);
-        assert!(reused.is_some(), "expected Some for an expanded child");
-        let reused_tree = reused.unwrap();
-        assert!(reused_tree.root.visit_count > 0, "reused root should have visits");
-    }
-
-    #[tokio::test]
-    async fn test_reuse_subtree_returns_none_for_unexpanded_child() {
-        let policy = vec![1.0 / NUM_ACTIONS as f32; NUM_ACTIONS];
-        // Use many legal actions so not all will be expanded after very few sims.
-        let legal_actions: Vec<ActionIndex> = (0..50).collect();
-        let config = MCTSConfig {
-            num_simulations: 2, // Very few — most children stay unexpanded
-            exploration_constant: 1.5,
-        };
-
-        let mut tree = MCTSTree::new(
-            HiddenState::new(64),
-            &policy,
-            0.5,
-            legal_actions.clone(),
-            config,
-        );
-
-        tree.run_simulations(&MockEvaluator).await;
-
-        // Find an unexpanded child (None)
-        let unexpanded_action = legal_actions
-            .iter()
-            .zip(tree.root.children.iter())
-            .find(|(_, c)| c.is_none())
-            .map(|(&a, _)| a)
-            .expect("with only 2 sims and 50 children, some must remain unexpanded");
-
-        let reused = tree.reuse_subtree(unexpanded_action);
-        assert!(reused.is_none(), "expected None for an unexpanded child");
-    }
-
-    #[tokio::test]
-    async fn test_reuse_subtree_returns_none_for_unknown_action() {
-        let policy = vec![1.0 / NUM_ACTIONS as f32; NUM_ACTIONS];
-        let legal_actions: Vec<ActionIndex> = vec![10, 20, 30];
-        let config = MCTSConfig {
-            num_simulations: 5,
-            exploration_constant: 1.5,
-        };
-
-        let mut tree = MCTSTree::new(
-            HiddenState::new(64),
-            &policy,
-            0.5,
-            legal_actions,
-            config,
-        );
-
-        tree.run_simulations(&MockEvaluator).await;
-
-        // Action 999 is not in legal_actions
-        let reused = tree.reuse_subtree(999);
-        assert!(reused.is_none(), "expected None for unknown action");
     }
 }
