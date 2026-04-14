@@ -289,7 +289,7 @@ impl PyTrainingThread {
             256,    // train_batch_size
             5,      // unroll_k
             200,    // min_samples
-            32,     // train_steps_per_game
+            16,     // train_steps_per_game
             50,     // checkpoint_interval_steps
             5,      // checkpoint_keep_last
         );
