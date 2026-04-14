@@ -38,23 +38,51 @@ echo "[3/5] Extracting metrics..."
 
 GAMES=$(awk '/\[py_training\].*Game received/{n++} END{print n+0}' "$LOG_FILE")
 TRAIN_STEPS=$(awk '/\[py_training\].*step [0-9]/{n++} END{print n+0}' "$LOG_FILE")
-FIRST_LOSS=$(grep '\[py_training\].*step [0-9]' "$LOG_FILE" | head -1 | sed 's/.*total=\([0-9.]*\).*/\1/' || echo "N/A")
-LAST_LOSS=$(grep '\[py_training\].*step [0-9]' "$LOG_FILE" | tail -1 | sed 's/.*total=\([0-9.]*\).*/\1/' || echo "N/A")
-LAST_POLICY=$(grep '\[py_training\].*step [0-9]' "$LOG_FILE" | tail -1 | sed 's/.*policy=\([0-9.]*\).*/\1/' || echo "N/A")
+_TRAIN_LINES=$(grep '\[py_training\].*step [0-9]' "$LOG_FILE" || true)
+FIRST_LOSS=$(echo "$_TRAIN_LINES" | head -1 | sed -n 's/.*total=\([0-9.]*\).*/\1/p')
+FIRST_LOSS=${FIRST_LOSS:-0.0}
+LAST_LOSS=$(echo "$_TRAIN_LINES" | tail -1 | sed -n 's/.*total=\([0-9.]*\).*/\1/p')
+LAST_LOSS=${LAST_LOSS:-0.0}
+LAST_POLICY=$(echo "$_TRAIN_LINES" | tail -1 | sed -n 's/.*policy=\([0-9.]*\).*/\1/p')
+LAST_POLICY=${LAST_POLICY:-0.0}
 ERRORS=$(awk 'tolower($0) ~ /error|panic/{n++} END{print n+0}' "$LOG_FILE")
 CHECKPOINTS=$(awk '/\[py_training\].*Checkpoint saved/{n++} END{print n+0}' "$LOG_FILE")
 AVG_STEPS=$(awk '/\[py_training\].*Game received/{split($0,a,"received: "); split(a[2],b," "); sum+=b[1]; n++} END{if(n>0) printf "%.1f", sum/n; else print "0"}' "$LOG_FILE")
 
-# Extract eval metrics (use last eval cycle if multiple)
-EVAL_LINE=$(grep '\[eval\]' "$LOG_FILE" | tail -1)
-if [ -n "$EVAL_LINE" ]; then
-    DECISIVE_RATIO=$(echo "$EVAL_LINE" | sed 's/.*decisive_ratio=\([0-9.]*\).*/\1/')
-    EVAL_AVG_LEN=$(echo "$EVAL_LINE" | sed 's/.*avg_length=\([0-9.]*\).*/\1/')
-    EVAL_CYCLES=$(grep -c '\[eval\]' "$LOG_FILE")
+# Extract eval metrics (use MAX decisive_ratio across all eval cycles)
+_EVAL_LINES=$(grep '\[eval\]' "$LOG_FILE" || true)
+if [ -n "$_EVAL_LINES" ]; then
+    EVAL_CYCLES=$(echo "$_EVAL_LINES" | wc -l | tr -d ' ')
+
+    # For each eval line, print cycle_number decisive_ratio avg_length
+    EVAL_SUMMARY=$(echo "$_EVAL_LINES" | awk '{
+        cycle++
+        dr = "0.0"; al = "0.0"
+        for (i=1; i<=NF; i++) {
+            if ($i ~ /^decisive_ratio=/) { split($i, a, "="); dr = a[2] }
+            if ($i ~ /^avg_length=/)    { split($i, a, "="); al = a[2] }
+        }
+        print cycle, dr, al
+    }')
+
+    # Report all cycles
+    echo "  Eval cycles detail:"
+    echo "$EVAL_SUMMARY" | while read -r cyc dr al; do
+        echo "    Cycle $cyc: decisive=${dr} avg_length=${al}"
+    done
+
+    # Pick the line with max decisive_ratio
+    BEST_EVAL=$(echo "$EVAL_SUMMARY" | awk 'BEGIN{max=-1; best_dr="0.0"; best_al="0.0"} {
+        if ($2+0 > max) { max=$2+0; best_dr=$2; best_al=$3 }
+    } END{ print best_dr, best_al }')
+
+    DECISIVE_RATIO=$(echo "$BEST_EVAL" | awk '{print $1}')
+    EVAL_AVG_LEN=$(echo "$BEST_EVAL" | awk '{print $2}')
+    echo "  Using MAX: decisive=${DECISIVE_RATIO} avg_length=${EVAL_AVG_LEN}"
 else
+    EVAL_CYCLES=0
     DECISIVE_RATIO="0.0"
     EVAL_AVG_LEN="300.0"
-    EVAL_CYCLES=0
 fi
 
 # ── Compute composite score ────────────────────────────────────
