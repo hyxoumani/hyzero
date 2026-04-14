@@ -123,6 +123,7 @@ mod tests {
                 num_simulations: 2,
                 exploration_constant: 1.5,
                 temperature_moves: 2,
+                tree_reuse: true,
             },
         };
 

@@ -29,6 +29,8 @@ struct RunConfig {
     eval_interval_steps: u64,
     eval_games: usize,
     eval_num_simulations: u32,
+    // Tree reuse (HYZERO_TREE_REUSE=0 to disable)
+    tree_reuse: bool,
 }
 
 impl Default for RunConfig {
@@ -42,6 +44,7 @@ impl Default for RunConfig {
             eval_interval_steps: 200,
             eval_games: 10,
             eval_num_simulations: 50,
+            tree_reuse: true,
         }
     }
 }
@@ -84,6 +87,10 @@ async fn main() {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(defaults.eval_num_simulations),
+        tree_reuse: env::var("HYZERO_TREE_REUSE")
+            .ok()
+            .map(|v| v != "0")
+            .unwrap_or(defaults.tree_reuse),
     };
 
     // 1. Precompute move tables
@@ -170,6 +177,7 @@ async fn main() {
             num_simulations: config.num_simulations,
             exploration_constant: 1.5,
             temperature_moves: config.temperature_moves,
+            tree_reuse: config.tree_reuse,
         },
     };
 

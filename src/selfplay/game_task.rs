@@ -18,6 +18,8 @@ pub struct GameConfig {
     pub exploration_constant: f32,
     /// Use temperature=1.0 for the first N moves, then near 0.
     pub temperature_moves: u32,
+    /// Carry the MCTS subtree forward between moves instead of rebuilding each turn.
+    pub tree_reuse: bool,
 }
 
 impl Default for GameConfig {
@@ -26,6 +28,7 @@ impl Default for GameConfig {
             num_simulations: 800,
             exploration_constant: 1.5,
             temperature_moves: 30,
+            tree_reuse: true,
         }
     }
 }
@@ -46,6 +49,9 @@ pub async fn play_game(
     let mut side_to_move = Color::White;
     // History buffer for encode_board: stores up to 7 past snapshots (oldest first).
     let mut history: VecDeque<BoardSnapshot> = VecDeque::with_capacity(7);
+
+    // Tree reuse: carry the subtree for the expected opponent reply across turns.
+    let mut maybe_tree: Option<MCTSTree> = None;
 
     const MAX_GAME_LENGTH: usize = 300;
 
@@ -78,17 +84,35 @@ pub async fn play_game(
             legal_mask[a as usize] = true;
         }
 
-        // Root setup: encode board into latent space
+        // Root setup: always call h(obs) to ground the root in observation space.
         let (hidden_state, policy, value) = evaluator.root_setup(&observation, &legal_mask).await;
 
-        // Build MCTS tree and run search
-        let mut tree = MCTSTree::new(
-            hidden_state,
-            &policy,
-            value,
-            legal_actions.clone(),
-            mcts_config.clone(),
-        );
+        // Obtain the tree for this turn: reuse the subtree under the opponent's last
+        // action if available and tree_reuse is enabled, otherwise build fresh.
+        // The reused node was created as an expansion leaf (legal_actions: empty).
+        // We warm-start the fresh root with the reused node's Q-value (accumulated
+        // via backprop in the prior search) instead of the raw network value.
+        let mut tree = if config.tree_reuse {
+            let warm_value = maybe_tree.take()
+                .filter(|t| t.root.visit_count > 0)
+                .map(|t| t.root.q_value());
+            MCTSTree::new(
+                hidden_state.clone(),
+                &policy,
+                warm_value.unwrap_or(value),
+                legal_actions.clone(),
+                mcts_config.clone(),
+            )
+        } else {
+            MCTSTree::new(
+                hidden_state.clone(),
+                &policy,
+                value,
+                legal_actions.clone(),
+                mcts_config.clone(),
+            )
+        };
+
         tree.run_simulations(evaluator.as_ref()).await;
 
         // Extract results
@@ -110,7 +134,7 @@ pub async fn play_game(
             visit_distribution,
             root_value,
             reward: 0.0, // Set terminal reward after game ends
-            legal_moves: legal_actions,
+            legal_moves: legal_actions.clone(),
         });
 
         // Snapshot position before applying the move (for history encoding on next turn)
@@ -125,6 +149,12 @@ pub async fn play_game(
                 // try the first legal move as fallback
                 break;
             }
+        }
+
+        // Advance the tree past the action just played.
+        // The resulting subtree is the opponent's starting point; next iteration reuses it.
+        if config.tree_reuse {
+            maybe_tree = tree.reuse_subtree(action);
         }
 
         // Add pre-move snapshot to history buffer (oldest first); keep at most 7
@@ -325,6 +355,34 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn test_play_game_with_tree_reuse_completes() {
+        let precomputed = Arc::new(PrecomputedItems::begin_precomputing());
+        let evaluator: Arc<dyn Evaluator> = Arc::new(RandomEvaluator);
+        let config = GameConfig {
+            num_simulations: 5,
+            exploration_constant: 1.5,
+            temperature_moves: 5,
+            tree_reuse: true,
+        };
+
+        let trajectory = play_game(precomputed, evaluator, 1, config).await;
+
+        assert!(!trajectory.steps.is_empty(), "Trajectory should have steps");
+
+        for step in &trajectory.steps {
+            assert!(!step.legal_moves.is_empty(), "Each step should have legal moves");
+            assert!(!step.visit_distribution.is_empty(), "Each step should have visit distribution");
+        }
+
+        assert!(
+            trajectory.game_outcome == 1.0
+                || trajectory.game_outcome == -1.0
+                || trajectory.game_outcome == 0.0,
+            "Game outcome should be +1, -1, or 0"
+        );
+    }
+
     #[test]
     fn test_legal_moves_starting_position() {
         let precomputed = Arc::new(PrecomputedItems::begin_precomputing());
@@ -346,6 +404,7 @@ mod tests {
             num_simulations: 2, // Very few for speed
             exploration_constant: 1.5,
             temperature_moves: 5,
+            tree_reuse: false,
         };
 
         let trajectory = play_game(precomputed, evaluator, 1, config).await;

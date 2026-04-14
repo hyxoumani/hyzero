@@ -110,6 +110,7 @@ impl EvaluationTask {
                 num_simulations: self.config.num_simulations,
                 exploration_constant: 1.5,
                 temperature_moves: self.config.temperature_moves,
+                tree_reuse: true,
             };
 
             let mut white_wins: usize = 0;
