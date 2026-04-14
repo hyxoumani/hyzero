@@ -6,7 +6,8 @@ use crate::mcts::puct::select_child;
 /// Exploration fraction for Dirichlet noise at the root.
 const NOISE_EPSILON: f32 = 0.25;
 /// Dirichlet concentration parameter (alpha) for chess.
-const NOISE_ALPHA: f32 = 0.03;
+/// AlphaZero paper: 0.3 for chess, 0.15 for shogi, 0.03 for Go.
+const NOISE_ALPHA: f32 = 0.3;
 
 /// Sample from a Dirichlet(alpha, ..., alpha) distribution of length `n`.
 ///
