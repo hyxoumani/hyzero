@@ -1,7 +1,6 @@
 """MuZero training loop with K-step unroll, loss computation, and checkpointing."""
 
 import io
-import math
 
 import numpy as np
 import torch
@@ -58,19 +57,6 @@ class Trainer:
             lr=cfg["lr"],
             weight_decay=cfg["weight_decay"],
         )
-
-        # Cosine LR schedule with linear warmup
-        warmup = cfg.get("lr_warmup_steps", 100)
-        decay = cfg.get("lr_decay_steps", 10000)
-        min_f = cfg.get("lr_min_factor", 0.1)
-
-        def _lr_lambda(step: int) -> float:
-            if step < warmup:
-                return max(step, 1) / warmup  # linear warmup
-            progress = min((step - warmup) / max(decay - warmup, 1), 1.0)
-            return min_f + 0.5 * (1.0 - min_f) * (1.0 + math.cos(math.pi * progress))
-
-        self.scheduler = torch.optim.lr_scheduler.LambdaLR(self.optimizer, _lr_lambda)
 
         self.model_version: int = 0
 
@@ -137,7 +123,6 @@ class Trainer:
 
         total_loss.backward()
         self.optimizer.step()
-        self.scheduler.step()
 
         self.model_version += 1
 
@@ -194,7 +179,6 @@ class Trainer:
                 "g": self.g.state_dict(),
                 "f": self.f.state_dict(),
                 "optimizer": self.optimizer.state_dict(),
-                "scheduler": self.scheduler.state_dict(),
                 "model_version": self.model_version,
                 "eval_metrics": eval_metrics,
             },
@@ -216,7 +200,5 @@ class Trainer:
         self.g.load_state_dict(checkpoint["g"])
         self.f.load_state_dict(checkpoint["f"])
         self.optimizer.load_state_dict(checkpoint["optimizer"])
-        if "scheduler" in checkpoint:
-            self.scheduler.load_state_dict(checkpoint["scheduler"])
         self.model_version = checkpoint["model_version"]
         return checkpoint.get("eval_metrics")

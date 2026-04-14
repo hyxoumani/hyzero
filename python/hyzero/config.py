@@ -8,7 +8,4 @@ DEFAULT_CONFIG = {
     "action_planes": 3,       # spatial action encoding planes
     "lr": 1e-3,
     "weight_decay": 1e-4,
-    "lr_warmup_steps": 100,
-    "lr_decay_steps": 10000,
-    "lr_min_factor": 0.1,
 }
