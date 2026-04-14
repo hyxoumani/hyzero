@@ -38,24 +38,24 @@ echo "[3/5] Extracting metrics..."
 
 GAMES=$(awk '/\[py_training\].*Game received/{n++} END{print n+0}' "$LOG_FILE")
 TRAIN_STEPS=$(awk '/\[py_training\].*step [0-9]/{n++} END{print n+0}' "$LOG_FILE")
-_TRAIN_LINES=$(grep '\[py_training\].*step [0-9]' "$LOG_FILE" || true)
-FIRST_LOSS=$(echo "$_TRAIN_LINES" | head -1 | sed -n 's/.*total=\([0-9.]*\).*/\1/p')
+_FIRST_TRAIN_LINE=$(awk '/\[py_training\].*step [0-9]/{print; exit}' "$LOG_FILE")
+_LAST_TRAIN_LINE=$(awk '/\[py_training\].*step [0-9]/{line=$0} END{print line}' "$LOG_FILE")
+FIRST_LOSS=$(printf '%s\n' "$_FIRST_TRAIN_LINE" | sed -n 's/.*total=\([0-9.]*\).*/\1/p')
 FIRST_LOSS=${FIRST_LOSS:-0.0}
-LAST_LOSS=$(echo "$_TRAIN_LINES" | tail -1 | sed -n 's/.*total=\([0-9.]*\).*/\1/p')
+LAST_LOSS=$(printf '%s\n' "$_LAST_TRAIN_LINE" | sed -n 's/.*total=\([0-9.]*\).*/\1/p')
 LAST_LOSS=${LAST_LOSS:-0.0}
-LAST_POLICY=$(echo "$_TRAIN_LINES" | tail -1 | sed -n 's/.*policy=\([0-9.]*\).*/\1/p')
+LAST_POLICY=$(printf '%s\n' "$_LAST_TRAIN_LINE" | sed -n 's/.*policy=\([0-9.]*\).*/\1/p')
 LAST_POLICY=${LAST_POLICY:-0.0}
 ERRORS=$(awk 'tolower($0) ~ /error|panic/{n++} END{print n+0}' "$LOG_FILE")
 CHECKPOINTS=$(awk '/\[py_training\].*Checkpoint saved/{n++} END{print n+0}' "$LOG_FILE")
 AVG_STEPS=$(awk '/\[py_training\].*Game received/{split($0,a,"received: "); split(a[2],b," "); sum+=b[1]; n++} END{if(n>0) printf "%.1f", sum/n; else print "0"}' "$LOG_FILE")
 
 # Extract eval metrics (use MAX decisive_ratio across all eval cycles)
-_EVAL_LINES=$(grep '\[eval\]' "$LOG_FILE" || true)
-if [ -n "$_EVAL_LINES" ]; then
-    EVAL_CYCLES=$(echo "$_EVAL_LINES" | wc -l | tr -d ' ')
+EVAL_CYCLES=$(awk '/\[eval\]/{n++} END{print n+0}' "$LOG_FILE")
+if [ "$EVAL_CYCLES" -gt 0 ]; then
 
     # For each eval line, print cycle_number decisive_ratio avg_length
-    EVAL_SUMMARY=$(echo "$_EVAL_LINES" | awk '{
+    EVAL_SUMMARY=$(awk '/\[eval\]/{
         cycle++
         dr = "0.0"; al = "0.0"
         for (i=1; i<=NF; i++) {
@@ -63,7 +63,7 @@ if [ -n "$_EVAL_LINES" ]; then
             if ($i ~ /^avg_length=/)    { split($i, a, "="); al = a[2] }
         }
         print cycle, dr, al
-    }')
+    }' "$LOG_FILE")
 
     # Report all cycles
     echo "  Eval cycles detail:"
