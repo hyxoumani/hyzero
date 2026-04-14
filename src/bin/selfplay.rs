@@ -176,7 +176,7 @@ async fn main() {
         max_concurrent_games: config.max_concurrent_games,
         game_config: GameConfig {
             num_simulations: config.num_simulations,
-            exploration_constant: 2.0,
+            exploration_constant: 1.5,
             temperature_moves: config.temperature_moves,
         },
     };

@@ -24,7 +24,7 @@ impl Default for GameConfig {
     fn default() -> Self {
         Self {
             num_simulations: 800,
-            exploration_constant: 2.0,
+            exploration_constant: 1.5,
             temperature_moves: 30,
         }
     }
