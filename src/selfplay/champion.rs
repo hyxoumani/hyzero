@@ -27,10 +27,23 @@ pub struct ChampionStore {
 
 impl ChampionStore {
     /// Create a new store backed by the given initial evaluator (typically `RandomBackend`).
+    /// Champion version is initialized to 0.
     pub fn new(initial: Arc<dyn Evaluator>, archive_depth: usize) -> Self {
+        Self::new_with_version(initial, archive_depth, 0)
+    }
+
+    /// Create a new store with an explicit starting version.
+    ///
+    /// Used on binary restart when loading an existing `best.pt` so that the
+    /// promotion ladder continues from the last known champion version.
+    pub fn new_with_version(
+        initial: Arc<dyn Evaluator>,
+        archive_depth: usize,
+        starting_version: u64,
+    ) -> Self {
         Self {
             champion: RwLock::new(initial),
-            champion_version: AtomicU64::new(0),
+            champion_version: AtomicU64::new(starting_version),
             archive_depth,
             archive_files: RwLock::new(Vec::new()),
         }
@@ -163,6 +176,19 @@ mod tests {
         let evaluator: Arc<dyn Evaluator> = Arc::new(RandomEvaluator);
         let store = ChampionStore::new(evaluator, 5);
         assert_eq!(store.version(), 0, "initial version should be 0");
+    }
+
+    #[tokio::test]
+    async fn test_champion_store_new_with_starting_version() {
+        let evaluator: Arc<dyn Evaluator> = Arc::new(RandomEvaluator);
+        let store = ChampionStore::new_with_version(evaluator, 5, 42);
+        assert_eq!(
+            store.version(),
+            42,
+            "starting_version should be initialized from constructor argument"
+        );
+        // champion() should return the provided evaluator (not panic or deadlock).
+        let _champ = store.champion().await;
     }
 
     #[tokio::test]

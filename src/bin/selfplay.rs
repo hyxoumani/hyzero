@@ -18,6 +18,32 @@ use hyzero::selfplay::game_task::GameConfig;
 use hyzero::selfplay::evaluation::RandomEvaluator;
 use hyzero::mcts::evaluator::Evaluator;
 
+/// Scan `checkpoints/` for `best_vNNN.pt` files and return the highest NNN found.
+///
+/// Returns `None` if the directory does not exist or contains no matching files.
+fn find_latest_archive_version() -> Option<u64> {
+    let dir = std::fs::read_dir("checkpoints").ok()?;
+    let mut max_version: Option<u64> = None;
+    for entry in dir.flatten() {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        // Match pattern: best_vNNN.pt
+        if let Some(inner) = name_str.strip_prefix("best_v") {
+            if let Some(num_str) = inner.strip_suffix(".pt") {
+                if let Ok(v) = num_str.parse::<u64>() {
+                    max_version = Some(max_version.map_or(v, |m: u64| m.max(v)));
+                }
+            }
+        }
+    }
+    max_version
+}
+
+/// Load the bytes from `checkpoints/best.pt`.
+fn read_best_pt() -> std::io::Result<Vec<u8>> {
+    std::fs::read("checkpoints/best.pt")
+}
+
 /// Runtime configuration for the self-play binary.
 /// All fields can be overridden via environment variables; falls back to Default.
 struct RunConfig {
@@ -160,12 +186,109 @@ async fn main() {
     });
 
     // 5. Create swappable champion backend handle for hot-swap on promotion.
-    //    The champion evaluator itself is stored in ChampionStore; the backend
-    //    handle allows the eval task to swap the champion's inference backend
-    //    (e.g., from Random to a loaded checkpoint) in a future iteration.
-    let initial_champion_backend: Box<dyn hyzero::selfplay::InferenceBackend> =
-        Box::new(RandomBackend::new(hidden_channels));
-    let (_swappable, champion_backend_handle) = SwappableBackend::new(initial_champion_backend);
+    //    If best.pt exists on disk, we boot the champion batcher immediately
+    //    with the frozen weights instead of starting from RandomBackend.
+    let best_pt_path = std::path::Path::new("checkpoints/best.pt");
+    let (champion_store_evaluator, champion_store_version, champion_backend_handle) =
+        if best_pt_path.exists() {
+            // Determine starting version from archived best_vNNN.pt files.
+            let starting_version = match find_latest_archive_version() {
+                Some(v) => v,
+                None => {
+                    eprintln!(
+                        "[selfplay] WARNING: best.pt exists but no best_vNNN.pt found; \
+                         defaulting starting_version to 1"
+                    );
+                    1
+                }
+            };
+
+            // Load frozen weights from best.pt.
+            match read_best_pt() {
+                Ok(best_pt_bytes) => {
+                    // Create a fresh Python InferenceServer for the champion.
+                    let (champion_server, champion_hidden_channels): (Py<PyAny>, usize) =
+                        Python::attach(|py| {
+                            let config_obj = PyModule::import(py, "hyzero.config")
+                                .expect("hyzero Python package not found")
+                                .getattr("DEFAULT_CONFIG")
+                                .expect("DEFAULT_CONFIG missing")
+                                .into_pyobject(py)
+                                .expect("into_pyobject failed");
+                            let hc: usize = config_obj
+                                .cast::<PyDict>()
+                                .expect("DEFAULT_CONFIG is not a dict")
+                                .get_item("hidden_channels")
+                                .expect("hidden_channels lookup failed")
+                                .expect("hidden_channels not in DEFAULT_CONFIG")
+                                .extract()
+                                .expect("hidden_channels is not a usize");
+                            let config_unbound = config_obj.unbind();
+                            let cls = PyModule::import(py, "hyzero.inference.server")
+                                .expect("hyzero.inference.server not found")
+                                .getattr("InferenceServer")
+                                .expect("InferenceServer class not found");
+                            let srv: Py<PyAny> = cls
+                                .call1((config_unbound, "cpu"))
+                                .expect("champion InferenceServer() constructor failed")
+                                .unbind();
+                            (srv, hc)
+                        });
+
+                    // Load frozen weights into the champion server.
+                    Python::attach(|py| {
+                        let py_bytes = PyBytes::new(py, &best_pt_bytes);
+                        champion_server
+                            .call_method1(py, "load_weights", (py_bytes,))
+                            .expect("[selfplay] failed to load best.pt into champion server");
+                    });
+
+                    // Spawn champion inference batcher backed by the frozen PyO3Backend.
+                    let (champion_tx, champion_rx) = mpsc::channel(256);
+                    let champion_backend_box =
+                        Box::new(PyO3Backend::new(champion_server, champion_hidden_channels));
+                    let initial_swappable_inner: Box<dyn hyzero::selfplay::InferenceBackend> =
+                        champion_backend_box;
+                    let (champion_swappable, champion_handle) =
+                        SwappableBackend::new(initial_swappable_inner);
+                    let mut champion_batcher = InferenceBatcher::new(
+                        champion_rx,
+                        Box::new(champion_swappable),
+                        batcher_config.clone(),
+                    );
+                    tokio::spawn(async move {
+                        champion_batcher.run().await;
+                        println!("[selfplay] Champion inference batcher stopped");
+                    });
+
+                    let champion_eval: Arc<dyn Evaluator> =
+                        Arc::new(ChannelEvaluator::new(champion_tx));
+
+                    println!(
+                        "[selfplay] Loaded champion from checkpoints/best.pt (version={starting_version})"
+                    );
+
+                    (champion_eval, starting_version, champion_handle)
+                }
+                Err(e) => {
+                    eprintln!("[selfplay] WARNING: best.pt exists but could not be read ({e}); falling back to RandomEvaluator");
+                    let initial_champion_backend: Box<dyn hyzero::selfplay::InferenceBackend> =
+                        Box::new(RandomBackend::new(hidden_channels));
+                    let (_swappable, champion_handle) =
+                        SwappableBackend::new(initial_champion_backend);
+                    let eval: Arc<dyn Evaluator> = Arc::new(RandomEvaluator);
+                    println!("[selfplay] No existing best.pt; starting with RandomEvaluator (version=0)");
+                    (eval, 0, champion_handle)
+                }
+            }
+        } else {
+            let initial_champion_backend: Box<dyn hyzero::selfplay::InferenceBackend> =
+                Box::new(RandomBackend::new(hidden_channels));
+            let (_swappable, champion_handle) = SwappableBackend::new(initial_champion_backend);
+            let eval: Arc<dyn Evaluator> = Arc::new(RandomEvaluator);
+            println!("[selfplay] No existing best.pt; starting with RandomEvaluator (version=0)");
+            (eval, 0, champion_handle)
+        };
 
     // 6. Spawn training thread backed by the Python Trainer.
     println!("[selfplay] Creating Python Trainer...");
@@ -222,9 +345,13 @@ async fn main() {
         selfplay_config,
     );
 
-    // 9. Create the champion store. Initial champion = RandomEvaluator (version 0).
-    let initial_champion: Arc<dyn Evaluator> = Arc::new(RandomEvaluator);
-    let champion_store = Arc::new(ChampionStore::new(initial_champion, 5));
+    // 9. Create the champion store using the evaluator and version resolved in step 5.
+    //    If best.pt was found, this uses the loaded frozen model; otherwise RandomEvaluator.
+    let champion_store = Arc::new(ChampionStore::new_with_version(
+        champion_store_evaluator,
+        5,
+        champion_store_version,
+    ));
 
     // 10. Spawn evaluation ladder task.
     let challenger_eval: Arc<dyn Evaluator> = Arc::new(ChannelEvaluator::new(inference_tx));
