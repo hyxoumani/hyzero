@@ -439,87 +439,150 @@ mod tests {
 
     #[tokio::test]
     async fn test_backpropagate_alternates_signs() {
-        // Custom evaluator: returns a fixed non-zero value so we can inspect signs.
-        struct FixedValueEvaluator;
+        // Test backpropagate directly on hand-built trees for path lengths 1, 2, 3.
+        //
+        // Sign convention (matches puct.rs which reads child.q_value directly):
+        //   - Leaf value is from the LEAF player's perspective.
+        //   - Root stores Q from root's own player's POV.
+        //   - Non-root nodes store Q from their PARENT's POV.
+        //   - In a two-player alternating game, perspective flips per ply.
+        //
+        // Expected accumulated total_value contributions from a single backprop of +1.0:
+        //   D=1 path [a]:         root=-1, depth-1[a]=-1
+        //   D=2 path [a, b]:      root=+1, depth-1[a]=+1, depth-2[a,b]=-1
+        //   D=3 path [a, b, c]:   root=-1, depth-1[a]=-1, depth-2[a,b]=+1, depth-3[a,b,c]=-1
 
-        #[async_trait]
-        impl Evaluator for FixedValueEvaluator {
-            async fn root_setup(
-                &self,
-                _obs: &BoardObservation,
-                _legal_mask: &[bool],
-            ) -> (HiddenState, Policy, f32) {
-                let policy = vec![1.0 / NUM_ACTIONS as f32; NUM_ACTIONS];
-                (HiddenState::new(64), policy, 0.0) // root starts at 0 to isolate backprop
-            }
-
-            async fn expand_leaf(
-                &self,
-                _hs: &HiddenState,
-                _action: ActionIndex,
-            ) -> (HiddenState, f32, Policy, f32) {
-                let policy = vec![1.0 / NUM_ACTIONS as f32; NUM_ACTIONS];
-                (HiddenState::new(64), 0.0, policy, 1.0) // every leaf evaluates to +1 (from leaf's POV)
-            }
-        }
-
-        let policy = vec![1.0 / NUM_ACTIONS as f32; NUM_ACTIONS];
-        let legal_actions: Vec<ActionIndex> = (0..3).collect();
-        let config = MCTSConfig {
-            num_simulations: 100,
+        let uniform_policy = vec![1.0 / NUM_ACTIONS as f32; NUM_ACTIONS];
+        let nil_config = MCTSConfig {
+            num_simulations: 0,
             exploration_constant: 1.5,
         };
 
-        let mut tree = MCTSTree::new(
-            HiddenState::new(64),
-            &policy,
-            0.0, // root_value = 0, so root.total_value starts at 0
-            legal_actions,
-            config,
-        );
+        // Helper: install a freshly-created child at path[0..path.len()] below root.
+        // Assumes all intermediate children already exist.
+        fn install_child(
+            tree: &mut MCTSTree,
+            parent_path: &[usize],
+            slot: usize,
+            policy: &[f32],
+            num_grandchild_slots: usize,
+        ) {
+            let legal: Vec<ActionIndex> = (0..num_grandchild_slots as ActionIndex).collect();
+            let child = MCTSNode::new(HiddenState::new(64), policy, legal, 0.0);
 
-        tree.run_simulations(&FixedValueEvaluator).await;
-
-        // Every depth-1 child's Q should be NEGATIVE (leaf POV is opponent; stored
-        // from root's POV = -leaf_value = -1). Q = total_value / visit_count.
-        // With leaf_value = +1 always, every visit of a depth-1 child contributes
-        // -1 to its stored total_value (convention B for d=1, d_path=1: sign at d=1 is -1).
-        // BUT some visits came from depth-2 paths (d_path=2), where depth-1 child
-        // gets +value. Net sign depends on mix.
-        //
-        // A cleaner invariant: depth-2 grandchildren's Q should have the OPPOSITE
-        // sign of their depth-1 parent's Q contribution from those same visits.
-        // Simplest check: find any expanded grandchild and verify its total_value
-        // has a different average sign than a pure depth-1-only backprop would give.
-        //
-        // Concrete check: for at least one (parent, child) pair in the tree where
-        // both have visit_count > 0, the stored total_values should not both match
-        // the "all negative" pattern of the buggy code (which stored -value for every
-        // descendant regardless of depth).
-
-        // Count: if buggy (every child gets -value), all depth-≥1 nodes would have
-        // total_value == -visit_count (i.e., mean -1). If fixed, depth-2 nodes'
-        // contributions from depth-2 backups will be +value, pushing their mean above -1.
-        let mut found_positive_contribution = false;
-        for d1 in tree.root.children.iter().flatten() {
-            for d2 in d1.children.iter().flatten() {
-                if d2.visit_count > 0 {
-                    let q = d2.total_value / d2.visit_count as f32;
-                    // In convention B with leaf_value=+1, a depth-2 child (depth=2 from
-                    // a d_path=2 backup) stores sign = -1. But the same node can also
-                    // be visited via longer paths (d_path=3,4,...), producing varied signs.
-                    // The key is: at least some non-(-1) contributions should appear.
-                    if q > -0.99 {
-                        found_positive_contribution = true;
-                    }
-                }
+            // Walk down to the parent.
+            let mut node: &mut MCTSNode = &mut tree.root;
+            for &idx in parent_path {
+                node = node.children[idx].as_mut().unwrap();
             }
+            node.children[slot] = Some(Box::new(child));
         }
-        assert!(
-            found_positive_contribution,
-            "Expected at least one depth-2 node whose Q is not stuck at -1 \
-             (the buggy code's signature). All depth-2 Q values were ≤ -0.99, \
-             which means backprop didn't alternate signs as intended."
-        );
+
+        // ---------- D=1 ----------
+        {
+            let legal: Vec<ActionIndex> = (0..2).collect();
+            let mut tree = MCTSTree::new(
+                HiddenState::new(64),
+                &uniform_policy,
+                0.0, // root_value = 0 so root.total_value starts at 0
+                legal,
+                nil_config.clone(),
+            );
+            // root.total_value is 0.0 from MCTSTree::new (root_value=0, visit_count=1).
+            // Install a depth-1 child in slot 0 so backpropagate can unwrap it.
+            install_child(&mut tree, &[], 0, &uniform_policy, 2);
+            let root_tv_before = tree.root.total_value;
+
+            tree.backpropagate(&[0], 1.0);
+
+            assert!(
+                (tree.root.total_value - root_tv_before - (-1.0)).abs() < 1e-6,
+                "D=1 root delta should be -1.0, got {}",
+                tree.root.total_value - root_tv_before,
+            );
+            let d1 = tree.root.children[0].as_ref().unwrap();
+            assert!(
+                (d1.total_value - (-1.0)).abs() < 1e-6,
+                "D=1 depth-1 should be -1.0, got {}",
+                d1.total_value,
+            );
+        }
+
+        // ---------- D=2 ----------
+        {
+            let legal: Vec<ActionIndex> = (0..2).collect();
+            let mut tree = MCTSTree::new(
+                HiddenState::new(64),
+                &uniform_policy,
+                0.0,
+                legal,
+                nil_config.clone(),
+            );
+            install_child(&mut tree, &[], 0, &uniform_policy, 2);
+            install_child(&mut tree, &[0], 0, &uniform_policy, 2);
+            let root_tv_before = tree.root.total_value;
+
+            tree.backpropagate(&[0, 0], 1.0);
+
+            assert!(
+                (tree.root.total_value - root_tv_before - 1.0).abs() < 1e-6,
+                "D=2 root delta should be +1.0, got {}",
+                tree.root.total_value - root_tv_before,
+            );
+            let d1 = tree.root.children[0].as_ref().unwrap();
+            assert!(
+                (d1.total_value - 1.0).abs() < 1e-6,
+                "D=2 depth-1 should be +1.0, got {}",
+                d1.total_value,
+            );
+            let d2 = d1.children[0].as_ref().unwrap();
+            assert!(
+                (d2.total_value - (-1.0)).abs() < 1e-6,
+                "D=2 depth-2 should be -1.0, got {}",
+                d2.total_value,
+            );
+        }
+
+        // ---------- D=3 ----------
+        {
+            let legal: Vec<ActionIndex> = (0..2).collect();
+            let mut tree = MCTSTree::new(
+                HiddenState::new(64),
+                &uniform_policy,
+                0.0,
+                legal,
+                nil_config.clone(),
+            );
+            install_child(&mut tree, &[], 0, &uniform_policy, 2);
+            install_child(&mut tree, &[0], 0, &uniform_policy, 2);
+            install_child(&mut tree, &[0, 0], 0, &uniform_policy, 2);
+            let root_tv_before = tree.root.total_value;
+
+            tree.backpropagate(&[0, 0, 0], 1.0);
+
+            assert!(
+                (tree.root.total_value - root_tv_before - (-1.0)).abs() < 1e-6,
+                "D=3 root delta should be -1.0, got {}",
+                tree.root.total_value - root_tv_before,
+            );
+            let d1 = tree.root.children[0].as_ref().unwrap();
+            assert!(
+                (d1.total_value - (-1.0)).abs() < 1e-6,
+                "D=3 depth-1 should be -1.0, got {}",
+                d1.total_value,
+            );
+            let d2 = d1.children[0].as_ref().unwrap();
+            assert!(
+                (d2.total_value - 1.0).abs() < 1e-6,
+                "D=3 depth-2 should be +1.0, got {}",
+                d2.total_value,
+            );
+            let d3 = d2.children[0].as_ref().unwrap();
+            assert!(
+                (d3.total_value - (-1.0)).abs() < 1e-6,
+                "D=3 depth-3 should be -1.0, got {}",
+                d3.total_value,
+            );
+        }
     }
 }
