@@ -1,5 +1,6 @@
 use std::collections::VecDeque;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 
 use numpy::{IntoPyArray, PyArrayMethods};
 use pyo3::prelude::*;
@@ -205,6 +206,10 @@ pub struct PyTrainingThread {
     checkpoint_interval_steps: usize,
     checkpoint_keep_last: usize,
     checkpoint_files: VecDeque<PathBuf>,
+    /// Shared pointer to the latest **completed** checkpoint path.
+    /// Written by the training thread after a successful `save_checkpoint` + fsync.
+    /// Read by the eval task to know which checkpoint to promote.
+    pub latest_checkpoint_path: Arc<Mutex<Option<PathBuf>>>,
 }
 
 impl PyTrainingThread {
@@ -251,6 +256,7 @@ impl PyTrainingThread {
             checkpoint_interval_steps,
             checkpoint_keep_last,
             checkpoint_files: VecDeque::new(),
+            latest_checkpoint_path: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -416,6 +422,12 @@ impl PyTrainingThread {
                         match ckpt_result {
                             Ok(()) => {
                                 println!("[py_training] Checkpoint saved: {path_str}");
+                                // Publish path to eval task before pruning old files.
+                                if let Ok(mut guard) =
+                                    self.latest_checkpoint_path.lock()
+                                {
+                                    *guard = Some(path.clone());
+                                }
                                 self.checkpoint_files.push_back(path);
                                 // Prune oldest if window exceeded
                                 if self.checkpoint_files.len() > self.checkpoint_keep_last {
