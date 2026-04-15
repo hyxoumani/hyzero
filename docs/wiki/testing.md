@@ -114,11 +114,13 @@ HYZERO_VALUE_OUTCOME_BETA=0.3 bash scripts/run_baseline.sh 1800
 
 ## 7. Baseline & Validation
 
-Current baseline: **11.63** (commit 294e63e, 2026-04-15, β=0.3, autoresearch winner)
+Current baseline: **14.51** (commit 63afdbe, 2026-04-15, reproducibility run, β=0.3)
+- Prior run: 11.63 (commit 294e63e, 2026-04-15, first β=0.3 run)
+- Variance: ±3 points observed between two runs at identical config (11.63 and 14.51)
 
 Previous baseline: **6.78** (commit d407281, 2026-04-14 — Dirichlet alpha fix: 0.03 → 0.3 for chess).
 
-The metric has ±1 point noise floor. **Rule**: Changes <1.5 points need 2–3 reruns; median reported.
+The metric has ±1.5 point noise floor for single runs. **Rule**: Changes <1.5 points need 2–3 reruns; median reported. Variance is expected due to binomial eval noise (10-game samples) and ±50% training step count jitter.
 
 ## 8. Metric Definition Precision
 

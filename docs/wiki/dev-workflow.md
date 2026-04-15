@@ -13,10 +13,13 @@ Guide to orchestration, agents, baseline scoring, and persistent memory system.
 Every architecture change is validated by a 30-minute training run.
 
 **Run**: `bash scripts/run_baseline.sh 1800`
-**Score formula**: `(8.55 - final_policy_loss) + (decisive_ratio * 10) - (avg_game_length / 100)`
+**Score formula**: `(8.55 - final_policy_loss) + (promotions * HYZERO_CHAMPION_SCORE_WEIGHT) - (avg_game_length / 100)`
 **Direction**: Higher is better
 **Stored at**: `logs/baseline_score.json`
-**Current baseline**: 4.78 (commit c1e5cdc)
+**Current baseline**: 14.51 (commit 63afdbe, 2026-04-15, β=0.3, reproducibility run)
+**Previous (one run prior)**: 11.63 (commit 294e63e, 2026-04-15, β=0.3, initial autoresearch winner)
+
+**Important**: Formula changed 2026-04-15 from `decisive_ratio` (flawed self-play metric) to `promotions` (discrete wins in eval ladder). See project-roadmap.md "Metric Evolution" for context.
 
 The script runs selfplay for 30 minutes, extracts metrics (loss, eval win rate, game length), computes the composite score, and compares against the previous baseline.
 

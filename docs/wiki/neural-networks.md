@@ -80,6 +80,22 @@ PUCT(s, a) = P(a) * sqrt(N(s)) / (1 + N(a))
 
 Without the Q term, selection is noise plus prior bias. Visit counts approximate the prior distribution, not the improved policy. Policy loss may decrease (network memorizes which moves to avoid), but the policy doesn't *improve* — it self-imitates. This explains the "hollow learning" pattern: low loss, but evaluations show unchanged or degraded play.
 
+## Value Head Status: Barely Alive
+
+**Current state (2026-04-15 β=0.3)**: Value head loss is now measurable (0.0145 → 0.0011 during training, first time non-zero), but the head is only nominally functional. Evidence:
+
+- Early training produces non-zero gradients (β blend injects outcome signal), so the head is no longer in a dead bootstrap loop
+- **But**: Cycle-1 eval shows the challenger frequently **loses to Random** even at configurations with best policy loss (e.g., value_weight=5.0, games_per_side=6)
+- This suggests value estimates are **still unreliable** at initializing MCTS search, despite non-zero loss
+- Promotions happen later (cycles 2-5), likely driven by policy improvement rather than value-head discrimination
+
+**Verification needed** before claiming value head actually works:
+1. **Held-out MSE test**: Train 10 models, hold out final 10% of games, measure MSE on held-out value targets. If MSE >> 0 but training loss → 0, the network is overfitting or fitting stale targets.
+2. **Ablation test**: Remove β blend (set β=0), run 30-min baseline. If score regresses significantly, that confirms the outcome signal is carrying the improvement (not Q-estimate quality).
+3. **Value-only diagnostic**: Early game (cycle 1) often shows 0% win rate. Measure if the value head's initialization is the bottleneck (do games play better if we seed root with outcome instead of f-network output?).
+
+Until these tests run, assume promotions are driven primarily by **policy improvement via MCTS visit-count targets**, with value head contribution uncertain.
+
 ## Outcome Blend Protocol (β Parameter)
 
 The value-outcome blend coefficient β controls the mix of MCTS Q-estimates and game outcomes in value targets. This is the highest-leverage knob in the current pipeline.
@@ -110,11 +126,13 @@ HYZERO_VALUE_OUTCOME_BETA=0.5 bash scripts/run_baseline.sh 1800
 - `HYZERO_LR_SCHEDULE` — leave empty (no schedule). Cosine schedule tested, didn't help.
 - `HYZERO_REWARD_OUTCOME_GAMMA` — leave at default (no soft blending of outcome). γ=0.1 test regressed once at β=0.3.
 
-## Loss Weight Tuning
+## Loss Weight Tuning — Multi-Head Feedback Loop
 
-Loss weights (HYZERO_{POLICY,VALUE,REWARD}_LOSS_WEIGHT) default to 1.0 and should stay near that. A 2026-04-15 experiment boosted value_loss_weight to 5.0 expecting faster value head training (since value loss was ~60x smaller). Instead, score regressed from 11.63 to 4.84: the amplified gradient made value estimates oscillate wildly early in training, corrupting the MCTS-generated data that the policy head learns from. When one head's training signal is amplified without matching convergence stability in the other heads, the shared training data distribution becomes corrupted.
+Loss weights (HYZERO_{POLICY,VALUE,REWARD}_LOSS_WEIGHT) default to 1.0 and should stay near that. A 2026-04-15 experiment boosted value_loss_weight to 5.0 expecting faster value head training (since value loss was ~60x smaller than policy loss). Result: catastrophic regression from 11.63 to 4.84, with 0 promotions. Notably, policy loss achieved a new best (2.70 vs baseline 3.40), yet the challenger **lost to Random** at eval cycles 3–4.
 
-**To increase value signal**: Prefer tuning the outcome blend coefficient β instead. For example, use β=0.5 (soft 50/50 outcome–Q-estimate target) rather than increasing the loss weight. This scales the target without amplifying gradient instability.
+**Root cause**: MuZero training is a **closed-loop multi-head system**. The value head's quality directly controls which moves MCTS expands (via PUCT selection). When 5x amplification made value estimates oscillate wildly early in training, MCTS made poor move selections, generating low-quality training data. The policy head then learned on garbage targets (how to avoid costly moves in positions that shouldn't have existed). Policy loss *appeared good* locally (network faithfully memorized bad move labels), but global play quality collapsed because the data generator (MCTS under poor value guidance) was corrupt from the start.
+
+**To increase value signal**: Prefer tuning the outcome blend coefficient β instead. For example, use β=0.5 (soft 50/50 outcome–Q-estimate target) rather than increasing the loss weight. This scales the target without amplifying gradient instability in the closed-loop system.
 
 ## Key Gotchas
 

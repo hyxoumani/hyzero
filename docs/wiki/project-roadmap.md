@@ -18,9 +18,11 @@ Current state and next steps for hyzero.
 
 ## Baseline
 
-- **Score**: 11.63 (β=0.3, commit 294e63e, 2026-04-15 autoresearch winner)
+- **Score**: 14.51 (β=0.3, reproducibility run, commit 63afdbe, 2026-04-15)
+- **Prior run**: 11.63 (β=0.3 initial, commit 294e63e, 2026-04-15 autoresearch winner)
+- **Variance**: ±3 points observed; two runs at identical config yielded 11.63 and 14.51. Beyond noise floor of ±1.5 for single runs.
 - **Formula**: `(8.55 - policy_loss) + (promotions * HYZERO_CHAMPION_SCORE_WEIGHT) - (avg_game_length / 100)`
-- **Run command**: `bash scripts/run_baseline.sh 1800`
+- **Run command**: `bash scripts/run_baseline.sh 1800` (delete checkpoints first for fair comparison: `rm -f checkpoints/best*.pt`)
 - **Stored at**: `logs/baseline_score.json`
 - **Outcome blend (β)**: 0.3 — hard-won from 11-experiment sweep. Deviations regress (β>0.3 destabilizes, β<0.3 underperforms).
 - **Previous baseline**: 6.78 (commit d407281, 2026-04-14 — Dirichlet alpha fix before autoresearch)
