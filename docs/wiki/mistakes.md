@@ -444,6 +444,31 @@ score=$(echo "8.55 - $policy_loss + $PROMOTIONS * 2.0 ..." | bc)
 
 ---
 
+## 2026-04-15: Value Loss Weight Overshoot — Destabilizes Whole Pipeline
+
+**Date**: 2026-04-15
+**Agent**: Autoresearch session
+**Domain**: Training hyperparameter tuning (loss weights)
+**Error Type**: Experimental instability — closed-loop feedback in multi-head training
+
+**What happened**: Test of `HYZERO_VALUE_LOSS_WEIGHT=5.0` (amplify value gradient 5x) at β=0.3 (outcome blend). Hypothesis: value loss was 60x smaller than policy loss, so boosting would accelerate value head training. Result: catastrophic regression from 11.63 to 4.84 score (−6.79), 0 promotions. Notably: policy loss achieved new best (2.70 vs baseline 3.40), but challenger **lost to Random** at eval cycles 3–4 (win_rate=0.375 against trivial opponent). Training converged fast (11 eval cycles, ~102-move games).
+
+**Root Cause**: Value head overshoot created a feedback loop. With 5x gradient, early-training value estimates oscillate wildly because the network hasn't stabilized. MCTS uses value estimates to prune the search tree via PUCT selection. Poor value estimates → poor move selection during self-play → poor training data generated. The policy head then trains on garbage data (learning how to avoid costly moves in bad positions that shouldn't have existed). The policy loss *looks good locally* (network is learning which moves to avoid) but the play quality collapses because the data generator (MCTS under poor value guidance) was corrupt from the start.
+
+**The insight**: MuZero training is a **closed-loop multi-head system**. Each network head's quality directly affects the training data distribution the other heads see. In a two-player game via MCTS, the value estimate controls which positions are explored and which are pruned. Amplifying one head's gradient without matching the others' convergence rate creates a stability feedback loop: one head corrupts the shared state/action trajectory before the others can adapt.
+
+**Comparison table**:
+| Config | Policy Loss | Promotions | Score | Eval Result |
+|--------|------------|-----------|-------|-------------|
+| Baseline (β=0.3) | 3.40 | 3+ | 11.63 | Wins drawn |
+| VALUE_WEIGHT=5.0 | 2.70 ✓ | 0 ✗ | 4.84 | Loses to Random |
+
+**Fix**: Keep all loss weights at 1.0. To increase value learning signal, tune the outcome blend β instead of the loss weight. Example: if you want value head to see more outcome signal, try β=0.5 (50% outcome, 50% Q-estimate) instead of increasing weight. This scales the target signal without amplifying gradient instability.
+
+**Escalation Tier**: Gotcha — documented in neural-networks.md and learning rule encoded as: "Loss weights (HYZERO_{POLICY,VALUE,REWARD}_LOSS_WEIGHT) default to 1.0 and should stay near that."
+
+---
+
 ## Escalation Tiers
 
 Mistakes escalate from manual avoidance to automation:

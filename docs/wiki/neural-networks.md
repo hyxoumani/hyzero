@@ -50,16 +50,59 @@ Steps k: hk,rk = g(h_{k-1}, act[:,k-1]); pk,vk = f(hk)
 Total loss = sum / (K+1). Dynamics gradient scaled 1/K.
 ```
 
+## Canonical MuZero Value Target for Board Games
+
+In the MuZero paper (Schrittwieser et al. 2020), the n-step value bootstrap is:
+```
+z_k = sum_{j=0}^{n-1} γ^j * r_{k+j} + γ^n * v(s_{k+n})
+```
+
+For board games (chess, shogi, Go), the paper sets **n = ∞** and **γ = 1**. This eliminates the value term and collapses to:
+```
+z_k = sum of all remaining rewards = game outcome
+```
+
+**Our current approach** (value target = MCTS root_value) is **not canonical**. We use MCTS Q-estimates as targets, which should theoretically improve training speed (shorter bootstrap, less variance). However, in practice this creates a self-referential loop: when the value head is untrained, root_value ≈ 0, so targets are ≈ 0, producing no gradient. This is a known failure mode in self-supervised learning.
+
+**Comparison**:
+- **AlphaZero**: Value target = game outcome (like canonical MuZero). Deterministic board state allows terminal detection; outcome enters backup directly.
+- **Canonical MuZero (Atari)**: Value target = game outcome (n=∞, γ=1). No terminal detection in latent space.
+- **Our implementation**: Value target = MCTS root_value. Hypothesis: iterative refinement via bootstrapping should work, but empirically fails due to the self-referential loop.
+
+**Proposed fix**: Soft blend of root_value and outcome (e.g., β=0.1: `0.9 * root_value + 0.1 * game_outcome * side_sign`). This injects small outcome-aligned gradient to break the bootstrap loop while preserving the soft MCTS Q signal. Once the value head learns anything, root_value becomes informative and the feedback loop closes. A prior hard-outcome attempt (β=1.0) regressed -4.6 points, likely due to shared-network pollution.
+
+## MCTS as Policy Improvement Operator
+
+MCTS tree search is a policy improvement operator in the sense that better play (higher expected return) should increase visit counts and refine the policy. However, **this requires Q-estimates to be informative**. When Q ≈ 0 everywhere (as with our dead value head), PUCT reduces to:
+```
+PUCT(s, a) = P(a) * sqrt(N(s)) / (1 + N(a))
+```
+
+Without the Q term, selection is noise plus prior bias. Visit counts approximate the prior distribution, not the improved policy. Policy loss may decrease (network memorizes which moves to avoid), but the policy doesn't *improve* — it self-imitates. This explains the "hollow learning" pattern: low loss, but evaluations show unchanged or degraded play.
+
+## Loss Weight Tuning
+
+Loss weights (HYZERO_{POLICY,VALUE,REWARD}_LOSS_WEIGHT) default to 1.0 and should stay near that. A 2026-04-15 experiment boosted value_loss_weight to 5.0 expecting faster value head training (since value loss was ~60x smaller). Instead, score regressed from 11.63 to 4.84: the amplified gradient made value estimates oscillate wildly early in training, corrupting the MCTS-generated data that the policy head learns from. When one head's training signal is amplified without matching convergence stability in the other heads, the shared training data distribution becomes corrupted.
+
+**To increase value signal**: Prefer tuning the outcome blend coefficient β instead. For example, use β=0.5 (soft 50/50 outcome–Q-estimate target) rather than increasing the loss weight. This scales the target without amplifying gradient instability.
+
 ## Key Gotchas
 
 1. **Policy**: Network outputs logits. Inference server applies softmax; training uses raw logits + CE.
-2. **Value**: Tanh [-1, 1]. Predicts advantage, not outcome directly.
-3. **Reward**: Per-step (immediate), not cumulative. Real rewards come from trajectory.
+2. **Value**: Tanh [-1, 1]. Currently predicts MCTS root_value (bootstrapped Q-estimates), not game outcome.
+3. **Reward**: Per-step (immediate), not cumulative. Real rewards come from trajectory — terminal reward only.
 4. **Action encoding**: 4096 = 64×64, queen-default promotion. Underpromotion (4672) unimplemented.
-5. **Value not negated per ply** in backup — intentional, verify during training.
+5. **Value not negated per ply** in backup — intentional (same sign across turns), verify during training.
 6. **Reward loss K not K+1**: Only K reward terms (steps 1..K), policy/value have K+1 (steps 0..K). Divide reward loss by K.
 7. **Gradient hook on g output**: `register_hook(lambda grad: grad * 0.5)` on dynamics OUTPUT for correct chained K-step scaling (MuZero Appendix G).
 8. **torch.load deprecation**: Use `weights_only=False` explicitly in PyTorch 2.x to avoid FutureWarning.
+9. **Value head dead when root_value ≈ 0**: Self-referential bootstrap. Fix via soft outcome blend (e.g., β=0.1).
+10. **Reward head dead from class imbalance**: ~99% of reward targets are 0.0 (only terminal steps). MSE-optimal solution is 0.
+
+## Related
+
+- [MCTS & Self-Play](mcts-selfplay.md) — value/reward head dead analysis, replay buffer dynamics
+- `docs/wiki/mistakes.md` — entries on dead value/reward heads and perspective consistency
 
 ## Related Files
 
