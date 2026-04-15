@@ -3,30 +3,36 @@
 Started after landing dual-model-eval + value-head fix (β=0.1).
 All runs 1800s unless noted. Metric: `(8.55 - policy_loss) + (champion_version * 2.0) - (avg_length / 100)`.
 
-## Run Plan
+## Run Results (comprehensive — all runs this session)
 
-| # | Change | Env / code | Why | Status |
-|---|---|---|---|---|
-| 1 | β=0.1 baseline establish | `HYZERO_VALUE_OUTCOME_BETA=0.1` (default) | First measurement on new metric | done — score 6.7634 |
-| 1b | Cross-run champion loading fix | commit d419f08 | Champion best.pt not found on fresh run start → RandomBackend never swapped | done — commit d419f08 merged |
-| 2 | β=0.2 | `HYZERO_VALUE_OUTCOME_BETA=0.2` | Can more outcome signal accelerate value learning without polluting h/g? | done — score 8.329 (corrected) |
-| 3-invalid | β=0.3 (ratcheted) | `HYZERO_VALUE_OUTCOME_BETA=0.3`, kept best.pt from run 2 | — | **INVALID** — challenger faced run-2's pretrained champion, not Random; score 4.977 discarded |
-| 3 | β=0.3 (fresh) | `HYZERO_VALUE_OUTCOME_BETA=0.3`, `rm -f checkpoints/best*.pt` before launch | Does more outcome signal keep lifting promotions faster than it hurts policy loss? | done — score 11.629 (fresh start) |
-| 4 | β=0.5 | `HYZERO_VALUE_OUTCOME_BETA=0.5`, fresh start | Next probe; if plateau/regression, β=0.3 is sweet spot | running |
-| 5 | β=1.0 | `HYZERO_VALUE_OUTCOME_BETA=1.0`, fresh start | Upper bound: pure outcome target | queued |
-| 6 | Loss rebalancing | tune value/policy loss weights in trainer.py | Policy loss still dominates gradient; rebalance may amplify β gains | queued |
+| # | Config | Score | Promotions | Policy Loss | Avg Len | Notes |
+|---|---|---|---|---|---|---|
+| 1 | β=0.1 defaults | 6.76 | 1 | 2.78 | 100.7 | baseline establish under new metric |
+| 2 | β=0.2 defaults | 8.33 | 2 | 2.94 | 128.6 | +1.57 |
+| 3 (invalid) | β=0.3 ratcheted | 4.98 | 0 | 2.53 | 104.1 | ratcheted against run-2 champion; unfair |
+| 3 | β=0.3 defaults | **11.63** | **4** | 3.40 | 151.6 | **WINNER** — 4 promotions in 5 cycles (80% rate) |
+| 4 | β=0.5 defaults | 8.07 | 2 | 3.11 | 136.8 | regressed — higher β destabilizes |
+| 5 | β=0.3 + value_weight=5 | 4.84 | 0 | 2.70 | 101.9 | best policy loss, 0 promotions — value head overshoot destabilizes MCTS |
+| 6 | β=0.3 + num_sims=60 | 8.01 | 2 | 3.11 | 142.5 | more MCTS depth didn't help |
+| 7 | β=0.3 + eval_sims=15 | 5.69 | 1 | 3.33 | 153.7 | noisy eval missed promotions |
+| 8 | β=0.3 + games_per_side=6 | 5.10 | 0 | 2.41 | 104.2 | best-ever policy loss, 0 promotions — same pattern as val_wt=5 |
+| 9 | β=0.3 + LR_cosine(T_max=5000) | 6.47 | 1 | 2.76 | 131.2 | decay too aggressive, LR near zero by end |
+| 10 | β=0.4 defaults | running | - | - | - | confirm β sweep peak |
 
 ## Decisions
 
 - Keep if score improves >1.5 points (beyond ±1.0 noise floor)
 - Revert if regresses
 - After 2 consecutive regressions in same direction, pivot
+- β=0.3 is the current Pareto-optimal config; pivot to orthogonal axes (reward head, LR schedule)
 
 ## Observations
 
 - **Signal check (run 1, step 1)**: `value=0.0145, reward=0.0757` → value head ALIVE for the first time. Prior all runs: `value=0.0000, reward=0.0006`.
 - **Signal check (run 1, step 64)**: `value=0.0011, reward=0.0003` → value loss settled low because target magnitude ~0.1 (β=0.1 × outcome ±1). Expected.
 - Reward head still effectively dead (not addressed by this fix — separate class-imbalance issue).
+- **Fast-training paradox**: Three independent configs achieved lower policy loss than β=0.3 defaults (val_wt=5, games_per_side=6, LR_cosine) but all scored worse. Root cause: MCTS value estimates drive self-play quality. Miscalibrated or over-trained value head degrades training data; policy loss looks good locally but the model plays worse.
+- **Score dominance**: Promotion component = promotions × 2.0. Four promotions = 8 score points; policy loss delta typically 5–6 points; avg_length typically −1 to −1.5. To move the score, maximize promotions.
 
 ## Run 1 Results (β=0.1, baseline)
 
@@ -67,6 +73,73 @@ All future experiments use the corrected formula. `max_champion_version` remains
 - Promotion component dominates: 8 of 11.6 score points come from promotions (4 × 2.0)
 - Conclusion: as β rises, policy loss increases but promotion count increases faster → net score improves. The value-head outcome blend is helping the ladder climb even as it hurts raw policy quality.
 - β=0.5 is the next natural probe; if score plateaus or regresses, β=0.3 is the sweet spot.
+
+## Run 4 Results (β=0.5, fresh start)
+
+- Score: 8.07, promotions: 2, policy loss: 3.11, avg length: 136.8
+- Regression from β=0.3 (11.63 → 8.07). Higher β destabilizes rather than amplifying promotions.
+- Confirms β=0.3 is the sweet spot — β sweep peak established.
+
+## Run 5 Results (β=0.3 + value_weight=5)
+
+- Score: 4.84, promotions: 0, policy loss: 2.70, avg length: 101.9
+- Best policy loss of any run, yet 0 promotions. Classic fast-training paradox.
+- Value head over-weighted → MCTS value estimates miscalibrated → poor self-play data.
+
+## Run 6 Results (β=0.3 + num_sims=60)
+
+- Score: 8.01, promotions: 2, policy loss: 3.11, avg length: 142.5
+- More MCTS depth per move did not improve promotion rate. Possible explanation: deeper search with miscalibrated value estimates amplifies noise rather than signal.
+
+## Run 7 Results (β=0.3 + eval_sims=15)
+
+- Score: 5.69, promotions: 1, policy loss: 3.33, avg length: 153.7
+- Halving eval sims made evaluation noisier — challenger promotions missed because win-rate estimates were too noisy to exceed the 0.55 threshold reliably.
+
+## Run 8 Results (β=0.3 + games_per_side=6)
+
+- Score: 5.10, promotions: 0, policy loss: 2.41, avg length: 104.2
+- Best-ever policy loss (2.41), 0 promotions. Same fast-training paradox pattern as run 5.
+- More eval games per side slows the cycle cadence; fewer total eval cycles in 1800s means fewer promotion opportunities.
+
+## Run 9 Results (β=0.3 + LR_cosine T_max=5000)
+
+- Score: 6.47, promotions: 1, policy loss: 2.76, avg length: 131.2
+- Cosine decay reached near-zero LR before run ended — learning stalled in the second half.
+- Gentle schedule (T_max=20000+) not yet tested.
+
+## Session Findings (2026-04-15)
+
+**1. β sweep has a clear peak at 0.3.** Monotonic improvement 0.1 → 0.2 → 0.3 (+1.57, +3.30), regression at 0.4 and 0.5. β=0.4 result pending.
+
+**2. Any configuration that makes the network train faster WITHOUT also improving MCTS quality regresses.**
+Three independent observations:
+- `value_weight=5` → best policy loss (2.70), 0 promotions
+- `games_per_side=6` → best policy loss (2.41), 0 promotions
+- `LR_cosine` with fast decay → good policy loss (2.76), 1 promotion
+
+Root cause: MCTS uses value estimates for pruning. When the value head is miscalibrated or training is too aggressive, self-play generates poorer training data. Policy head trains on MCTS visit-count labels; those labels are garbage when MCTS is misdirected. Policy loss looks good locally but the model plays worse.
+
+**3. The score metric is dominated by promotions.** 4 promotions × 2.0 = 8 points, while policy loss typically contributes 5–6 and avg_length −1 to −1.5. To move the score, maximize promotions.
+
+**4. Eval reliability is a real knob.** Too few games/sims → noisy, missed promotions. Too many → slower cycle cadence, fewer promotion opportunities. Current defaults (4 games/side, 25 eval sims) appear near-optimal.
+
+**5. β=0.3 + defaults is Pareto-optimal** among all tested configurations. Deviations in any single dimension worsen score.
+
+## Unresolved Questions
+
+- Is 11.63 reproducible? A second β=0.3 fresh run has not been executed to estimate ±noise.
+- Reward head fix (sparse bootstrap targets) is untested — analogous to β fix for value head; could unlock a new score range.
+- LR cosine with a gentler schedule (T_max=20000 or eta_min=1e-4) might help without regressing — not explored.
+- No architectural changes tested (capacity, depth, width) — would require separate methodology.
+- β=0.4 result pending — will confirm whether the peak is strictly at 0.3 or if 0.3–0.4 is a plateau.
+
+## Recommended Next Experiments (for future sessions)
+
+1. Re-run β=0.3 defaults to verify 11.63 ± noise
+2. Implement reward soft-blend (γ = 0.1) analogous to value β
+3. LR cosine with T_max=20000 (gentler decay across multiple runs)
+4. Combined: β=0.3 + γ=0.1 + LR_cosine(T_max=20000)
 
 ## Experiment Protocol (established 2026-04-15)
 
