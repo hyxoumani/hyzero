@@ -30,6 +30,118 @@ impl Default for GameConfig {
     }
 }
 
+/// Outcome of a dual-evaluator game (White-perspective: +1 White, -1 Black, 0 Draw).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DualGameOutcome {
+    /// Raw game outcome: +1 White wins, -1 Black wins, 0 draw.
+    pub game_outcome: f32,
+    /// How many moves the game lasted.
+    pub num_moves: usize,
+}
+
+/// Play a game with two distinct evaluators (challenger = White, champion = Black).
+///
+/// Returns the White-perspective outcome. Callers that want to count champion wins
+/// when champion played Black must **negate** `game_outcome`.
+///
+/// No `GameTrajectory` is produced — eval games don't go to the training buffer.
+pub async fn play_game_dual(
+    precomputed: Arc<PrecomputedItems>,
+    white_evaluator: Arc<dyn Evaluator>,
+    black_evaluator: Arc<dyn Evaluator>,
+    config: GameConfig,
+) -> DualGameOutcome {
+    let player1 = Player::init_player(true);
+    let player2 = Player::init_player(false);
+    let mut board = GameBoard::init_game_board(precomputed.clone(), player1, player2);
+
+    let mut turn_count: usize = 0;
+    let mut side_to_move = Color::White;
+    let mut history: VecDeque<BoardSnapshot> = VecDeque::with_capacity(7);
+
+    const MAX_GAME_LENGTH: usize = 300;
+
+    let mcts_config = MCTSConfig {
+        num_simulations: config.num_simulations,
+        exploration_constant: config.exploration_constant,
+    };
+
+    loop {
+        if board.result() != GameResult::Ongoing {
+            break;
+        }
+
+        if turn_count >= MAX_GAME_LENGTH {
+            break;
+        }
+
+        let hist_slice = history.make_contiguous();
+        let observation = encode_board(&board, side_to_move, hist_slice);
+        let legal_actions = get_legal_moves(&board, side_to_move);
+
+        if legal_actions.is_empty() {
+            break;
+        }
+
+        let mut legal_mask = vec![false; crate::data::NUM_ACTIONS];
+        for &a in &legal_actions {
+            legal_mask[a as usize] = true;
+        }
+
+        // Select evaluator based on side to move.
+        let evaluator = if side_to_move == Color::White {
+            white_evaluator.clone()
+        } else {
+            black_evaluator.clone()
+        };
+
+        let (hidden_state, policy, value) = evaluator.root_setup(&observation, &legal_mask).await;
+
+        let mut tree = MCTSTree::new(
+            hidden_state,
+            &policy,
+            value,
+            legal_actions.clone(),
+            mcts_config.clone(),
+        );
+        tree.run_simulations(evaluator.as_ref()).await;
+
+        // Use near-greedy temperature for eval games (no exploration needed).
+        let action = tree.select_action(0.01);
+
+        let snapshot = board_to_snapshot(&board);
+
+        let move_str = action_to_notation(action, side_to_move);
+        match board.process_move(&move_str, side_to_move, turn_count) {
+            Ok(_) => {}
+            Err(_) => break,
+        }
+
+        if history.len() == 7 {
+            history.pop_front();
+        }
+        history.push_back(snapshot);
+
+        side_to_move = if side_to_move == Color::White {
+            Color::Black
+        } else {
+            Color::White
+        };
+        turn_count += 1;
+    }
+
+    let game_outcome = match board.result() {
+        GameResult::Checkmate(Color::White) => 1.0,
+        GameResult::Checkmate(Color::Black) => -1.0,
+        _ => 0.0,
+    };
+
+    DualGameOutcome {
+        game_outcome,
+        num_moves: turn_count,
+    }
+}
+
 /// Play a complete game using MCTS, producing a GameTrajectory for training.
 pub async fn play_game(
     precomputed: Arc<PrecomputedItems>,
@@ -416,6 +528,59 @@ mod tests {
         assert!(action as usize >= NUM_BASE_ACTIONS);
         let notation = action_to_notation(action, Color::White);
         assert_eq!(notation, "a7a8r");
+    }
+
+    #[tokio::test]
+    async fn test_play_game_dual_completes() {
+        let precomputed = Arc::new(PrecomputedItems::begin_precomputing());
+        let white_evaluator: Arc<dyn Evaluator> = Arc::new(RandomEvaluator);
+        let black_evaluator: Arc<dyn Evaluator> = Arc::new(RandomEvaluator);
+        let config = GameConfig {
+            num_simulations: 2,
+            exploration_constant: 1.5,
+            temperature_moves: 5,
+        };
+
+        let outcome = play_game_dual(
+            precomputed,
+            white_evaluator,
+            black_evaluator,
+            config,
+        )
+        .await;
+
+        assert!(
+            outcome.game_outcome == 1.0
+                || outcome.game_outcome == -1.0
+                || outcome.game_outcome == 0.0,
+            "game_outcome should be +1, -1, or 0"
+        );
+    }
+
+    /// White wins → game_outcome = +1.0 (champion = Black, so champion LOSES).
+    /// Negating the outcome gives champion_perspective = -1.0 (loss for champion).
+    ///
+    /// Black wins → game_outcome = -1.0 (champion = Black, so champion WINS).
+    /// Negating gives +1.0 (win for champion).
+    ///
+    /// This test verifies the sign convention is understood by the caller.
+    #[test]
+    fn test_dual_game_outcome_sign_convention() {
+        // White wins
+        let white_wins = DualGameOutcome { game_outcome: 1.0, num_moves: 40 };
+        // When champion played Black, negate to get champion perspective
+        let champion_perspective_when_black = -white_wins.game_outcome;
+        assert_eq!(champion_perspective_when_black, -1.0, "champion lost when White won");
+
+        // Black wins (champion wins as Black)
+        let black_wins = DualGameOutcome { game_outcome: -1.0, num_moves: 40 };
+        let champion_perspective_when_black = -black_wins.game_outcome;
+        assert_eq!(champion_perspective_when_black, 1.0, "champion won when Black won");
+
+        // Draw
+        let draw = DualGameOutcome { game_outcome: 0.0, num_moves: 300 };
+        let champion_perspective_when_black = -draw.game_outcome;
+        assert_eq!(champion_perspective_when_black, 0.0, "draw is draw regardless of color");
     }
 
     #[test]
