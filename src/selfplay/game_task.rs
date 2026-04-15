@@ -1,15 +1,15 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-use crate::{PrecomputedItems, Color, PieceType, BitIterator, CastleOption, Square};
 use crate::data::{
-    ActionIndex, BoardSnapshot, StepRecord, GameTrajectory,
-    encode_board, board_to_snapshot, move_to_action, NUM_BASE_ACTIONS,
+    board_to_snapshot, encode_board, move_to_action, ActionIndex, BoardSnapshot, GameTrajectory,
+    StepRecord, NUM_BASE_ACTIONS,
 };
-use crate::game::{Move, GameBoard, Player};
 use crate::game::board::GameResult;
+use crate::game::{GameBoard, Move, Player};
 use crate::mcts::evaluator::Evaluator;
-use crate::mcts::tree::{MCTSTree, MCTSConfig};
+use crate::mcts::tree::{MCTSConfig, MCTSTree};
+use crate::{BitIterator, CastleOption, Color, PieceType, PrecomputedItems, Square};
 
 /// Configuration for a self-play game.
 #[derive(Debug, Clone)]
@@ -142,6 +142,22 @@ pub async fn play_game_dual(
     }
 }
 
+/// Parse an env var as i32, returning default if absent or unparseable.
+fn parse_env_i32(name: &str, default: i32) -> i32 {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
+
+/// Parse an env var as u32, returning default if absent or unparseable.
+fn parse_env_u32(name: &str, default: u32) -> u32 {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
+
 /// Play a complete game using MCTS, producing a GameTrajectory for training.
 pub async fn play_game(
     precomputed: Arc<PrecomputedItems>,
@@ -161,6 +177,10 @@ pub async fn play_game(
 
     const MAX_GAME_LENGTH: usize = 300;
 
+    let adj_threshold = parse_env_i32("HYZERO_ADJ_THRESHOLD", 6);
+    let adj_plies = parse_env_u32("HYZERO_ADJ_PLIES", 10);
+    let mut adj_counter: u32 = 0; // Consecutive plies with |Δmaterial| >= adj_threshold
+
     let mcts_config = MCTSConfig {
         num_simulations: config.num_simulations,
         exploration_constant: config.exploration_constant,
@@ -172,8 +192,37 @@ pub async fn play_game(
         }
 
         if turn_count >= MAX_GAME_LENGTH {
-            // Treat as draw — prevents runaway games
-            break;
+            // Material-based outcome at cap: tanh(Δ/5) in White-absolute convention.
+            // Trainer converts to side-to-move perspective via plane 101.
+            break; // game_outcome will be set from material after the loop
+        }
+
+        // Adjudication: end early if one side is materially dominant for N consecutive plies.
+        {
+            let delta = compute_material_diff(&board);
+            if delta.abs() >= adj_threshold {
+                adj_counter += 1;
+                if adj_counter >= adj_plies {
+                    // Adjudicated: use sign of material advantage as outcome
+                    // (White-absolute convention, matching checkmate outcome encoding)
+                    let adj_outcome = if delta > 0 { 1.0f32 } else { -1.0f32 };
+                    // Apply outcome to last step reward and return early
+                    if let Some(last) = steps.last_mut() {
+                        last.reward = adj_outcome;
+                    }
+                    eprintln!(
+                        "[selfplay] adjudicated turn={} delta={} adj_outcome={}",
+                        turn_count, delta, adj_outcome
+                    );
+                    return GameTrajectory {
+                        steps,
+                        game_outcome: adj_outcome,
+                        model_version,
+                    };
+                }
+            } else {
+                adj_counter = 0; // Reset if dominance drops below threshold
+            }
         }
 
         let hist_slice = history.make_contiguous();
@@ -246,15 +295,26 @@ pub async fn play_game(
         history.push_back(snapshot);
 
         // Alternate sides
-        side_to_move = if side_to_move == Color::White { Color::Black } else { Color::White };
+        side_to_move = if side_to_move == Color::White {
+            Color::Black
+        } else {
+            Color::White
+        };
         turn_count += 1;
     }
 
-    // Determine game outcome
+    // Determine game outcome.
+    // For genuine checkmates/stalemates/draws: use rule-based result.
+    // For 300-move cap: substitute material-based proxy (White-absolute convention).
     let game_outcome = match board.result() {
-        GameResult::Checkmate(Color::White) => 1.0,  // White won
-        GameResult::Checkmate(Color::Black) => -1.0, // Black won
-        _ => 0.0, // Draw or other
+        GameResult::Checkmate(Color::White) => 1.0,
+        GameResult::Checkmate(Color::Black) => -1.0,
+        GameResult::Ongoing => {
+            // Hit the 300-move cap. Use tanh(Δmaterial / 5.0) as outcome signal.
+            let delta = compute_material_diff(&board);
+            (delta as f32 / 5.0).tanh()
+        }
+        _ => 0.0, // Stalemate, 50-move, insufficient material, threefold
     };
 
     // Set terminal reward on last step
@@ -302,7 +362,10 @@ fn action_to_notation(action: ActionIndex, color: Color) -> String {
             _ => 'q', // Fallback (shouldn't happen)
         };
 
-        return format!("{}{}{}{}{}", from_file_char, from_rank_char, to_file_char, to_rank_char, suffix);
+        return format!(
+            "{}{}{}{}{}",
+            from_file_char, from_rank_char, to_file_char, to_rank_char, suffix
+        );
     }
 
     let from_sq = (action / 64) as u8;
@@ -327,7 +390,11 @@ fn action_to_notation(action: ActionIndex, color: Color) -> String {
 /// builds Move structs, and validates each with validate_move.
 fn get_legal_moves(board: &GameBoard, color: Color) -> Vec<ActionIndex> {
     let mut legal = Vec::new();
-    let player = if color == Color::White { &board.player1 } else { &board.player2 };
+    let player = if color == Color::White {
+        &board.player1
+    } else {
+        &board.player2
+    };
     let combined = board.white_pieces | board.black_pieces;
 
     for sq in 0..64usize {
@@ -338,8 +405,12 @@ fn get_legal_moves(board: &GameBoard, color: Color) -> Vec<ActionIndex> {
         };
 
         let move_mask = board.get_move_mask(
-            sq, color, piece.piece_type,
-            combined, board.white_pieces, board.black_pieces,
+            sq,
+            color,
+            piece.piece_type,
+            combined,
+            board.white_pieces,
+            board.black_pieces,
         );
 
         for to_sq in BitIterator::new(move_mask) {
@@ -347,7 +418,8 @@ fn get_legal_moves(board: &GameBoard, color: Color) -> Vec<ActionIndex> {
             let to = Square::from(to_sq as u8);
 
             let to_rank = to_sq / 8;
-            let is_promotion = piece.piece_type == PieceType::Pawn && (to_rank == 7 || to_rank == 0);
+            let is_promotion =
+                piece.piece_type == PieceType::Pawn && (to_rank == 7 || to_rank == 0);
 
             // Detect en passant
             let en_passant = piece.piece_type == PieceType::Pawn
@@ -369,7 +441,13 @@ fn get_legal_moves(board: &GameBoard, color: Color) -> Vec<ActionIndex> {
                         castle_option: None,
                         en_passant: false,
                     };
-                    if board.validate_move(candidate, color, combined, board.white_pieces, board.black_pieces) {
+                    if board.validate_move(
+                        candidate,
+                        color,
+                        combined,
+                        board.white_pieces,
+                        board.black_pieces,
+                    ) {
                         legal.push(move_to_action(&candidate));
                     }
                 }
@@ -381,7 +459,13 @@ fn get_legal_moves(board: &GameBoard, color: Color) -> Vec<ActionIndex> {
                     castle_option: None,
                     en_passant,
                 };
-                if board.validate_move(candidate, color, combined, board.white_pieces, board.black_pieces) {
+                if board.validate_move(
+                    candidate,
+                    color,
+                    combined,
+                    board.white_pieces,
+                    board.black_pieces,
+                ) {
                     legal.push(move_to_action(&candidate));
                 }
             }
@@ -405,7 +489,13 @@ fn get_legal_moves(board: &GameBoard, color: Color) -> Vec<ActionIndex> {
                     en_passant: false,
                 };
 
-                if board.validate_move(candidate, color, combined, board.white_pieces, board.black_pieces) {
+                if board.validate_move(
+                    candidate,
+                    color,
+                    combined,
+                    board.white_pieces,
+                    board.black_pieces,
+                ) {
                     legal.push(move_to_action(&candidate));
                 }
             }
@@ -413,6 +503,21 @@ fn get_legal_moves(board: &GameBoard, color: Color) -> Vec<ActionIndex> {
     }
 
     legal
+}
+
+/// Compute material balance (White - Black) in centipawn equivalents.
+/// Standard piece values: P=1, N=3, B=3, R=5, Q=9, K=0.
+/// Returns positive if White is ahead, negative if Black is ahead.
+/// Uses the bitboard count from player1 (White) and player2 (Black).
+fn compute_material_diff(board: &GameBoard) -> i32 {
+    const VALUES: [i32; 6] = [1, 3, 3, 5, 9, 0]; // Pawn,Knight,Bishop,Rook,Queen,King
+    let mut white_mat = 0i32;
+    let mut black_mat = 0i32;
+    for (i, &val) in VALUES.iter().enumerate() {
+        white_mat += val * board.player1.pieces_bb[i].count_ones() as i32;
+        black_mat += val * board.player2.pieces_bb[i].count_ones() as i32;
+    }
+    white_mat - black_mat
 }
 
 #[cfg(test)]
@@ -426,12 +531,20 @@ mod tests {
 
     #[async_trait]
     impl Evaluator for RandomEvaluator {
-        async fn root_setup(&self, _obs: &BoardObservation, _legal_mask: &[bool]) -> (HiddenState, Policy, f32) {
+        async fn root_setup(
+            &self,
+            _obs: &BoardObservation,
+            _legal_mask: &[bool],
+        ) -> (HiddenState, Policy, f32) {
             let policy = vec![1.0 / NUM_ACTIONS as f32; NUM_ACTIONS];
             (HiddenState::new(64), policy, 0.0)
         }
 
-        async fn expand_leaf(&self, _hs: &HiddenState, _action: ActionIndex) -> (HiddenState, f32, Policy, f32) {
+        async fn expand_leaf(
+            &self,
+            _hs: &HiddenState,
+            _action: ActionIndex,
+        ) -> (HiddenState, f32, Policy, f32) {
             let policy = vec![1.0 / NUM_ACTIONS as f32; NUM_ACTIONS];
             (HiddenState::new(64), 0.0, policy, 0.0)
         }
@@ -447,7 +560,12 @@ mod tests {
         let moves = get_legal_moves(&board, Color::White);
         // Standard chess starting position: 20 legal moves for white
         // (16 pawn moves + 4 knight moves)
-        assert_eq!(moves.len(), 20, "Expected 20 legal moves, got {}", moves.len());
+        assert_eq!(
+            moves.len(),
+            20,
+            "Expected 20 legal moves, got {}",
+            moves.len()
+        );
     }
 
     #[tokio::test]
@@ -467,16 +585,21 @@ mod tests {
 
         // Each step should have valid data
         for step in &trajectory.steps {
-            assert!(!step.legal_moves.is_empty(), "Each step should have legal moves");
-            assert!(!step.visit_distribution.is_empty(), "Each step should have visit distribution");
+            assert!(
+                !step.legal_moves.is_empty(),
+                "Each step should have legal moves"
+            );
+            assert!(
+                !step.visit_distribution.is_empty(),
+                "Each step should have visit distribution"
+            );
         }
 
-        // Game outcome should be set
+        // Game outcome should be in [-1, 1]; tanh at cap can produce non-integer values.
         assert!(
-            trajectory.game_outcome == 1.0
-                || trajectory.game_outcome == -1.0
-                || trajectory.game_outcome == 0.0,
-            "Game outcome should be +1, -1, or 0"
+            trajectory.game_outcome.abs() <= 1.0,
+            "Game outcome should be in [-1, 1], got {}",
+            trajectory.game_outcome
         );
     }
 
@@ -506,7 +629,10 @@ mod tests {
             en_passant: false,
         };
         let action = m2a(&mv);
-        assert!(action as usize >= NUM_BASE_ACTIONS, "expected underpromo action, got {action}");
+        assert!(
+            action as usize >= NUM_BASE_ACTIONS,
+            "expected underpromo action, got {action}"
+        );
         let notation = action_to_notation(action, Color::White);
         assert_eq!(notation, "e7e8n");
     }
@@ -541,13 +667,7 @@ mod tests {
             temperature_moves: 5,
         };
 
-        let outcome = play_game_dual(
-            precomputed,
-            white_evaluator,
-            black_evaluator,
-            config,
-        )
-        .await;
+        let outcome = play_game_dual(precomputed, white_evaluator, black_evaluator, config).await;
 
         assert!(
             outcome.game_outcome == 1.0
@@ -567,20 +687,38 @@ mod tests {
     #[test]
     fn test_dual_game_outcome_sign_convention() {
         // White wins
-        let white_wins = DualGameOutcome { game_outcome: 1.0, num_moves: 40 };
+        let white_wins = DualGameOutcome {
+            game_outcome: 1.0,
+            num_moves: 40,
+        };
         // When champion played Black, negate to get champion perspective
         let champion_perspective_when_black = -white_wins.game_outcome;
-        assert_eq!(champion_perspective_when_black, -1.0, "champion lost when White won");
+        assert_eq!(
+            champion_perspective_when_black, -1.0,
+            "champion lost when White won"
+        );
 
         // Black wins (champion wins as Black)
-        let black_wins = DualGameOutcome { game_outcome: -1.0, num_moves: 40 };
+        let black_wins = DualGameOutcome {
+            game_outcome: -1.0,
+            num_moves: 40,
+        };
         let champion_perspective_when_black = -black_wins.game_outcome;
-        assert_eq!(champion_perspective_when_black, 1.0, "champion won when Black won");
+        assert_eq!(
+            champion_perspective_when_black, 1.0,
+            "champion won when Black won"
+        );
 
         // Draw
-        let draw = DualGameOutcome { game_outcome: 0.0, num_moves: 300 };
+        let draw = DualGameOutcome {
+            game_outcome: 0.0,
+            num_moves: 300,
+        };
         let champion_perspective_when_black = -draw.game_outcome;
-        assert_eq!(champion_perspective_when_black, 0.0, "draw is draw regardless of color");
+        assert_eq!(
+            champion_perspective_when_black, 0.0,
+            "draw is draw regardless of color"
+        );
     }
 
     #[test]
@@ -592,11 +730,8 @@ mod tests {
         // FEN: white pawn on e7, white king on a1, black king on h1. White to move.
         // e8 is empty so the pawn can push straight → 4 promotion types (Q, N, B, R).
         let precomputed = Arc::new(PrecomputedItems::begin_precomputing());
-        let (board, _, _) = board_from_fen(
-            "8/4P3/8/8/8/8/8/K6k w - - 0 1",
-            precomputed,
-        )
-        .expect("invalid FEN");
+        let (board, _, _) =
+            board_from_fen("8/4P3/8/8/8/8/8/K6k w - - 0 1", precomputed).expect("invalid FEN");
 
         let moves = get_legal_moves(&board, Color::White);
 
@@ -607,7 +742,9 @@ mod tests {
             .iter()
             .copied()
             .filter(|&a| {
-                if (a as usize) >= NUM_BASE_ACTIONS { return false; }
+                if (a as usize) >= NUM_BASE_ACTIONS {
+                    return false;
+                }
                 let from_sq = (a / 64) as u8;
                 let to_sq = (a % 64) as u8;
                 from_sq / 8 == 6 && to_sq / 8 == 7
@@ -619,7 +756,95 @@ mod tests {
             .filter(|&a| (a as usize) >= NUM_BASE_ACTIONS)
             .collect();
 
-        assert_eq!(queen_promos.len(), 1, "Expected 1 queen promotion in all moves {:?}", moves);
-        assert_eq!(underpromos.len(), 3, "Expected 3 underpromotion moves in all moves {:?}", moves);
+        assert_eq!(
+            queen_promos.len(),
+            1,
+            "Expected 1 queen promotion in all moves {:?}",
+            moves
+        );
+        assert_eq!(
+            underpromos.len(),
+            3,
+            "Expected 3 underpromotion moves in all moves {:?}",
+            moves
+        );
+    }
+
+    #[test]
+    fn test_compute_material_diff_starting_position() {
+        let precomputed = Arc::new(PrecomputedItems::begin_precomputing());
+        let p1 = Player::init_player(true);
+        let p2 = Player::init_player(false);
+        let board = GameBoard::init_game_board(precomputed, p1, p2);
+        // Starting position is symmetric — material diff should be 0.
+        assert_eq!(compute_material_diff(&board), 0);
+    }
+
+    #[test]
+    fn test_compute_material_diff_asymmetric() {
+        use crate::game::fen::board_from_fen;
+        let precomputed = Arc::new(PrecomputedItems::begin_precomputing());
+        // White queen + king vs black king: Δ = 9
+        let (board2, _, _) =
+            board_from_fen("K6Q/8/8/8/8/8/8/7k w - - 0 1", precomputed)
+                .expect("valid fen");
+        assert_eq!(compute_material_diff(&board2), 9);
+    }
+
+    #[test]
+    fn test_adjudication_counter_logic() {
+        // Simulate the counter state machine: reset on drop below threshold
+        const ADJ_THRESHOLD: i32 = 6;
+        const ADJ_PLIES: u32 = 10;
+        let deltas = [7i32, 7, 7, 5, 7, 7, 7, 7, 7, 7, 7]; // drops at index 3, resets
+        let mut counter = 0u32;
+        let mut adjudicated = false;
+        for delta in deltas {
+            if delta.abs() >= ADJ_THRESHOLD {
+                counter += 1;
+                if counter >= ADJ_PLIES {
+                    adjudicated = true;
+                    break;
+                }
+            } else {
+                counter = 0;
+            }
+        }
+        // Counter reset at index 3, then 7 more plies (indices 4-10) → counter=7, not 10
+        assert!(!adjudicated, "Should not adjudicate: reset dropped counter");
+        assert_eq!(counter, 7);
+
+        // Now try without a break: 10 consecutive plies >= threshold
+        let deltas2 = [8i32; 10];
+        counter = 0;
+        adjudicated = false;
+        for delta in deltas2 {
+            if delta.abs() >= ADJ_THRESHOLD {
+                counter += 1;
+                if counter >= ADJ_PLIES {
+                    adjudicated = true;
+                    break;
+                }
+            } else {
+                counter = 0;
+            }
+        }
+        assert!(adjudicated, "Should adjudicate after 10 consecutive plies");
+    }
+
+    #[tokio::test]
+    async fn test_material_cap_outcome_nonzero_for_asymmetric_position() {
+        // This test verifies the tanh(Δ/5) formula produces non-zero outcome at cap
+        // by directly calling compute_material_diff on an asymmetric board.
+        use crate::game::fen::board_from_fen;
+        let precomputed = Arc::new(PrecomputedItems::begin_precomputing());
+        // White ahead by a queen (Δ = 9) → tanh(9/5) ≈ 0.964
+        let (board, _, _) =
+            board_from_fen("K6Q/8/8/8/8/8/8/7k w - - 0 1", precomputed)
+                .expect("valid fen");
+        let delta = compute_material_diff(&board);
+        let outcome = (delta as f32 / 5.0).tanh();
+        assert!(outcome > 0.9, "Expected outcome ~0.96, got {outcome}");
+        assert!(outcome <= 1.0, "Outcome must be tanh-bounded to <= 1.0");
     }
 }
