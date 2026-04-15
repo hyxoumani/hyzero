@@ -5,18 +5,15 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict};
 use tokio::sync::{mpsc, watch};
 
-use hyzero::PrecomputedItems;
-use hyzero::py::{PyO3Backend, PyTrainingThread};
-use hyzero::selfplay::{
-    InferenceBatcher, BatcherConfig, ChannelEvaluator, SwappableBackend,
-    RandomBackend,
-    SelfPlayConfig, SelfPlayCoordinator,
-    EvaluationConfig, EvaluationTask,
-    ChampionStore,
-};
-use hyzero::selfplay::game_task::GameConfig;
-use hyzero::selfplay::evaluation::RandomEvaluator;
 use hyzero::mcts::evaluator::Evaluator;
+use hyzero::py::{PyO3Backend, PyTrainingThread};
+use hyzero::selfplay::evaluation::RandomEvaluator;
+use hyzero::selfplay::game_task::GameConfig;
+use hyzero::selfplay::{
+    BatcherConfig, ChampionStore, ChannelEvaluator, EvaluationConfig, EvaluationTask,
+    InferenceBatcher, RandomBackend, SelfPlayConfig, SelfPlayCoordinator, SwappableBackend,
+};
+use hyzero::PrecomputedItems;
 
 /// Scan `checkpoints/` for `best_vNNN.pt` files and return the highest NNN found.
 ///
@@ -83,6 +80,9 @@ impl Default for RunConfig {
 #[tokio::main]
 async fn main() {
     println!("[selfplay] Initializing...");
+
+    let device = std::env::var("HYZERO_DEVICE").unwrap_or_else(|_| "cpu".to_string());
+    println!("[selfplay] Device: {device}");
 
     let defaults = RunConfig::default();
     let config = RunConfig {
@@ -164,7 +164,7 @@ async fn main() {
             .getattr("InferenceServer")
             .expect("InferenceServer class not found");
         let srv: Py<PyAny> = cls
-            .call1((config_unbound, "cpu"))
+            .call1((config_unbound, device.as_str()))
             .expect("InferenceServer() constructor failed")
             .unbind();
         (srv, hidden_channels)
@@ -229,7 +229,7 @@ async fn main() {
                                 .getattr("InferenceServer")
                                 .expect("InferenceServer class not found");
                             let srv: Py<PyAny> = cls
-                                .call1((config_unbound, "cpu"))
+                                .call1((config_unbound, device.as_str()))
                                 .expect("champion InferenceServer() constructor failed")
                                 .unbind();
                             (srv, hc)
@@ -277,7 +277,9 @@ async fn main() {
                     let (_swappable, champion_handle) =
                         SwappableBackend::new(initial_champion_backend);
                     let eval: Arc<dyn Evaluator> = Arc::new(RandomEvaluator);
-                    println!("[selfplay] No existing best.pt; starting with RandomEvaluator (version=0)");
+                    println!(
+                        "[selfplay] No existing best.pt; starting with RandomEvaluator (version=0)"
+                    );
                     (eval, 0, champion_handle)
                 }
             }
@@ -292,14 +294,9 @@ async fn main() {
 
     // 6. Spawn training thread backed by the Python Trainer.
     println!("[selfplay] Creating Python Trainer...");
-    let mut training = PyTrainingThread::from_default_config(
-        "cpu",
-        trajectory_rx,
-        version_tx,
-        weight_tx,
-        None,
-    )
-    .expect("Failed to create PyTrainingThread — is hyzero Python package installed?");
+    let mut training =
+        PyTrainingThread::from_default_config(&device, trajectory_rx, version_tx, weight_tx, None)
+            .expect("Failed to create PyTrainingThread — is hyzero Python package installed?");
 
     // Share the latest-checkpoint-path handle with the eval task.
     let latest_ckpt_path = training.latest_checkpoint_path.clone();
@@ -316,7 +313,8 @@ async fn main() {
             if let Some(bytes) = maybe_weights {
                 Python::attach(|py| {
                     let py_bytes = PyBytes::new(py, &bytes);
-                    if let Err(e) = server_for_weights.call_method1(py, "load_weights", (py_bytes,)) {
+                    if let Err(e) = server_for_weights.call_method1(py, "load_weights", (py_bytes,))
+                    {
                         eprintln!("[selfplay] load_weights error: {e}");
                     }
                 });
