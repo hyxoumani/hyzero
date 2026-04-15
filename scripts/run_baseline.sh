@@ -112,17 +112,18 @@ else
 fi
 
 # ── Compute composite score ────────────────────────────────────
-# score = (8.55 - final_policy_loss) + (champion_version * CHAMPION_SCORE_WEIGHT) - (avg_length / 100)
-# Higher is better. Rewards: fast policy learning, promoted champions, shorter games.
+# score = (8.55 - final_policy_loss) + (promotions * CHAMPION_SCORE_WEIGHT) - (avg_length / 100)
+# Higher is better. Rewards: fast policy learning, promotion count (not version tag), shorter games.
+# Note: max_champion_version is kept in JSON for debugging but NOT used in scoring.
 echo "[4/5] Computing score..."
 
 SCORE=$(awk "BEGIN {
     init_loss = 8.55;
     policy_loss = $LAST_POLICY;
-    champ_ver = $MAX_CHAMPION_VERSION;
+    promotions = $PROMOTIONS;
     weight = $CHAMPION_SCORE_WEIGHT;
     avg_len = $AVG_STEPS;
-    score = (init_loss - policy_loss) + (champ_ver * weight) - (avg_len / 100);
+    score = (init_loss - policy_loss) + (promotions * weight) - (avg_len / 100);
     printf \"%.4f\", score
 }")
 

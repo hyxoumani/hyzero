@@ -99,14 +99,15 @@ subtask being worked on, and any test commands or error output from the most rec
 
 - **Name**: `training_score`
 - **Direction**: higher is better
-- **Formula**: `(8.55 - final_policy_loss) + (champion_version * HYZERO_CHAMPION_SCORE_WEIGHT) - (avg_game_length / 100)`
+- **Formula**: `(8.55 - final_policy_loss) + (promotions * HYZERO_CHAMPION_SCORE_WEIGHT) - (avg_game_length / 100)`
 - **Run command**: `bash scripts/run_baseline.sh 1800`
 - **Extract command**: `python3 -c "import json; print(json.load(open('logs/baseline_score.json'))['score'])"`
 - **Time budget**: `1800s`
-- **Baseline**: TBD — requires re-measurement after dual-model-eval landing (formula changed 2026-04-15)
-- **Previous baseline**: `6.78` (commit d407281, 2026-04-14, old formula with decisive_ratio)
+- **Baseline**: TBD — metric corrected 2026-04-15
+- **Previous baseline**: `6.7634` (β=0.1 run, corrected formula); `6.78` (commit d407281, 2026-04-14, old formula with decisive_ratio)
 - **Components**: Policy loss decrease (network learning), champion promotions (ladder wins * weight), shorter games (efficiency)
 - **Env vars**: `HYZERO_CHAMPION_SCORE_WEIGHT` (default 2.0), `HYZERO_GAMES_PER_SIDE` (default 4), `HYZERO_PROMOTION_THRESHOLD` (default 0.55)
 - **Smoke test**: `bash scripts/smoke_dual_eval.sh` — 120s run with threshold=0.0, greps for `[eval] promoted`
+- **Note on `promotions` vs `max_champion_version`**: `promotions` counts how many times the challenger beat the current champion by ≥threshold. Distinct from `max_champion_version`, which tags the training-version-number of the latest champion (kept in JSON for debugging but not part of the score). The old formula used `champion_version` (the version tag), which inflated scores when training ran faster than eval cycles (e.g., a single promotion could jump from v1 to v12, yielding 24 points instead of 2).
 
 <!-- BOOTSTRAPPED: Do not remove this marker. /bootstrap uses it to detect re-runs. -->
