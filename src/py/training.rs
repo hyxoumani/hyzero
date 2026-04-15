@@ -46,6 +46,17 @@ fn outcome_blend_beta() -> f32 {
         .unwrap_or(0.1)
 }
 
+/// Return the reward outcome blend coefficient γ from `HYZERO_REWARD_OUTCOME_GAMMA`.
+/// Default 0.0 (no blending, preserves raw step.reward for backward compat).
+/// Clamped to [0.0, 1.0]. On parse failure, default 0.0 with a stderr warning.
+fn reward_blend_gamma() -> f32 {
+    std::env::var("HYZERO_REWARD_OUTCOME_GAMMA")
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+        .map(|v| v.clamp(0.0, 1.0))
+        .unwrap_or(0.0)
+}
+
 /// Assemble flat f32 arrays from a slice of `TrainingSample`.
 ///
 /// Each `TrainingSample` contains `K+1` `StepRecord`s. Steps are:
@@ -61,8 +72,9 @@ pub fn assemble_batch_arrays(samples: &[TrainingSample], unroll_k: usize) -> Bat
     let act_stride = 3 * 64;             // 192
     let pol_stride = NUM_ACTIONS;         // 4672
 
-    // Read β once for the whole batch; env-var overhead amortized.
+    // Read β and γ once for the whole batch; env-var overhead amortized.
     let beta = outcome_blend_beta();
+    let gamma = reward_blend_gamma();
 
     let mut observations = vec![0.0f32; b * obs_stride];
     let mut actions = vec![0.0f32; b * unroll_k * act_stride];
@@ -128,7 +140,10 @@ pub fn assemble_batch_arrays(samples: &[TrainingSample], unroll_k: usize) -> Bat
             // (injects outcome-aligned gradient to break self-referential bootstrap).
             target_values[bi * kp1 + k] =
                 (1.0 - beta) * step.root_value + beta * outcome_in_step_perspective;
-            target_rewards[bi * kp1 + k] = step.reward;
+            // Reward soft blend: γ=0.0 by default (no-op). Setting HYZERO_REWARD_OUTCOME_GAMMA
+            // injects outcome-aligned gradient into the reward head to prevent trivial-zero collapse.
+            target_rewards[bi * kp1 + k] =
+                (1.0 - gamma) * step.reward + gamma * outcome_in_step_perspective;
         }
 
         // legal_masks[bi]: derive from steps[0].legal_moves (root position only)
@@ -879,6 +894,104 @@ mod tests {
                 arrays.target_values[k_idx]
             );
         }
+    }
+
+    /// Serialize tests that mutate HYZERO_REWARD_OUTCOME_GAMMA to prevent data races.
+    ///
+    /// Rust tests run in parallel by default; env-var mutations are process-global.
+    /// Holding this lock for the duration of any test that reads or writes
+    /// HYZERO_REWARD_OUTCOME_GAMMA prevents races between the two reward-blend tests.
+    fn reward_gamma_env_lock() -> &'static std::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
+    /// γ=0.0 (default, no env var set) → reward targets equal raw step.reward.
+    ///
+    /// Verifies backward compatibility: when HYZERO_REWARD_OUTCOME_GAMMA is absent,
+    /// the blend is a no-op and step.reward passes through unchanged.
+    #[test]
+    fn test_reward_target_blend_default() {
+        let _guard = reward_gamma_env_lock().lock().unwrap();
+        std::env::remove_var("HYZERO_REWARD_OUTCOME_GAMMA");
+
+        let k = 4usize;
+
+        // Build steps with distinct reward values to verify identity pass-through.
+        // rewards: -1, 0, 0, 0, 1 across 5 steps (k+1 = 5).
+        let rewards: [f32; 5] = [-1.0, 0.0, 0.0, 0.0, 1.0];
+        let steps: Vec<StepRecord> = rewards
+            .iter()
+            .map(|&r| {
+                let mut s = make_step_with_side(true, 0.0);
+                s.reward = r;
+                s
+            })
+            .collect();
+
+        let sample = TrainingSample {
+            steps,
+            game_outcome: 1.0, // White wins, but γ=0 so outcome shouldn't matter
+        };
+
+        let arrays = assemble_batch_arrays(&[sample], k);
+
+        // With γ=0.0, target_rewards[k] = step.reward for all k.
+        for (k_idx, &expected) in rewards.iter().enumerate() {
+            assert!(
+                (arrays.target_rewards[k_idx] - expected).abs() < 1e-6,
+                "k={k_idx} expected reward {expected}, got {}",
+                arrays.target_rewards[k_idx]
+            );
+        }
+    }
+
+    /// γ=0.5 → reward targets are 0.5 * outcome_in_step_perspective when step.reward=0.
+    ///
+    /// Uses a White-root sample with game_outcome=1.0. At each step k:
+    ///   outcome_in_step_perspective = 1.0 * (+1) * ply_flip
+    /// So target_reward = 0.5 * ply_flip (positive at even k, negative at odd k).
+    #[test]
+    fn test_reward_target_blend_with_outcome() {
+        let _guard = reward_gamma_env_lock().lock().unwrap();
+        // SAFETY: protected by reward_gamma_env_lock(); no concurrent env-var access.
+        unsafe {
+            std::env::set_var("HYZERO_REWARD_OUTCOME_GAMMA", "0.5");
+        }
+
+        let k = 3usize;
+
+        // All steps have reward=0; root is White to move; game_outcome=1.0 (White wins).
+        let root_step = make_step_with_side(true, 0.0); // k=0 White to move
+        let other_step = make_step_with_side(false, 0.0); // k=1 Black to move
+
+        let sample = TrainingSample {
+            steps: vec![
+                root_step.clone(),   // k=0 White to move
+                other_step.clone(),  // k=1 Black to move
+                root_step.clone(),   // k=2 White to move
+                other_step.clone(),  // k=3 Black to move
+            ],
+            game_outcome: 1.0, // White wins
+        };
+
+        let arrays = assemble_batch_arrays(&[sample], k);
+
+        // γ=0.5; step.reward=0.0; game_outcome=1.0; root_side_sign=+1
+        // k=0: 0.5*0.0 + 0.5*(1.0 * +1 * +1) = +0.5
+        // k=1: 0.5*0.0 + 0.5*(1.0 * +1 * -1) = -0.5
+        // k=2: 0.5*0.0 + 0.5*(1.0 * +1 * +1) = +0.5
+        // k=3: 0.5*0.0 + 0.5*(1.0 * +1 * -1) = -0.5
+        let expected = [0.5f32, -0.5, 0.5, -0.5];
+        for (k_idx, &exp) in expected.iter().enumerate() {
+            assert!(
+                (arrays.target_rewards[k_idx] - exp).abs() < 1e-6,
+                "k={k_idx} expected {exp}, got {}",
+                arrays.target_rewards[k_idx]
+            );
+        }
+
+        std::env::remove_var("HYZERO_REWARD_OUTCOME_GAMMA");
     }
 
     #[test]
