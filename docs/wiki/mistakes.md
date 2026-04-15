@@ -391,27 +391,26 @@ An MSE loss on 99% zeros + 1% outcome signal is optimized by predicting 0 everyw
 
 ---
 
-## 2026-04-15: Game Outcome Perspective — Absolute White vs Side-to-Move Relative (Unverified)
+## 2026-04-15: Game Outcome Perspective — Absolute White vs Side-to-Move Relative (RESOLVED)
 
 **Date**: 2026-04-15
-**Agent**: Architectural analysis (code read, not verified)
+**Agent**: Architectural analysis (verified during material-signal fix)
 **Domain**: Data encoding (MuZero observation consistency)
-**Error Type**: Context — potential inconsistency (not yet confirmed as bug)
+**Error Type**: Context — incomplete understanding, not a bug
 
-**What happened**: During value-head analysis, noted a potential inconsistency in perspective conventions. `game_outcome` in `src/selfplay/game_task.rs:143-146` is absolute White-perspective (+1 for White wins, -1 for Black wins). But board observation planes in `src/data/encoding.rs` encode absolute piece positions (White planes 0-5, Black planes 6-11). When outcome is used as a value target, there's a mismatch: the network sees piece positions in absolute space but needs to predict a value that depends on whose turn it is.
+**What happened**: Initial analysis noted outcome targets are White-absolute, but the network sees absolute piece positions + side-to-move indicator. Raised concern that outcome → value target conversion wasn't done correctly.
 
-**Investigation Status**: Code inspection completed. Observation encoding uses:
-- Absolute White/Black piece planes (planes 0-11)
-- Side-to-move indicator (plane 101: 1.0 if White, 0.0 if Black)
-- Absolute castling rights and game-state channels
+**Investigation**: VERIFIED RESOLVED in commit 1846b78. The conversion IS implemented at `src/py/training.rs:136`:
+```rust
+let ply_flip: f32 = if k % 2 == 0 { 1.0 } else { -1.0 };
+let outcome_in_step_perspective = sample.game_outcome * root_side_sign * ply_flip;
+```
 
-Outcome targets would also need to be adjusted by side-to-move sign to match the network's input space. Currently, this adjustment is NOT done anywhere in the codebase.
+This applies both `root_side_sign` (extracted from root observation) and `ply_flip` to convert White-absolute outcome to step-relative perspective. Correctly handles both the side-to-move and ply parity.
 
-**Implication**: If outcome is ever used as a value target (e.g., β>0 blend in proposed soft-outcome fix), must derive the side-to-move sign and apply it: `target_value = outcome * side_sign` where `side_sign` is extracted from observation plane 101 or step metadata.
+**Root Cause**: Initial analysis predated material-signal-fix implementation. The conversion logic was already in the codebase but wasn't thoroughly traced during the earlier investigation.
 
-**Fix Status**: Not yet fixed. Marked as a prerequisite check before implementing soft-outcome blend (docs/plans/next-steps/resume.md notes this as "Need access to side-to-move sign from plane 101").
-
-**Escalation Tier**: Gotcha → flagged in resume.md as a verification task. Not yet escalated to Rule because the fix is one-liner when outcome targets are implemented.
+**Escalation Tier**: CLOSED. Not escalated to Rule because this is not a recurring error — it's a single misunderstanding now verified correct.
 
 ---
 

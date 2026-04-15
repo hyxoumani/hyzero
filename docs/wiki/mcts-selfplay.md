@@ -52,9 +52,21 @@ Ring buffer (`VecDeque<GameTrajectory>`) with K-step sampling: pick random traje
 
 ## Self-Play Coordinator
 
-Spawns N persistent long-lived tokio game loop tasks (no semaphore gating). Each task loops indefinitely: read current `model_version` from watch channel → play one game → send GameTrajectory → repeat. Each game: root setup → MCTS → move selection → step record, repeating until terminal (or 300-move limit). GameTrajectory tagged with model_version and outcome. Awaits all JoinHandles on shutdown.
+Spawns N persistent long-lived tokio game loop tasks (no semaphore gating). Each task loops indefinitely: read current `model_version` from watch channel → play one game → send GameTrajectory → repeat. Each game: root setup → MCTS → move selection → step record, repeating until terminal, adjudication, or 300-move limit. GameTrajectory tagged with model_version and outcome. Awaits all JoinHandles on shutdown.
 
 **Design**: No semaphore — tasks are persistent, not spawned per game. This reduces overhead and scales cleanly to many concurrent games. Watch channel updates when trainer publishes new weights, ensuring game tasks always use current model.
+
+### Game Termination Paths
+
+Three mechanisms end a game (checked in order in `play_game()` loop):
+
+1. **Terminal state** (`GameResult::Checkmate`, `GameResult::Stalemate`): Write true game outcome (±1 or 0).
+
+2. **Adjudication** (NEW in commit 1846b78): If `|Δmaterial| ≥ HYZERO_ADJ_THRESHOLD` (default 6) sustained for `HYZERO_ADJ_PLIES` (default 10) consecutive plies, declare winner by material dominance. Write `outcome = sign(Δmaterial)`. Counter resets if material diff drops below threshold (e.g., capture narrows gap). Env vars allow threshold tuning for smoke tests without rebuild.
+
+3. **Material-at-cap** (NEW in commit 1846b78): Game hits 300-move limit without terminal or adjudication. Instead of synthetic `outcome = 0`, write `outcome = tanh(Δmaterial / 5.0)`, where Δmaterial = white_material − black_material (piece values: P=1, N=3, B=3, R=5, Q=9). Preserves White-absolute sign; trainer applies ply-flip at batch assembly time (`src/py/training.rs:136`). This breaks the zero-target bootstrap loop that killed the value head.
+
+**Effect on average game length**: With default adjudication at 6 points (roughly ±2 pawns from equal), random play adjudicates at ~40 moves. Stronger play lasts longer (more balanced positions). As value head learns material, adjudication rate naturally decreases and games converge to true terminal outcomes.
 
 ### Root Noise for Exploration
 
@@ -103,13 +115,15 @@ This divergence signals value-head collapse: policy learned to avoid loss but va
 
 **Future options**: (a) Separate value/policy samplers with different decay schedules (policy favors recent; value preserves old diversity); (b) Add diversity floor (minimum 10-20% uniform sampling to force value head to see wide outcomes); (c) Prioritize by outcome (high-variance games preferred over recent repetitive ones).
 
-## Dead Value & Reward Heads
+## Dead Value & Reward Heads — Historical Context
 
-**Value head dead** (training logs: `value=0.0000`): Self-referential bootstrap. Target is MCTS root_value (untrained), initialized from f-network output and backed up from leaf. Loop: `f(s) ≈ 0` → `root_value ≈ 0` → target ≈ 0` → loss ≈ 0 → `f` stays 0 (refs: `src/selfplay/game_task.rs:96`, `src/py/training.rs:98`, `src/data/replay_buffer.rs:93`). Canonical MuZero uses outcome targets (Schrittwieser 2020, Appendix F); our approach loses this signal. With Q ≈ 0, MCTS search reduces to prior sampling — policy self-imitates with no improvement.
+**Value head bootstrap failure** (pre-1846b78): Self-referential bootstrap. Target is MCTS root_value (untrained), initialized from f-network output and backed up from leaf. Loop: `f(s) ≈ 0` → `root_value ≈ 0` → target ≈ 0` → loss ≈ 0 → `f` stays 0. Canonical MuZero uses outcome targets; our MCTS Q-estimate approach lost this signal. With Q ≈ 0, MCTS search reduced to prior sampling — policy self-imitating with no improvement. Manifested as 99% games hitting 300-move cap with `outcome = 0`, perpetuating the cycle.
 
-**Reward head dead** (training logs: `reward=0.0006`): Class imbalance — only terminal steps have non-zero targets. For 100-move games, terminal appears in ~1% of K+1-step slices. MSE-optimal solution is 0 everywhere. MuZero needs reward head for latent-space terminal detection; dead reward breaks backup signal and MCTS may expand past terminal states.
+**Fixed (commit 1846b78)**: Material-at-cap + adjudication inject outcome-like signals (material proxy) to break the loop. See "Game Termination Paths" above.
 
-See neural-networks.md sections "Canonical MuZero Value Target" and "MCTS as Policy Improvement" for architecture discussion and fix proposals.
+**Reward head dead** (training logs: `reward=0.0006`): Class imbalance — only terminal steps have non-zero targets. For 100-move games, terminal appears in ~1% of K+1-step slices. MSE-optimal solution is 0 everywhere. MuZero needs reward head for latent-space terminal detection; dead reward breaks backup signal and MCTS may expand past terminal states. Env var `HYZERO_REWARD_OUTCOME_GAMMA` allows soft outcome-blend (similar to β for value head) if future experiments need reward head rescue.
+
+See neural-networks.md sections "Canonical MuZero Value Target" and "MCTS as Policy Improvement" for architecture discussion.
 
 ## Dual-Model Ladder Stall — Symmetry Collapse
 

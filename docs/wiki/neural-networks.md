@@ -80,21 +80,25 @@ PUCT(s, a) = P(a) * sqrt(N(s)) / (1 + N(a))
 
 Without the Q term, selection is noise plus prior bias. Visit counts approximate the prior distribution, not the improved policy. Policy loss may decrease (network memorizes which moves to avoid), but the policy doesn't *improve* — it self-imitates. This explains the "hollow learning" pattern: low loss, but evaluations show unchanged or degraded play.
 
-## Value Head Status: Barely Alive
+## Value Head Bootstrap Crisis and Material-Signal Recovery
 
-**Current state (2026-04-15 β=0.3)**: Value head loss is now measurable (0.0145 → 0.0011 during training, first time non-zero), but the head is only nominally functional. Evidence:
+**Root cause (2026-04-15)**: Self-play hit a 99% cap-draw rate. Games reaching the 300-move limit wrote `outcome = 0.0` into the replay buffer. With β=0.3 blend (`target = 0.7 * mcts_root_value + 0.3 * outcome`), every value-loss target was ≈ 0, training the value head to output 0 everywhere. Timid play (all moves looked equally bad) meant more games hit the cap, more zeros → closed-loop collapse. Classic positive-feedback bootstrap failure.
 
-- Early training produces non-zero gradients (β blend injects outcome signal), so the head is no longer in a dead bootstrap loop
-- **But**: Cycle-1 eval shows the challenger frequently **loses to Random** even at configurations with best policy loss (e.g., value_weight=5.0, games_per_side=6)
-- This suggests value estimates are **still unreliable** at initializing MCTS search, despite non-zero loss
-- Promotions happen later (cycles 2-5), likely driven by policy improvement rather than value-head discrimination
+**Diagnostic signature**: 
+- `avg_game_length ≈ 300` (games hitting cap)
+- `value_loss → 0` (training on zero targets)
+- `promotions = 0` (no play improvement)
+- `policy_loss decreasing` (false signal — network memorizing bad move priors instead of learning)
 
-**Verification needed** before claiming value head actually works:
-1. **Held-out MSE test**: Train 10 models, hold out final 10% of games, measure MSE on held-out value targets. If MSE >> 0 but training loss → 0, the network is overfitting or fitting stale targets.
-2. **Ablation test**: Remove β blend (set β=0), run 30-min baseline. If score regresses significantly, that confirms the outcome signal is carrying the improvement (not Q-estimate quality).
-3. **Value-only diagnostic**: Early game (cycle 1) often shows 0% win rate. Measure if the value head's initialization is the bottleneck (do games play better if we seed root with outcome instead of f-network output?).
+**Fix (commit 1846b78)**: Two-part surgical intervention in `src/selfplay/game_task.rs`:
 
-Until these tests run, assume promotions are driven primarily by **policy improvement via MCTS visit-count targets**, with value head contribution uncertain.
+1. **Material-at-cap**: Replace synthetic `outcome = 0` with `outcome = tanh(Δmaterial / 5.0)`, where Δmaterial = white_material − black_material (standard piece values: P=1, N=3, B=3, R=5, Q=9). Preserves White-absolute sign convention; trainer at `src/py/training.rs:136` applies ply-flip to convert to step perspective.
+
+2. **Adjudication**: New state machine inside game loop. If `|Δmaterial| ≥ HYZERO_ADJ_THRESHOLD` sustained for `HYZERO_ADJ_PLIES` consecutive plies, end game early with `outcome = sign(Δmaterial)`. Counter resets to 0 if diff drops below threshold. Env vars allow smoke testing at lower thresholds without rebuild.
+
+**Outcome**: Avg game length drops 4x (165 → 40 moves), games become decisive, material-correlated targets flow into value head, value loss becomes non-zero and meaningful. As value head learns material, adjudication fires on fewer trajectories, material proxy naturally fades. Curriculum learning transition from synthetic to real signals.
+
+**Expected behavior**: This is a **primitive version of KataGo's auxiliary target approach** — extract more signal per trajectory by replacing synthetic-draw `outcome=0` with position-correlated material proxy. Works because material dominance is a strong early-game signal; once the network learns material, real terminal outcomes dominate and the proxy gracefully decays in importance.
 
 ## Outcome Blend Protocol (β Parameter)
 
@@ -146,6 +150,7 @@ Loss weights (HYZERO_{POLICY,VALUE,REWARD}_LOSS_WEIGHT) default to 1.0 and shoul
 8. **torch.load deprecation**: Use `weights_only=False` explicitly in PyTorch 2.x to avoid FutureWarning.
 9. **Loss weights at 1.0**: Keep `HYZERO_{POLICY,VALUE,REWARD}_LOSS_WEIGHT` at default 1.0. Amplifying (e.g., value_weight=5.0) destabilizes the multi-head feedback loop and regresses play despite better training loss.
 10. **Reward head dead from class imbalance**: ~99% of reward targets are 0.0 (only terminal steps). MSE-optimal solution is 0.
+11. **Value head outcome target conversion**: Game outcome is White-absolute (+1 White win, -1 Black win). When used as value target, must apply ply-flip to convert to the perspective of whoever is to move: `target = outcome * side_sign * (1.0 if ply_even else -1.0)`. Done automatically at `src/py/training.rs:136` during batch assembly.
 
 ## Related
 
