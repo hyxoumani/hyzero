@@ -6,7 +6,7 @@ pub mod evaluation;
 pub mod champion;
 
 pub use inference::{
-    InferenceRequest, InferenceBackend, RandomBackend,
+    InferenceRequest, InferenceBackend, RandomBackend, SwappableBackend,
     InferenceBatcher, BatcherConfig, ChannelEvaluator,
 };
 pub use game_task::{GameConfig, play_game, DualGameOutcome};
