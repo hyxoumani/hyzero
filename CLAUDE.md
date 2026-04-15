@@ -103,7 +103,7 @@ subtask being worked on, and any test commands or error output from the most rec
 - **Run command**: `bash scripts/run_baseline.sh 1800`
 - **Extract command**: `python3 -c "import json; print(json.load(open('logs/baseline_score.json'))['score'])"`
 - **Time budget**: `1800s`
-- **Baseline**: **11.63** (β=0.3, commit 294e63e, 2026-04-15 autoresearch session, 11-experiment sweep confirmed Pareto-optimal)
+- **Baseline**: **14.51** (β=0.3, commit 294e63e, 2026-04-15 autoresearch session, 12-experiment sweep + 1 repro; peak of two β=0.3 runs (11.63, 14.51) — ~3pt run-to-run variance expected)
 - **Previous baseline**: `6.7634` (β=0.1 run, corrected formula); `6.78` (commit d407281, 2026-04-14, old formula with decisive_ratio)
 - **Components**: Policy loss decrease (network learning), champion promotions (ladder wins * weight), shorter games (efficiency)
 - **Env vars**: `HYZERO_CHAMPION_SCORE_WEIGHT` (default 2.0), `HYZERO_GAMES_PER_SIDE` (default 4), `HYZERO_PROMOTION_THRESHOLD` (default 0.55), `HYZERO_VALUE_OUTCOME_BETA` (default 0.1, recommended 0.3), `HYZERO_REWARD_OUTCOME_GAMMA` (default 0.0), `HYZERO_LR_SCHEDULE` (default none; set to `cosine` to enable), `HYZERO_VALUE_LOSS_WEIGHT` / `HYZERO_REWARD_LOSS_WEIGHT` / `HYZERO_POLICY_LOSS_WEIGHT` (default 1.0 each)
