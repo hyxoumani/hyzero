@@ -14,6 +14,74 @@ from hyzero.models.dynamics import DynamicsNetwork
 from hyzero.models.prediction import PredictionNetwork
 
 
+def _parse_lr_schedule_env() -> tuple[str, int, float]:
+    """Parse LR schedule env vars, returning (schedule, t_max, eta_min).
+
+    Env vars:
+        HYZERO_LR_SCHEDULE:      "none" (default) or "cosine". Unknown value warns and uses "none".
+        HYZERO_LR_COSINE_T_MAX:  int, total annealing steps. Default 5000. Clamped to [100, 1_000_000].
+        HYZERO_LR_COSINE_ETA_MIN: float, minimum LR. Default 1e-5. Clamped to [0.0, 1e-2].
+
+    Returns:
+        Tuple of (schedule_name, t_max, eta_min).
+    """
+    # --- schedule name ---
+    raw_sched = os.environ.get("HYZERO_LR_SCHEDULE", "none").strip().lower()
+    if raw_sched not in ("none", "cosine"):
+        print(
+            f"[trainer] WARNING: HYZERO_LR_SCHEDULE={raw_sched!r} is not valid"
+            " (expected 'none' or 'cosine'); using 'none'",
+            file=sys.stderr,
+        )
+        raw_sched = "none"
+
+    # --- T_max ---
+    raw_tmax = os.environ.get("HYZERO_LR_COSINE_T_MAX")
+    t_max = 5000
+    if raw_tmax is not None:
+        try:
+            t_max = int(raw_tmax)
+        except (ValueError, TypeError):
+            print(
+                f"[trainer] WARNING: HYZERO_LR_COSINE_T_MAX={raw_tmax!r} is not a valid int;"
+                " using default 5000",
+                file=sys.stderr,
+            )
+            t_max = 5000
+        else:
+            clamped = max(100, min(1_000_000, t_max))
+            if clamped != t_max:
+                print(
+                    f"[trainer] WARNING: HYZERO_LR_COSINE_T_MAX={t_max} clamped to {clamped}",
+                    file=sys.stderr,
+                )
+            t_max = clamped
+
+    # --- eta_min ---
+    raw_eta = os.environ.get("HYZERO_LR_COSINE_ETA_MIN")
+    eta_min = 1e-5
+    if raw_eta is not None:
+        try:
+            eta_min = float(raw_eta)
+        except (ValueError, TypeError):
+            print(
+                f"[trainer] WARNING: HYZERO_LR_COSINE_ETA_MIN={raw_eta!r} is not a valid float;"
+                " using default 1e-5",
+                file=sys.stderr,
+            )
+            eta_min = 1e-5
+        else:
+            clamped = max(0.0, min(1e-2, eta_min))
+            if clamped != eta_min:
+                print(
+                    f"[trainer] WARNING: HYZERO_LR_COSINE_ETA_MIN={eta_min} clamped to {clamped}",
+                    file=sys.stderr,
+                )
+            eta_min = clamped
+
+    return raw_sched, t_max, eta_min
+
+
 def _parse_loss_weight_env(name: str, default: float = 1.0) -> float:
     """Parse a loss weight env var, clamping to [0.0, 100.0].
 
@@ -89,6 +157,20 @@ class Trainer:
             lr=cfg["lr"],
             weight_decay=cfg["weight_decay"],
         )
+
+        lr_schedule, lr_t_max, lr_eta_min = _parse_lr_schedule_env()
+        if lr_schedule == "cosine":
+            self.lr_scheduler: torch.optim.lr_scheduler.LRScheduler | None = (
+                torch.optim.lr_scheduler.CosineAnnealingLR(
+                    self.optimizer,
+                    T_max=lr_t_max,
+                    eta_min=lr_eta_min,
+                )
+            )
+            print(f"[trainer] LR schedule: cosine T_max={lr_t_max} eta_min={lr_eta_min}")
+        else:
+            self.lr_scheduler = None
+            print(f"[trainer] LR schedule: none (fixed lr={cfg['lr']})")
 
         self.model_version: int = 0
 
@@ -181,6 +263,8 @@ class Trainer:
 
         total_loss.backward()
         self.optimizer.step()
+        if self.lr_scheduler is not None:
+            self.lr_scheduler.step()
 
         self.model_version += 1
 
@@ -190,6 +274,7 @@ class Trainer:
             "value_loss": avg_value_loss.item(),
             "reward_loss": avg_reward_loss.item(),
             "model_version": self.model_version,
+            "lr": self.optimizer.param_groups[0]["lr"],
         }
 
     def _policy_loss(
@@ -246,17 +331,17 @@ class Trainer:
             path:         File path to write the checkpoint to.
             eval_metrics: Optional dict of evaluation metrics to persist.
         """
-        torch.save(
-            {
-                "h": self.h.state_dict(),
-                "g": self.g.state_dict(),
-                "f": self.f.state_dict(),
-                "optimizer": self.optimizer.state_dict(),
-                "model_version": self.model_version,
-                "eval_metrics": eval_metrics,
-            },
-            path,
-        )
+        checkpoint = {
+            "h": self.h.state_dict(),
+            "g": self.g.state_dict(),
+            "f": self.f.state_dict(),
+            "optimizer": self.optimizer.state_dict(),
+            "model_version": self.model_version,
+            "eval_metrics": eval_metrics,
+        }
+        if self.lr_scheduler is not None:
+            checkpoint["lr_scheduler"] = self.lr_scheduler.state_dict()
+        torch.save(checkpoint, path)
 
     def load_checkpoint(self, path: str) -> dict:
         """Restore network weights, optimizer state, and model_version from disk.
@@ -274,4 +359,6 @@ class Trainer:
         self.f.load_state_dict(checkpoint["f"])
         self.optimizer.load_state_dict(checkpoint["optimizer"])
         self.model_version = checkpoint["model_version"]
+        if self.lr_scheduler is not None and "lr_scheduler" in checkpoint:
+            self.lr_scheduler.load_state_dict(checkpoint["lr_scheduler"])
         return checkpoint.get("eval_metrics")

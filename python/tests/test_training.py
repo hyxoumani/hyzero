@@ -10,7 +10,7 @@ import torch
 
 from hyzero.config import DEFAULT_CONFIG
 from hyzero.training import Trainer
-from hyzero.training.trainer import _parse_loss_weight_env
+from hyzero.training.trainer import _parse_loss_weight_env, _parse_lr_schedule_env
 
 INPUT_PLANES = DEFAULT_CONFIG["input_planes"]   # 103
 NUM_ACTIONS = DEFAULT_CONFIG["num_actions"]     # 4672
@@ -34,13 +34,13 @@ def make_random_batch(batch_size: int = 4, k_steps: int = 3) -> dict:
 
 
 def test_train_batch_returns_losses() -> None:
-    """train_batch must return a dict with all 5 required keys, all finite."""
+    """train_batch must return a dict with all required keys, all finite."""
     trainer = Trainer(device="cpu")
     batch = make_random_batch(batch_size=4, k_steps=3)
     result = trainer.train_batch(batch)
 
-    required_keys = {"total_loss", "policy_loss", "value_loss", "reward_loss", "model_version"}
-    assert required_keys == set(result.keys()), f"Missing keys: {required_keys - set(result.keys())}"
+    required_keys = {"total_loss", "policy_loss", "value_loss", "reward_loss", "model_version", "lr"}
+    assert required_keys.issubset(set(result.keys())), f"Missing keys: {required_keys - set(result.keys())}"
 
     for key in ("total_loss", "policy_loss", "value_loss", "reward_loss"):
         assert isinstance(result[key], float), f"{key} must be a float, got {type(result[key])}"
@@ -160,5 +160,60 @@ def test_loss_weight_invalid(
     monkeypatch.setenv("HYZERO_POLICY_LOSS_WEIGHT", "abc")
     result = _parse_loss_weight_env("HYZERO_POLICY_LOSS_WEIGHT")
     assert result == 1.0
+    captured = capsys.readouterr()
+    assert "WARNING" in captured.err
+
+
+# --- LR schedule env-var tests ---
+
+
+def test_lr_schedule_none_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No env var set → lr_scheduler is None; train step does not change LR."""
+    monkeypatch.delenv("HYZERO_LR_SCHEDULE", raising=False)
+    monkeypatch.delenv("HYZERO_LR_COSINE_T_MAX", raising=False)
+    monkeypatch.delenv("HYZERO_LR_COSINE_ETA_MIN", raising=False)
+
+    trainer = Trainer(device="cpu")
+    assert trainer.lr_scheduler is None
+
+    batch = make_random_batch(batch_size=2, k_steps=2)
+    lr_before = trainer.optimizer.param_groups[0]["lr"]
+    result = trainer.train_batch(batch)
+    lr_after = trainer.optimizer.param_groups[0]["lr"]
+
+    assert lr_before == lr_after, "LR must not change when schedule is none"
+    assert "lr" in result
+    assert math.isfinite(result["lr"])
+
+
+def test_lr_schedule_cosine_applied(monkeypatch: pytest.MonkeyPatch) -> None:
+    """HYZERO_LR_SCHEDULE=cosine → scheduler is not None; LR decreases monotonically over 3 steps."""
+    monkeypatch.setenv("HYZERO_LR_SCHEDULE", "cosine")
+    monkeypatch.setenv("HYZERO_LR_COSINE_T_MAX", "100")
+    monkeypatch.setenv("HYZERO_LR_COSINE_ETA_MIN", "1e-6")
+
+    trainer = Trainer(device="cpu")
+    assert trainer.lr_scheduler is not None
+
+    batch = make_random_batch(batch_size=2, k_steps=2)
+    lrs = []
+    for _ in range(3):
+        result = trainer.train_batch(batch)
+        lrs.append(result["lr"])
+
+    assert lrs[0] > lrs[1] > lrs[2], (
+        f"LR should decrease monotonically under cosine schedule, got: {lrs}"
+    )
+
+
+def test_lr_schedule_invalid_value(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """Unknown HYZERO_LR_SCHEDULE value → warning printed, scheduler is None."""
+    monkeypatch.setenv("HYZERO_LR_SCHEDULE", "foo")
+
+    trainer = Trainer(device="cpu")
+    assert trainer.lr_scheduler is None
+
     captured = capsys.readouterr()
     assert "WARNING" in captured.err
