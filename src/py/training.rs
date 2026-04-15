@@ -33,6 +33,19 @@ pub struct BatchArrays {
     pub unroll_k: usize,
 }
 
+/// Return the outcome blend coefficient β from the `HYZERO_VALUE_OUTCOME_BETA` env var.
+///
+/// Reads the env var once per call; callers should cache the result across samples in
+/// a batch. Accepts values in [0.0, 1.0]; clamps silently if out of range.
+/// Defaults to 0.1 when the variable is absent or unparseable.
+fn outcome_blend_beta() -> f32 {
+    std::env::var("HYZERO_VALUE_OUTCOME_BETA")
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+        .map(|v| v.clamp(0.0, 1.0))
+        .unwrap_or(0.1)
+}
+
 /// Assemble flat f32 arrays from a slice of `TrainingSample`.
 ///
 /// Each `TrainingSample` contains `K+1` `StepRecord`s. Steps are:
@@ -47,6 +60,9 @@ pub fn assemble_batch_arrays(samples: &[TrainingSample], unroll_k: usize) -> Bat
     let obs_stride = NUM_OBS_PLANES * 64; // 103 * 64 = 6592
     let act_stride = 3 * 64;             // 192
     let pol_stride = NUM_ACTIONS;         // 4672
+
+    // Read β once for the whole batch; env-var overhead amortized.
+    let beta = outcome_blend_beta();
 
     let mut observations = vec![0.0f32; b * obs_stride];
     let mut actions = vec![0.0f32; b * unroll_k * act_stride];
@@ -78,6 +94,12 @@ pub fn assemble_batch_arrays(samples: &[TrainingSample], unroll_k: usize) -> Bat
             actions[act_base..act_base + act_stride].copy_from_slice(&encoded);
         }
 
+        // Determine root side-to-move from observation plane 101 (1.0 = White).
+        // steps[0] is the root position of this training sample.
+        // Computed once per sample; only ply_flip is per-k.
+        let root_white_to_move = steps[0].observation.planes[101 * 64] > 0.5;
+        let root_side_sign: f32 = if root_white_to_move { 1.0 } else { -1.0 };
+
         // target_policies, target_values, target_rewards for k in 0..=K
         for k in 0..kp1 {
             let step = &steps[k];
@@ -96,7 +118,16 @@ pub fn assemble_batch_arrays(samples: &[TrainingSample], unroll_k: usize) -> Bat
             }
             // Entries for actions not in legal_moves stay 0.0 from initialization
 
-            target_values[bi * kp1 + k] = step.root_value;
+            // At step k, side alternates each ply. Convert game_outcome (White-absolute)
+            // to the perspective of whoever is to move at step k.
+            let ply_flip: f32 = if k % 2 == 0 { 1.0 } else { -1.0 };
+            let outcome_in_step_perspective =
+                sample.game_outcome * root_side_sign * ply_flip;
+
+            // Soft blend: 90% MCTS Q (preserves learned signal), 10% outcome
+            // (injects outcome-aligned gradient to break self-referential bootstrap).
+            target_values[bi * kp1 + k] =
+                (1.0 - beta) * step.root_value + beta * outcome_in_step_perspective;
             target_rewards[bi * kp1 + k] = step.reward;
         }
 
@@ -692,6 +723,162 @@ mod tests {
         );
 
         drop(traj_tx);
+    }
+
+    /// Build a minimal StepRecord with all-zero planes except plane 101 (side-to-move).
+    ///
+    /// `white_to_move` sets plane 101 to 1.0 (White) or 0.0 (Black).
+    /// `root_value` is the MCTS Q-estimate for this step.
+    fn make_step_with_side(white_to_move: bool, root_value: f32) -> StepRecord {
+        let mut planes = vec![0.0f32; NUM_OBS_PLANES * 64];
+        if white_to_move {
+            // Set all 64 squares of plane 101 to 1.0
+            let base = 101 * 64;
+            for sq in 0..64 {
+                planes[base + sq] = 1.0;
+            }
+        }
+        StepRecord {
+            observation: BoardObservation { planes },
+            action: 0,
+            visit_distribution: vec![1.0],
+            root_value,
+            reward: 0.0,
+            legal_moves: vec![0],
+        }
+    }
+
+    /// Build a TrainingSample where root is White to move, root_value=0.0 for all steps.
+    /// game_outcome=1.0 (White wins). Used to test outcome blend in isolation.
+    #[test]
+    fn test_value_target_outcome_blend_white_root() {
+        // Ensure env var is at the default 0.1 for this test.
+        // Remove it in case a parent test set it to something else.
+        std::env::remove_var("HYZERO_VALUE_OUTCOME_BETA");
+
+        let k = 3usize;
+
+        // Root is White to move; root_value=0.0 so blend term vanishes
+        let root_step = make_step_with_side(true, 0.0);
+        let other_step = make_step_with_side(false, 0.0); // subsequent steps alternate
+
+        let sample = TrainingSample {
+            steps: vec![
+                root_step.clone(),   // k=0 White to move
+                other_step.clone(),  // k=1 Black to move
+                root_step.clone(),   // k=2 White to move
+                other_step.clone(),  // k=3 Black to move
+            ],
+            game_outcome: 1.0, // White wins
+        };
+
+        let arrays = assemble_batch_arrays(&[sample], k);
+
+        // β=0.1; root_value=0.0; game_outcome=1.0; root_side_sign=+1
+        // k=0: 0.9*0.0 + 0.1*(1.0 * +1 * +1) = +0.1
+        // k=1: 0.9*0.0 + 0.1*(1.0 * +1 * -1) = -0.1
+        // k=2: 0.9*0.0 + 0.1*(1.0 * +1 * +1) = +0.1
+        // k=3: 0.9*0.0 + 0.1*(1.0 * +1 * -1) = -0.1
+        assert!(
+            (arrays.target_values[0] - 0.1).abs() < 1e-6,
+            "k=0 expected +0.1, got {}",
+            arrays.target_values[0]
+        );
+        assert!(
+            (arrays.target_values[1] - (-0.1)).abs() < 1e-6,
+            "k=1 expected -0.1, got {}",
+            arrays.target_values[1]
+        );
+        assert!(
+            (arrays.target_values[2] - 0.1).abs() < 1e-6,
+            "k=2 expected +0.1, got {}",
+            arrays.target_values[2]
+        );
+        assert!(
+            (arrays.target_values[3] - (-0.1)).abs() < 1e-6,
+            "k=3 expected -0.1, got {}",
+            arrays.target_values[3]
+        );
+    }
+
+    /// Same as above but with root Black to move and Black winning.
+    /// From Black's perspective at k=0: outcome is positive (+0.1).
+    #[test]
+    fn test_value_target_outcome_blend_black_root() {
+        std::env::remove_var("HYZERO_VALUE_OUTCOME_BETA");
+
+        let k = 3usize;
+
+        // Root is Black to move; root_value=0.0 so blend term vanishes
+        let root_step = make_step_with_side(false, 0.0); // k=0 Black to move
+        let other_step = make_step_with_side(true, 0.0); // k=1 White to move
+
+        let sample = TrainingSample {
+            steps: vec![
+                root_step.clone(),   // k=0 Black to move
+                other_step.clone(),  // k=1 White to move
+                root_step.clone(),   // k=2 Black to move
+                other_step.clone(),  // k=3 White to move
+            ],
+            game_outcome: -1.0, // Black wins
+        };
+
+        let arrays = assemble_batch_arrays(&[sample], k);
+
+        // β=0.1; root_value=0.0; game_outcome=-1.0; root_side_sign=-1
+        // k=0: 0.9*0.0 + 0.1*((-1.0)*(-1)*(+1)) = +0.1  (Black wins → positive for Black)
+        // k=1: 0.9*0.0 + 0.1*((-1.0)*(-1)*(-1)) = -0.1  (White's perspective, White lost)
+        // k=2: 0.9*0.0 + 0.1*((-1.0)*(-1)*(+1)) = +0.1
+        // k=3: 0.9*0.0 + 0.1*((-1.0)*(-1)*(-1)) = -0.1
+        assert!(
+            (arrays.target_values[0] - 0.1).abs() < 1e-6,
+            "k=0 expected +0.1, got {}",
+            arrays.target_values[0]
+        );
+        assert!(
+            (arrays.target_values[1] - (-0.1)).abs() < 1e-6,
+            "k=1 expected -0.1, got {}",
+            arrays.target_values[1]
+        );
+        assert!(
+            (arrays.target_values[2] - 0.1).abs() < 1e-6,
+            "k=2 expected +0.1, got {}",
+            arrays.target_values[2]
+        );
+        assert!(
+            (arrays.target_values[3] - (-0.1)).abs() < 1e-6,
+            "k=3 expected -0.1, got {}",
+            arrays.target_values[3]
+        );
+    }
+
+    /// Confirm that the root_value signal is preserved with weight 0.9 when outcome is 0 (draw).
+    #[test]
+    fn test_value_target_outcome_blend_root_value_preserved() {
+        std::env::remove_var("HYZERO_VALUE_OUTCOME_BETA");
+
+        let k = 3usize;
+        let kp1 = k + 1;
+
+        // root_value=0.5 for all steps; game_outcome=0.0 (draw) → outcome term is 0
+        let step = make_step_with_side(true, 0.5);
+
+        let sample = TrainingSample {
+            steps: (0..kp1).map(|_| step.clone()).collect(),
+            game_outcome: 0.0,
+        };
+
+        let arrays = assemble_batch_arrays(&[sample], k);
+
+        // β=0.1; root_value=0.5; outcome_in_step_perspective=0.0
+        // target = 0.9*0.5 + 0.1*0.0 = 0.45 for all k
+        for k_idx in 0..kp1 {
+            assert!(
+                (arrays.target_values[k_idx] - 0.45).abs() < 1e-6,
+                "k={k_idx} expected 0.45, got {}",
+                arrays.target_values[k_idx]
+            );
+        }
     }
 
     #[test]
