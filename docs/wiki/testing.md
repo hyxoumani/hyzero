@@ -93,14 +93,30 @@ Useful for debugging mismatches: run `--divide` on both our engine and Stockfish
 
 ## 5. Adding New Tests
 
-**Move generation**: Find failing FEN, run `--divide` at d1 vs python-chess, add to `EDGE_CASE_FENS` in `cross_validate.py`, add perft test if standard position.
+Find failing FEN, verify vs python-chess, add to appropriate test list (`EDGE_CASE_FENS`, `TERMINATION_FENS`) and Rust test in `board.rs`.
 
-**Termination**: Construct FEN, verify status with python-chess, add to `TERMINATION_FENS`, add Rust test in `board.rs`.
+## 6. Baseline & Validation
 
-**Draw rules** (threefold, 50-move): Require move sequences. Add Rust tests in `board.rs` that loop `compute_turn_items()` and assert `game_result`.
+Baseline: **6.78** (commit d407281, 2026-04-14 — Dirichlet alpha fix: 0.03 → 0.3 for chess).
+
+The metric has ±1 point noise floor. **Rule**: Changes <1.5 points need 2–3 reruns; median reported.
+
+## 7. Metric Definition Precision
+
+Score multipliers must count discrete events (e.g., promotions), not version tags or checkpoint indices. A single promotion can update a version tag by arbitrary amounts depending on producer/consumer rate ratios. Always verify metric extraction against ground truth:
+```bash
+# Example: validate promotion count
+expected_promotions=2
+actual=$(grep -c "\[eval\] promoted" run.log)
+if [ "$actual" -ne "$expected_promotions" ]; then
+  echo "ERROR: Metric extraction mismatch"
+fi
+```
+
+See 2026-04-15 mistakes.md entry "Metric Inflation from Training-Version Tag vs Promotion Count" for the inflation bug and fix.
 
 ## Related
 
-- [Chess Engine](chess-engine.md) — board representation, move generation, gotchas
-- [MCTS & Self-Play](mcts-selfplay.md) — pipeline architecture
-- [Mistakes Log](mistakes.md) — past bugs with root cause analysis
+- [Chess Engine](chess-engine.md) — move generation, gotchas
+- [MCTS & Self-Play](mcts-selfplay.md) — pipeline
+- [Mistakes Log](mistakes.md) — past bugs

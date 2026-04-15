@@ -185,6 +185,265 @@ let version: u64 = self.trainer.getattr(py, "model_version")?.extract(py)?;
 
 ---
 
+## 2026-04-14: Log-Softmax NaN with Legal-Move Masking
+
+**Date**: 2026-04-14
+**Agent**: Implementation agent (Batch 1 Representation Overhaul)
+**Domain**: Python trainer (loss computation)
+**Error Type**: Quality — incomplete masking handling
+
+**What happened**: Legal-move masking was applied by setting illegal logits to `-inf`, then calling `F.log_softmax()` on the masked logits. This produced `0 × log(0)` NaN values in the final log-probabilities for illegal moves, which contaminated the policy loss during backprop.
+
+**Root Cause**: `log_softmax(-inf)` returns NaN when the exponential underflows. The masked-fill operation sets illegal actions to `-inf`, but `log_softmax` doesn't handle this edge case gracefully. Standard masking workflows apply masking *after* softmax, not before.
+
+**Fix**: Apply masking before softmax, then call `nan_to_num(neginf=0.0)` to replace NaN with 0. This makes the loss contribution from illegal moves identically zero, as intended. Code pattern:
+```python
+logits = self.policy_head(x)
+logits.masked_fill_(~legal_mask, float('-inf'))
+log_probs = F.log_softmax(logits, dim=-1)
+log_probs = log_probs.nan_to_num(neginf=0.0)
+```
+
+**Escalation Tier**: Gotcha — documented here for manual avoidance.
+
+---
+
+## 2026-04-14: Bash set -euo pipefail with Empty Grep Tail
+
+**Date**: 2026-04-14
+**Agent**: Implementation agent (Baseline evaluation)
+**Domain**: Development infrastructure (shell scripts)
+**Error Type**: Quality — incomplete error handling
+
+**What happened**: Shell script with `set -euo pipefail` running `grep pattern file | tail -n 1` silently exited the entire script when grep returned no matches. The pipe breaks and tail reads EOF, exiting with code 0, but the compound command had already failed, causing the script to abort.
+
+**Root Cause**: When `grep` finds no matches, it returns exit code 1. With `pipefail`, the compound pipeline fails. However, if tail were to run, it would exit 0 on EOF. The script interprets this as a catastrophic error and exits due to `set -e`.
+
+**Fix**: Guard grep with `|| true` or use `grep ... | tail -n 1 || echo "default"` to provide a fallback. Alternatively, save grep output to a variable first and check before piping. For robustness:
+```bash
+result=$(grep pattern file || echo "")
+if [ -z "$result" ]; then
+  # handle no match
+fi
+```
+
+**Escalation Tier**: Gotcha — documented here for manual avoidance in shell scripts.
+
+---
+
+## 2026-04-14: MCTS Tree Reuse — Q-Value Warm-Start Regression
+
+**Date**: 2026-04-14
+**Agent**: Implementation agent (Autoresearch Batch 2)
+**Domain**: MCTS search optimization
+**Error Type**: Experimental regression (plan deviation with unmeasured actual implementation)
+
+**What happened**: Commit `118f824` attempted to implement MCTS tree reuse between moves to speed up search. Initial plan: carry forward the entire subtree from the previous move (AlphaZero-style). Implementation discovered MuZero latent children don't store board state, so legal moves aren't computable. Pivoted to a weaker version: warm-start the root Q-value with accumulated value from prior move's expansion. Result: devastating regression across all three metrics (score 1.8121 vs 5.7646 baseline, -3.95 delta). All games were draws, longer than baseline (227 vs 182 moves), policy loss regressed (4.47 vs 3.96).
+
+**Root Cause**: When plan is blocked by architectural constraints, the modified experiment is no longer testing the original hypothesis. Q-value warm-start with early-training network noise injected bias: weak expansions from the first 100 games produced noisy latent states and poor value estimates. These warm-started Q-values misled PUCT selection away from actually good moves. The training network was undermined by stale, noisy warm-start signal, leading to drawish, ineffective play.
+
+**Fix**: Reverted commit `118f824` with `d0b0681`. No tree reuse in current codebase.
+
+**Lesson**: Measure expected delta of the *actual* implementation before running, not the intended design. If the implementation deviates fundamentally from the plan, run a smaller feasibility test (5 min run) to validate the pivot before committing to a full baseline.
+
+**Escalation Tier**: Gotcha — documented in mcts-selfplay.md section "Tree Reuse: Why It's Hard in MuZero" with detailed architectural explanation and future options.
+
+---
+
+## 2026-04-14: Recency-Weighted Replay Buffer — Catastrophic Forgetting
+
+**Date**: 2026-04-14
+**Agent**: Autoresearch (commit 003eaf9)
+**Domain**: Training data distribution (replay buffer)
+**Error Type**: Insight (not a bug) — illuminated subtle tradeoff between batch quality and value-head diversity
+
+**What happened**: Commit `003eaf9` added exponential decay weighting to replay buffer sampling to prioritize recent on-policy games. Two runs tested:
+- **decay=0.1**: policy loss improved dramatically (3.02 vs 3.96 baseline, -0.94), but decisive_ratio collapsed from 0.50 at v20 to 0.10 by v57. Score 4.7791 (-0.99 vs baseline 5.7646).
+- **decay=0.05**: policy loss even better (2.93), 78% more throughput, but same collapse pattern (v20 decisive=0.20 → v61 decisive=0.10). Score 5.2719 (-0.49).
+
+Classic catastrophic forgetting: exponential decay progressively narrows the effective buffer distribution. By v57-61, only the last ~10 model versions have non-negligible weight, so the value head trains on a narrow recent-only distribution and learns unreliable value estimates. Policy loss continued decreasing (network avoided costly mistakes) but value head lost signal diversity, leading to drawish, repetitive play.
+
+**Root Cause**: Early random games provide high-variance outcome distribution (wins, losses, draws). Recent on-policy games converge toward a narrow distribution (likely draws and repetitions). Recency weighting trades value-head diversity for policy-batch quality. This is especially damaging when the policy is already decent — then the narrow distribution trains the value head to expect nearly-zero outcomes, making it fail when the policy diverges.
+
+**Fix**: Reverted via `ec2f6c0` to equal-weight sampling (commit `d0b0681` baseline).
+
+**Lesson**: When policy loss and decisive_ratio move in opposite directions, you've traded one for the other. Log both first-eval and last-eval values to spot forgetting. The *true* metric should measure the first eval cycle too (e.g., v20 was good, but v60 is bad — the model forgot).
+
+**Escalation Tier**: Gotcha — documented in mcts-selfplay.md section "Replay Buffer Distribution Dynamics" with signature symptom (eval cycles diverge) and future options (separate samplers, diversity floor, outcome prioritization).
+
+---
+
+## 2026-04-14: Self-Play Evaluation Symmetry Collapse
+
+**Date**: 2026-04-14
+**Agent**: Autoresearch (runtime HYZERO_SIMS=100, no code change)
+**Domain**: Evaluation metrics (self-play vs fixed opponent)
+**Error Type**: Metric flaw — optimization misalignment with model quality
+
+**What happened**: Three consecutive autoresearch experiments (recency decay=0.1, decay=0.05, SIMS=100 runtime override) all exhibited identical failure mode: policy_loss improved, but decisive_ratio dropped to 0 (all eval games drew). Pattern is now statistically significant:
+- recency decay=0.1: policy loss 3.02 vs 3.96 baseline ✓ but v20 decisive 0.50 → v57 decisive 0.10 ✗
+- recency decay=0.05: policy loss 2.93 ✓ but v20 decisive 0.20 → v61 decisive 0.10 ✗
+- SIMS=100 (runtime, no code change): policy loss 3.09 vs 3.96 baseline ✓ but eval at v20 all draws (0 decisive) ✗
+
+**Root Cause**: This is **fundamental to symmetric self-play evaluation**. As the MuZero policy and value head improve, both players in self-play converge to identical strong play → identical game trees → all games draw. The stronger the model, the more likely self-play-vs-self produces draws. Conversely, weaker or high-variance policies produce more decisive games. The `training_score` metric is currently optimized by either (a) intentional model weakness/variance, or (b) asymmetric evaluation. Measuring self-play decisive_ratio rewards the wrong thing past a certain point.
+
+**Fix**: This is not a bug to fix, but a metric to redesign. The `training_score` formula should not use self-play-decisive-ratio as a signal. Better alternatives: (1) Win rate vs a FIXED reference opponent (e.g., `RandomEvaluator` from `src/selfplay/evaluation.rs`), (2) Puzzle-solving rate (separate benchmark), (3) Blitz tournament vs historical versions.
+
+**Lesson**: Self-play win rates measure relative strength between versions. They do not measure absolute strength. When both players are identical, all games draw regardless of skill. For eval, use an asymmetric opponent (fixed or random).
+
+**Escalation Tier**: Metric design — escalates to project roadmap. Proposed: track `training_score` component changes separately (policy_loss, avg_length) and defer win-rate-based scoring to Phase 4 (Tactical Metric) with dedicated `RandomEvaluator` benchmark.
+
+---
+
+## 2026-04-14: Baseline Measurement Noise — ±1 Point Variance
+
+**Date**: 2026-04-14
+**Agent**: Baseline rerun / measurement validation
+**Domain**: Development infrastructure (metric reliability)
+**Error Type**: Quality — hidden measurement noise, masked by single-run reporting
+
+**What happened**: Four consecutive runs of equivalent or near-equivalent code produced widely scattered scores: 5.7646, 3.6911, 3.6947, 4.1277 (mean ~4.3, range ~2.0). The original "Batch 1 win" at 5.7646 appeared decisive, but was within noise of the initial baseline 4.7798. Subsequent reruns at commits 46c3d0d-rerun1 and 46c3d0d-rerun2 dropped to ~3.7. Discovery during third rerun revealed the script bug (see below) — but also exposed that even with the bug fixed, variance remains ±1.0 point per run.
+
+**Root Causes**:
+1. **Measurement bug** (fixed in d98289b): Script used `grep | tail -1` to extract the LAST eval cycle's decisive_ratio. But catastrophic forgetting means the LAST cycle is often collapsed (0.00) even when earlier cycles had 0.30-0.50. Script should have picked MAX decisive_ratio across all eval cycles. Fixed: now uses `grep -oP 'decisive_ratio: \K[\d.]+' | sort -nr | head -1` or equivalent.
+2. **Inherent eval noise**: Each self-play eval runs only 10 games, so decisive_ratio has binomial variance (±0.15-0.20 per cycle). Training step count varies ±50% between runs due to OS scheduler/inference throughput jitter. Over a 30-min run with 5-7 eval cycles, these compound.
+
+**Implication**: Single-run experiments with effect size <1.5 points are indistinguishable from noise. Batch 1's +0.98 improvement (5.7646 vs 4.7846 baseline) is marginal. True effect, if any, requires multi-run averaging or longer baseline runs.
+
+**Fix**: (1) Script fixed to use MAX cycle. (2) New baseline established at 4.1277 (commit d98289b, 2026-04-14) — the median-ish value of recent 4 observations. (3) Future experiments: rerun marginal changes (±0.5 points) at least 2x before claiming. (4) Roadmap Phase 4: implement multi-run averaging (each experiment runs 3x, median reported).
+
+**Escalation Tier**: Gotcha → documented in testing.md under "Baseline Measurement Reliability" section with rerun guidance. Rule candidate: add to CLAUDE.md metric section that changes <1.5 points require validation reruns.
+
+---
+
+## 2026-04-14: Dirichlet Noise Alpha — Wrong Game Constant
+
+**Date**: 2026-04-14
+**Agent**: Autoresearch (commit d407281)
+**Domain**: MCTS root exploration (Dirichlet noise)
+**Error Type**: Wrong hyperparameter — long-standing constant copy from different game domain
+
+**What happened**: `NOISE_ALPHA` in `src/mcts/tree.rs:9` was hardcoded to 0.03 (AlphaZero **Go** setting) when chess requires 0.3 per the AlphaZero paper. This was a systemic bug affecting every experiment from inception. Over-concentrated Dirichlet noise at the root meant all exploration mass concentrated on 1-2 random moves out of ~35 legal moves → narrow state space coverage → training data biased toward a few game patterns → network learned slowly → decisive_ratio stuck at ~0.20.
+
+**Evidence of impact**: 15-min baseline comparison:
+- **Before fix** (α=0.03): score 4.13, policy_loss 4.32, decisive_ratio 0.20, 45 games in 347 steps
+- **After fix** (α=0.3): score 6.78, policy_loss 3.40, decisive_ratio 0.30, 97 games in 768 steps
+- **Delta**: +2.65 score (well above ±1.0 noise floor), −0.92 policy loss, +0.10 decisive_ratio, +2.16x throughput
+
+**Root Cause**: Copy-paste from AlphaZero codebase without domain validation. The paper explicitly states: "α = {0.3, 0.15, 0.03} for chess, shogi and Go respectively." The value 0.03 was correct for Go; chess needed 0.3.
+
+**Fix**: Commit `d407281` — single-line change: `const NOISE_ALPHA: f64 = 0.03;` → `0.3`. Also sets correct `NOISE_EPSILON = 0.25` (fraction of noise mixed into prior; already correct).
+
+**Escalation Tier**: Rule — add to `.claude/rules/mcts.md` to prevent future domain-crossing errors.
+
+---
+
+## 2026-04-15: Value Head Dead — Self-Referential Bootstrap
+
+**Date**: 2026-04-15
+**Agent**: Architectural analysis (no code change)
+**Domain**: Training dynamics (MuZero value head)
+**Error Type**: Design issue (suboptimal target formula)
+
+**What happened**: Deep investigation of training logs showing `value=0.0000` throughout all experiments. Analysis confirmed the problem is architectural, not a tuning parameter. Value head never receives gradient signal despite correct implementation of training loop.
+
+**Root Cause**: Value target formula is self-referential. Code (`src/py/training.rs:98`) sets:
+```
+target_values[bi * kp1 + k] = step.root_value;
+```
+where `root_value` is the MCTS root node's value estimate, which is initialized from (and backed up through) the value head's own output. When the value head is untrained (f(s) ≈ 0), all root_value ≈ 0 → all targets ≈ 0 → loss ≈ 0 → no gradient. The bootstrap loop never closes.
+
+This is **not canonical MuZero**. Schrittwieser et al. (2020) Appendix F specifies value target = game outcome (n-step bootstrap with n=∞, γ=1) for board games. Our approach (bootstrapping from untrained network) is a failed optimization attempt.
+
+**Verified by code**:
+- `game_outcome` IS available in `GameTrajectory` (src/data/replay_buffer.rs:93, types.rs:96)
+- But `game_outcome` is NEVER passed to training batch assembly (src/py/training.rs line 98)
+- Only the final step's `reward` field contains the outcome (src/selfplay/game_task.rs:150)
+
+**Lesson**: Design patterns that work in theory don't always work in practice. The iterative bootstrap hypothesis sounded good, but the self-referential loop kills the gradient signal. Canonical approaches (outcome targets) exist for a reason.
+
+**Escalation Tier**: Gotcha → documented in neural-networks.md (new section "Canonical MuZero Value Target for Board Games") and mcts-selfplay.md ("Why the Value Head is Dead").
+
+---
+
+## 2026-04-15: Reward Head Dead — Class Imbalance (Terminal Reward Only)
+
+**Date**: 2026-04-15
+**Agent**: Architectural analysis (no code change)
+**Domain**: Training dynamics (MuZero reward head)
+**Error Type**: Design issue (sparse reward targets)
+
+**What happened**: Training logs show `reward=0.0006` (collapsed to zero) despite correct reward head implementation. Investigation revealed the problem is fundamental to the data pipeline: reward targets are 99% zeros.
+
+**Root Cause**: Only terminal steps carry outcome signal.
+- `src/selfplay/game_task.rs:107-114` initializes every step with `reward: 0.0`
+- `src/selfplay/game_task.rs:149-151` sets only the **last step** to `reward = game_outcome`
+- For a 100-move game, random K+1-step sampling (src/data/replay_buffer.rs:87-89) has ~1% chance of including the terminal step
+- In typical batches, ~99% of `target_rewards` entries are 0.0
+
+An MSE loss on 99% zeros + 1% outcome signal is optimized by predicting 0 everywhere.
+
+**Why This Breaks MuZero**: MuZero requires the reward head to signal terminal states in latent space (no real board exists to check `.result()`). Dead reward head means MCTS backup can't detect "game over" — the tree may continue expanding nonsensically past actual terminals.
+
+**Lesson**: Reward-only-at-terminal is correct physics but creates severe class imbalance during training. Supervised learning needs balanced targets. Options: (a) resample to oversample terminals, (b) use outcome as a per-step auxiliary target, (c) separate sparse-reward and dense-loss formulations.
+
+**Escalation Tier**: Gotcha → documented in neural-networks.md ("Key Gotchas #10") and mcts-selfplay.md ("Why the Reward Head is Dead").
+
+---
+
+## 2026-04-15: Game Outcome Perspective — Absolute White vs Side-to-Move Relative (Unverified)
+
+**Date**: 2026-04-15
+**Agent**: Architectural analysis (code read, not verified)
+**Domain**: Data encoding (MuZero observation consistency)
+**Error Type**: Context — potential inconsistency (not yet confirmed as bug)
+
+**What happened**: During value-head analysis, noted a potential inconsistency in perspective conventions. `game_outcome` in `src/selfplay/game_task.rs:143-146` is absolute White-perspective (+1 for White wins, -1 for Black wins). But board observation planes in `src/data/encoding.rs` encode absolute piece positions (White planes 0-5, Black planes 6-11). When outcome is used as a value target, there's a mismatch: the network sees piece positions in absolute space but needs to predict a value that depends on whose turn it is.
+
+**Investigation Status**: Code inspection completed. Observation encoding uses:
+- Absolute White/Black piece planes (planes 0-11)
+- Side-to-move indicator (plane 101: 1.0 if White, 0.0 if Black)
+- Absolute castling rights and game-state channels
+
+Outcome targets would also need to be adjusted by side-to-move sign to match the network's input space. Currently, this adjustment is NOT done anywhere in the codebase.
+
+**Implication**: If outcome is ever used as a value target (e.g., β>0 blend in proposed soft-outcome fix), must derive the side-to-move sign and apply it: `target_value = outcome * side_sign` where `side_sign` is extracted from observation plane 101 or step metadata.
+
+**Fix Status**: Not yet fixed. Marked as a prerequisite check before implementing soft-outcome blend (docs/plans/next-steps/resume.md notes this as "Need access to side-to-move sign from plane 101").
+
+**Escalation Tier**: Gotcha → flagged in resume.md as a verification task. Not yet escalated to Rule because the fix is one-liner when outcome targets are implemented.
+
+---
+
+## 2026-04-15: Metric Inflation from Training-Version Tag vs Promotion Count
+
+**Date**: 2026-04-15
+**Agent**: Autoresearch session
+**Domain**: Development infrastructure (metric definition and measurement)
+**Error Type**: Quality — ambiguous variable name masking a logic error
+
+**What happened**: A 30-minute training run reported `training_score = 28.33` (final JSON output), but manual inspection of the log revealed only 2 promotions (`grep -c "\[eval\] promoted"` returned 2). Expected score ~8.3 based on 2 promotions; actual reported 28.33 is 3.4× inflated.
+
+Root cause: The bash script extracting the metric multiplied by `max_champion_version = 12` instead of the promotion count. The naming confusion: `champion_version` is a tag from checkpoint filenames (`best_v012.pt`), not a counter of promotion events. Over 30 minutes, the model trained through ~12 version checkpoints while only promoting twice — a ~6× rate difference between training steps and eval cycles.
+
+**Fix**: Commit `2a273d4` — replaced `max_champion_version` multiplier with explicit event count `PROMOTIONS=$(grep -c "\[eval\] promoted" "$run_log")`. Formula now correctly uses the number of discrete promotions, not the version tag of the latest checkpoint.
+
+```bash
+# BEFORE (wrong):
+champion_version=$(grep -oP 'max_champion_version:\K\d+' "$run_log" | tail -1)
+score=$(echo "8.55 - $policy_loss + $champion_version * 2.0 ..." | bc)
+
+# AFTER (correct):
+PROMOTIONS=$(grep -c "\[eval\] promoted" "$run_log")
+score=$(echo "8.55 - $policy_loss + $PROMOTIONS * 2.0 ..." | bc)
+```
+
+**Lesson**: Any derived metric whose multiplier can change at a different rate than the event it's supposed to count needs precise definition. "Version" is ambiguous — it can mean build number, model checkpoint index, or event serial. Use "count" language when you mean discrete events. Test the metric extraction against ground truth before high-stakes reporting. The baseline was correct before (commit d407281 measured honestly), but this bug would have invalidated future experiments if left unfixed.
+
+**Escalation Tier**: Gotcha → documented in testing.md section on "Baseline Measurement Reliability" with note on metric definition precision.
+
+---
+
 ## Escalation Tiers
 
 Mistakes escalate from manual avoidance to automation:
