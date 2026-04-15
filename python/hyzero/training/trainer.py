@@ -1,6 +1,8 @@
 """MuZero training loop with K-step unroll, loss computation, and checkpointing."""
 
 import io
+import os
+import sys
 
 import numpy as np
 import torch
@@ -10,6 +12,36 @@ from hyzero.config import DEFAULT_CONFIG
 from hyzero.models.representation import RepresentationNetwork
 from hyzero.models.dynamics import DynamicsNetwork
 from hyzero.models.prediction import PredictionNetwork
+
+
+def _parse_loss_weight_env(name: str, default: float = 1.0) -> float:
+    """Parse a loss weight env var, clamping to [0.0, 100.0].
+
+    Args:
+        name:    Environment variable name.
+        default: Value to return on missing or unparseable input.
+
+    Returns:
+        Parsed and clamped float weight.
+    """
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = float(raw)
+    except (ValueError, TypeError):
+        print(
+            f"[trainer] WARNING: {name}={raw!r} is not a valid float; using default {default}",
+            file=sys.stderr,
+        )
+        return default
+    clamped = max(0.0, min(100.0, value))
+    if clamped != value:
+        print(
+            f"[trainer] WARNING: {name}={value} clamped to {clamped}",
+            file=sys.stderr,
+        )
+    return clamped
 
 
 class Trainer:
@@ -59,6 +91,15 @@ class Trainer:
         )
 
         self.model_version: int = 0
+
+        self.policy_loss_weight = _parse_loss_weight_env("HYZERO_POLICY_LOSS_WEIGHT")
+        self.value_loss_weight = _parse_loss_weight_env("HYZERO_VALUE_LOSS_WEIGHT")
+        self.reward_loss_weight = _parse_loss_weight_env("HYZERO_REWARD_LOSS_WEIGHT")
+        print(
+            f"[trainer] loss weights: policy={self.policy_loss_weight:.2f}"
+            f" value={self.value_loss_weight:.2f}"
+            f" reward={self.reward_loss_weight:.2f}"
+        )
 
     def train_batch(self, batch: dict) -> dict:
         """Run one K-step unroll training step.
@@ -132,7 +173,11 @@ class Trainer:
         avg_value_loss = total_value_loss / n_steps
         avg_reward_loss = total_reward_loss / k_steps
 
-        total_loss = avg_policy_loss + avg_value_loss + avg_reward_loss
+        total_loss = (
+            self.policy_loss_weight * avg_policy_loss
+            + self.value_loss_weight * avg_value_loss
+            + self.reward_loss_weight * avg_reward_loss
+        )
 
         total_loss.backward()
         self.optimizer.step()

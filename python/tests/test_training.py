@@ -10,6 +10,7 @@ import torch
 
 from hyzero.config import DEFAULT_CONFIG
 from hyzero.training import Trainer
+from hyzero.training.trainer import _parse_loss_weight_env
 
 INPUT_PLANES = DEFAULT_CONFIG["input_planes"]   # 103
 NUM_ACTIONS = DEFAULT_CONFIG["num_actions"]     # 4672
@@ -129,3 +130,35 @@ def test_gradient_flows() -> None:
             p.grad is not None for p in network.parameters() if p.requires_grad
         )
         assert has_grad, f"Network '{name}' has no gradients after train_batch"
+
+
+# --- Loss weight env-var helper tests ---
+
+
+def test_loss_weight_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unset env var returns default of 1.0."""
+    monkeypatch.delenv("HYZERO_POLICY_LOSS_WEIGHT", raising=False)
+    assert _parse_loss_weight_env("HYZERO_POLICY_LOSS_WEIGHT") == 1.0
+
+
+def test_loss_weight_parsed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Valid float is parsed; negative is clamped to 0.0; >100 is clamped to 100.0."""
+    monkeypatch.setenv("HYZERO_POLICY_LOSS_WEIGHT", "2.5")
+    assert _parse_loss_weight_env("HYZERO_POLICY_LOSS_WEIGHT") == 2.5
+
+    monkeypatch.setenv("HYZERO_POLICY_LOSS_WEIGHT", "-1")
+    assert _parse_loss_weight_env("HYZERO_POLICY_LOSS_WEIGHT") == 0.0
+
+    monkeypatch.setenv("HYZERO_POLICY_LOSS_WEIGHT", "200")
+    assert _parse_loss_weight_env("HYZERO_POLICY_LOSS_WEIGHT") == 100.0
+
+
+def test_loss_weight_invalid(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """Non-numeric env var returns default 1.0 and prints a warning to stderr."""
+    monkeypatch.setenv("HYZERO_POLICY_LOSS_WEIGHT", "abc")
+    result = _parse_loss_weight_env("HYZERO_POLICY_LOSS_WEIGHT")
+    assert result == 1.0
+    captured = capsys.readouterr()
+    assert "WARNING" in captured.err
