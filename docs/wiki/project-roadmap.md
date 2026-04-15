@@ -18,10 +18,13 @@ Current state and next steps for hyzero.
 
 ## Baseline
 
-- **Score**: 6.78 (formula: `(8.55 - policy_loss) + (decisive_ratio * 10) - (avg_length / 100)`)
+- **Score**: 11.63 (β=0.3, commit 294e63e, 2026-04-15 autoresearch winner)
+- **Formula**: `(8.55 - policy_loss) + (promotions * HYZERO_CHAMPION_SCORE_WEIGHT) - (avg_game_length / 100)`
 - **Run command**: `bash scripts/run_baseline.sh 1800`
 - **Stored at**: `logs/baseline_score.json`
-- **Commit**: d407281 (2026-04-14 — Dirichlet alpha fix: 0.03 → 0.3)
+- **Outcome blend (β)**: 0.3 — hard-won from 11-experiment sweep. Deviations regress (β>0.3 destabilizes, β<0.3 underperforms).
+- **Previous baseline**: 6.78 (commit d407281, 2026-04-14 — Dirichlet alpha fix before autoresearch)
+- **Metric note**: Formula changed on 2026-04-15. Old formula used `decisive_ratio` (self-play metric, flawed). New formula uses `promotions` (discrete promotion events from eval ladder). Metric extraction must count `grep -c "\[eval\] promoted"` not version tags.
 
 ## What's Next
 
@@ -39,11 +42,12 @@ Detailed roadmap with file lists and rationale: [`docs/plans/next-steps/roadmap.
 ## Known Risks
 
 - **Dirichlet noise CPU overhead**: Must use `--release` for e2e/baseline tests
-- **Game length ~200 moves**: Correct for exploration but impacts iteration speed
+- **Game length ~150 moves** (with β=0.3): Longer = better exploration = better training data. Configs that reduce game length (faster training) regress play despite lower loss.
 - **Batch timeout tuning**: 10ms empirical, may need adjustment at higher concurrency
 - **GIL contention**: One acquisition per batch; monitor if eval + self-play conflict
 - **Eval cycle cost**: 10 eval games at 50 sims takes ~3-4 min, may skip threshold crossings
-- **Loss weight amplification destabilizes**: value_loss_weight=5.0 test regressed score 11.63→4.84 (2026-04-15). Do not retry above 2.0; prefer tuning outcome blend β instead
+- **Loss weight amplification destabilizes**: value_loss_weight=5.0 test regressed score 11.63→4.84 (2026-04-15). Do not retry above 2.0; prefer tuning outcome blend β instead.
+- **Fast-training paradox**: Experiments with lower policy loss (2.4–2.7) regressed in promotions and play quality. Always validate by promotions and evaluation play, not training loss alone. See mistakes.md "Fast-Training Paradox" for evidence.
 
 ## Experimental Results
 
@@ -51,21 +55,31 @@ Detailed roadmap with file lists and rationale: [`docs/plans/next-steps/roadmap.
 |-----|--------|----------|--------|-------|------|
 | alpha-fix | Dirichlet α: 0.03→0.3 (chess, not Go) | 4.13 | 6.78 | +2.65 | Foundational fix, permanent |
 | batch1-rep | History 19→103, underpromotion, masking | 6.78 | (superseded) | — | Nullified by alpha fix timing |
+| autoresearch-β | 11-experiment β sweep (outcome blend) | 6.78 | **11.63** (β=0.3) | **+4.85** | Peak of program; closed-loop paradox discovered |
 | value-weight=5.0 | Amplify value loss 5x at β=0.3 | 11.63 | 4.84 | −6.79 | Closed-loop instability; do not retry |
+| games_per_side=6 | More games per training step | 6.78 | 5.48 | −1.30 | Policy loss 2.41 but 0 promotions (fast-training paradox) |
+| β=0.4 | Higher outcome blend | 6.78 | 6.80 | +0.02 | Policy loss 2.63 but destabilized (1 promotion) |
+| β=0.5 | Even higher outcome blend | 6.78 | 8.07 | +1.29 | Policy loss 2.45 but modest improvement |
 
 ## Metric Evolution
 
-**Current metric** (`training_score` formula) uses self-play decisive ratio as a signal. **Problem**: As model improves, self-play-vs-self converges to draws (identical play by both sides). Three autoresearch runs show policy_loss improving while decisive_ratio drops to 0 — metric optimizes toward model weakness.
+**2026-04-15 update**: Metric formula fixed (commit 2a273d4). Old formula used `max_champion_version` (checkpoint tag index) instead of actual promotion count. New formula (current baseline 11.63) correctly uses `promotions = grep -c "\[eval\] promoted"`.
+
+**Current metric** (`training_score` formula): `(8.55 - policy_loss) + (promotions * 2.0) - (avg_game_length / 100)`
+- **Policy loss component**: Network learning (lower better, range ~3.4–4.5)
+- **Promotions component**: Real wins in eval ladder (higher better)
+- **Game length component**: Search efficiency (lower better, but >100 is healthy)
+
+**Why promotions, not self-play decisive_ratio?**: As model improves, self-play-vs-self converges to draws (identical play = draws). Earlier autoresearch showed policy_loss improving to 2.4 while decisive_ratio dropped to 0 — metric was optimizing toward weakness. Promotions measure actual wins: model A beats model B in 1v1 ladder matches. This is the true signal.
 
 **Measurement noise** (2026-04-14): Baseline exhibits ±1 point variance from eval running only 10 games (binomial variance ±0.15-0.20 per cycle) and training step count varying ±50% between runs. Single-run claims <1.5 points are within noise; marginal changes require multi-run validation.
 
 **Future work** (Phase 4 priority):
 - **Phase 4 infra** (multi-run averaging): Each experiment runs 3x, median reported to reduce noise
-- Decouple metric components: track policy_loss and avg_game_length separately during development
-- Replace self-play decisive_ratio with win rate vs **fixed reference opponent** (`RandomEvaluator` from `src/selfplay/evaluation.rs`)
-- Phase 4 will add puzzle-solving suite and composite strength score
+- If needed, add puzzle-solving suite as supplementary metric (tactical strength)
+- Consider tournament vs historical versions (longer eval horizon)
 
-This change prevents metric-gaming, reduces noise, and directly measures progress toward a strong, consistent engine.
+Current single-metric approach (promotions-based) is stable and actionable for Phase 3.
 
 ## Related
 - [Neural Networks](neural-networks.md) — model architecture

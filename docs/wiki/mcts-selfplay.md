@@ -1,5 +1,31 @@
 # MCTS & Self-Play Infrastructure
 
+## Closed-Loop Training Paradox: Faster Training ≠ Better Model
+
+**CRITICAL FINDING (2026-04-15)**: MCTS self-play is a closed loop. The model generates games (via MCTS with value-guided search), which train the model. If training becomes faster (lower loss, more steps, different loss weighting) WITHOUT a corresponding improvement in MCTS quality, the result is poorer play, not better. This appears as a contradiction: policy loss decreases while promotions drop to zero.
+
+**Evidence from autoresearch sweep** (11 experiments, 30-min each):
+
+| Config | policy_loss | avg_game_len | promotions | score |
+|--------|-------------|---|---|---|
+| **β=0.3 (winner)** | 3.40 | 151.6 | 4 | **11.63** |
+| value_weight=5.0 | 2.70 ✓ | 113.2 | 0 ✗ | 4.84 |
+| games_per_side=6 | 2.41 ✓ | 106.9 | 0 ✗ | 5.48 |
+| β=0.4 | 2.63 ✓ | 105.4 | 1 ✗ | 6.80 |
+| β=0.5 | 2.45 ✓ | 107.2 | 2 ✗ | 8.07 |
+
+**The paradox**: Every configuration that achieved lower policy loss (2.4–2.7 vs 3.4) regressed in promotions and score. The challenger **lost to Random** at eval cycles 1–4 despite training metrics looking excellent.
+
+**Root cause**: Self-play games are the training data source. If MCTS quality doesn't improve alongside training speed, the model trains on garbage targets. Policy loss appears good because the network is learning the visit-distribution targets faithfully — but those targets reflect whatever MCTS produced (which may be poor if value estimates are unstable early). The metrics are decoupled:
+- **Policy loss** = how well the network memorizes MCTS visit distributions (local signal)
+- **Promotions** = whether the learned model actually plays better (global signal)
+
+When the two diverge, promotions are the ground truth. Lower loss alone is a false positive.
+
+**Intuition**: β=0.3 had longer games (151.6 moves vs ~106) and higher loss (3.40), meaning more exploration and slower convergence. Slower convergence → MCTS had more time to refine value estimates → better training data → promotions happened. Faster training (β>0.3) meant the model converged before MCTS built good value estimates → it learned on noisy targets → play regressed despite loss curves looking great.
+
+**Key Decision**: Always validate experiments by promotions (real play), not training loss. In this codebase, measuring by loss is nearly useless — measure by wins against evaluation opponents.
+
 ## MCTS Tree Search (Per Move)
 
 **Per-move flow**:

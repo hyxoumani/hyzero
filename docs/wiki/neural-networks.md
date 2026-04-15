@@ -80,6 +80,36 @@ PUCT(s, a) = P(a) * sqrt(N(s)) / (1 + N(a))
 
 Without the Q term, selection is noise plus prior bias. Visit counts approximate the prior distribution, not the improved policy. Policy loss may decrease (network memorizes which moves to avoid), but the policy doesn't *improve* — it self-imitates. This explains the "hollow learning" pattern: low loss, but evaluations show unchanged or degraded play.
 
+## Outcome Blend Protocol (β Parameter)
+
+The value-outcome blend coefficient β controls the mix of MCTS Q-estimates and game outcomes in value targets. This is the highest-leverage knob in the current pipeline.
+
+**Established optimum**: β=0.3 (commit 294e63e, 2026-04-15)
+- Produces sustained promotions (4 in 5 eval cycles, 80% rate)
+- Score 11.63 — peak of entire autoresearch program
+- Games average 151.6 moves (longer = more exploration = better training data)
+- Policy loss 3.40 (healthy — not too fast convergence)
+
+**Protocol for β changes**:
+```bash
+# Test a new β value
+rm -f checkpoints/best*.pt  # Fresh start, no prior ladder state
+HYZERO_VALUE_OUTCOME_BETA=0.5 bash scripts/run_baseline.sh 1800
+```
+
+**Why fresh start matters**: If `best.pt` from a prior β setting exists, the next run starts with biased champion (trained on different blend). Always delete checkpoints between β experiments for fair comparison.
+
+**Deviations regress**:
+- β < 0.3 (e.g., β=0.2): Too little outcome signal. Over-relies on noisy Q-estimates. Result: 2 promotions vs 4.
+- β > 0.3 (e.g., β=0.4, 0.5): Destabilizes training. Model converges faster to poor local optima. Result: 1–2 promotions, challenger loses to Random. Policy loss lower but play regresses (closed-loop paradox).
+
+**Related env vars**:
+- `HYZERO_VALUE_LOSS_WEIGHT` (default 1.0) — DO NOT increase above 1.0. See "Value Loss Weight Overshoot" mistake entry for why amplifying weight creates feedback loop instability.
+- `HYZERO_POLICY_LOSS_WEIGHT` (default 1.0) — keep at 1.0
+- `HYZERO_REWARD_LOSS_WEIGHT` (default 1.0) — keep at 1.0 (reward head is already class-imbalanced)
+- `HYZERO_LR_SCHEDULE` — leave empty (no schedule). Cosine schedule tested, didn't help.
+- `HYZERO_REWARD_OUTCOME_GAMMA` — leave at default (no soft blending of outcome). γ=0.1 test regressed once at β=0.3.
+
 ## Loss Weight Tuning
 
 Loss weights (HYZERO_{POLICY,VALUE,REWARD}_LOSS_WEIGHT) default to 1.0 and should stay near that. A 2026-04-15 experiment boosted value_loss_weight to 5.0 expecting faster value head training (since value loss was ~60x smaller). Instead, score regressed from 11.63 to 4.84: the amplified gradient made value estimates oscillate wildly early in training, corrupting the MCTS-generated data that the policy head learns from. When one head's training signal is amplified without matching convergence stability in the other heads, the shared training data distribution becomes corrupted.
@@ -89,14 +119,14 @@ Loss weights (HYZERO_{POLICY,VALUE,REWARD}_LOSS_WEIGHT) default to 1.0 and shoul
 ## Key Gotchas
 
 1. **Policy**: Network outputs logits. Inference server applies softmax; training uses raw logits + CE.
-2. **Value**: Tanh [-1, 1]. Currently predicts MCTS root_value (bootstrapped Q-estimates), not game outcome.
+2. **Value**: Tanh [-1, 1]. Currently predicts MCTS root_value (bootstrapped Q-estimates) + soft outcome blend (β=0.3 by default).
 3. **Reward**: Per-step (immediate), not cumulative. Real rewards come from trajectory — terminal reward only.
 4. **Action encoding**: 4096 = 64×64, queen-default promotion. Underpromotion (4672) unimplemented.
 5. **Value not negated per ply** in backup — intentional (same sign across turns), verify during training.
 6. **Reward loss K not K+1**: Only K reward terms (steps 1..K), policy/value have K+1 (steps 0..K). Divide reward loss by K.
 7. **Gradient hook on g output**: `register_hook(lambda grad: grad * 0.5)` on dynamics OUTPUT for correct chained K-step scaling (MuZero Appendix G).
 8. **torch.load deprecation**: Use `weights_only=False` explicitly in PyTorch 2.x to avoid FutureWarning.
-9. **Value head dead when root_value ≈ 0**: Self-referential bootstrap. Fix via soft outcome blend (e.g., β=0.1).
+9. **Loss weights at 1.0**: Keep `HYZERO_{POLICY,VALUE,REWARD}_LOSS_WEIGHT` at default 1.0. Amplifying (e.g., value_weight=5.0) destabilizes the multi-head feedback loop and regresses play despite better training loss.
 10. **Reward head dead from class imbalance**: ~99% of reward targets are 0.0 (only terminal steps). MSE-optimal solution is 0.
 
 ## Related

@@ -95,13 +95,32 @@ Useful for debugging mismatches: run `--divide` on both our engine and Stockfish
 
 Find failing FEN, verify vs python-chess, add to appropriate test list (`EDGE_CASE_FENS`, `TERMINATION_FENS`) and Rust test in `board.rs`.
 
-## 6. Baseline & Validation
+## 6. Autoresearch Fresh-Start Protocol
 
-Baseline: **6.78** (commit d407281, 2026-04-14 — Dirichlet alpha fix: 0.03 → 0.3 for chess).
+When running multiple experiments with different hyperparameters (e.g., β sweep):
+
+```bash
+# Before each experiment:
+rm -f checkpoints/best*.pt  # Fresh start — no prior ladder state
+rm -f checkpoints/model_v*.pt  # Clear all checkpoints
+
+# Run experiment
+HYZERO_VALUE_OUTCOME_BETA=0.3 bash scripts/run_baseline.sh 1800
+```
+
+**Why**: The `best.pt` checkpoint from one β setting is ladder state (model version trained on different blend). If you keep it, the next β experiment starts biased. Always delete for fair comparison between independent experiments.
+
+**Exception**: Production validation (measuring stability of a known-good configuration) can reuse `best.pt` to continue from prior run.
+
+## 7. Baseline & Validation
+
+Current baseline: **11.63** (commit 294e63e, 2026-04-15, β=0.3, autoresearch winner)
+
+Previous baseline: **6.78** (commit d407281, 2026-04-14 — Dirichlet alpha fix: 0.03 → 0.3 for chess).
 
 The metric has ±1 point noise floor. **Rule**: Changes <1.5 points need 2–3 reruns; median reported.
 
-## 7. Metric Definition Precision
+## 8. Metric Definition Precision
 
 Score multipliers must count discrete events (e.g., promotions), not version tags or checkpoint indices. A single promotion can update a version tag by arbitrary amounts depending on producer/consumer rate ratios. Always verify metric extraction against ground truth:
 ```bash
@@ -118,5 +137,6 @@ See 2026-04-15 mistakes.md entry "Metric Inflation from Training-Version Tag vs 
 ## Related
 
 - [Chess Engine](chess-engine.md) — move generation, gotchas
-- [MCTS & Self-Play](mcts-selfplay.md) — pipeline
-- [Mistakes Log](mistakes.md) — past bugs
+- [MCTS & Self-Play](mcts-selfplay.md) — pipeline, closed-loop paradox
+- [Neural Networks](neural-networks.md) — β protocol, loss weight safety
+- [Mistakes Log](mistakes.md) — past bugs, including fast-training paradox (2026-04-15)

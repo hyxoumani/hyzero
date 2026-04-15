@@ -469,6 +469,47 @@ score=$(echo "8.55 - $policy_loss + $PROMOTIONS * 2.0 ..." | bc)
 
 ---
 
+## 2026-04-15: Fast-Training Paradox — Lower Loss Doesn't Mean Better Model
+
+**Date**: 2026-04-15
+**Agent**: Autoresearch session (11-experiment β sweep)
+**Domain**: Training dynamics (closed-loop self-play system)
+**Error Type**: Insight — non-obvious metric misalignment in multi-head learning
+
+**What happened**: An 11-experiment autoresearch sweep tested variations in loss weights, game counts, simulations, learning schedules, and the β outcome-blend parameter. Experiments with the *best* training metrics (policy loss 2.4–2.7) all **regressed catastrophically** in promotions and play quality. Meanwhile, the configuration with *worse* training loss (β=0.3, loss 3.40) achieved 4 promotions and peak score 11.63. Pattern confirmed across 6 independent experiments:
+
+| Config | policy_loss | promotions | score | note |
+|--------|---|---|---|---|
+| value_weight=5.0 | 2.70 (best) | 0 | 4.84 | Lost to Random |
+| games_per_side=6 | 2.41 (best) | 0 | 5.48 | Lost to Random |
+| β=0.4 | 2.63 | 1 | 6.80 | Weak play |
+| β=0.3 | 3.40 (worst) | 4 | **11.63 (winner)** | Strong play |
+| β=0.2 | 3.26 | 2 | 8.33 | OK play |
+
+**Root Cause**: MCTS self-play is a **closed-loop system**. The model generates training data (via MCTS value-guided search), trains on that data, and the updated model generates the next games. If the training speed increases (lower loss) without a corresponding improvement in MCTS quality, the effect is that the model trains on lower-quality training data. Here's why:
+
+1. Early in training, MCTS has poor value estimates (network untrained).
+2. If the policy trains too fast (faster loss reduction), the network converges to a locally-good policy before MCTS builds reliable value estimates.
+3. The policy learns to avoid costly moves, but it learned this from games where MCTS was making bad move choices due to unreliable values.
+4. Policy loss *looks good* because the network faithfully memorizes the MCTS visit-distribution targets. But those targets reflect whatever MCTS produced (which was poor).
+5. Result: excellent training loss, but when the model plays against a fixed opponent (eval), it loses because it learned bad play patterns.
+
+This is not a bug in code — it's a **metric misalignment**. The metric "policy loss" measures *local* learning (how well targets are fit) but not *global* play quality (whether the model actually improves). These are decoupled in this pipeline.
+
+**Comparison**: In supervised learning (fixed data), lower loss = better model. In RL with self-play, lower loss can mean "we're memorizing garbage more faithfully."
+
+**Key insight**: The β=0.3 winner had:
+- **Longer games** (151.6 moves vs ~106 for regressions) — more exploration time
+- **Higher policy loss** (3.40 vs 2.4–2.7) — slower convergence
+- **More promotions** (4) — actually better model
+- Why? Slower convergence → MCTS had time to refine value estimates → better training data → more wins.
+
+**Fix**: Always validate by promotions (real wins) and evaluation play. Training loss is a secondary signal. If loss decreases while promotions drop, you've hit the closed-loop paradox.
+
+**Escalation Tier**: Gotcha → documented in mcts-selfplay.md section "Closed-Loop Training Paradox" with evidence table and intuition. Rule candidate: "For any experiment, require promotions ≥ baseline AND score ≥ baseline. A drop in policy loss alone is not a win."
+
+---
+
 ## Escalation Tiers
 
 Mistakes escalate from manual avoidance to automation:
