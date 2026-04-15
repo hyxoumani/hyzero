@@ -99,11 +99,14 @@ subtask being worked on, and any test commands or error output from the most rec
 
 - **Name**: `training_score`
 - **Direction**: higher is better
-- **Formula**: `(8.55 - final_policy_loss) + (decisive_ratio * 10) - (avg_game_length / 100)`
+- **Formula**: `(8.55 - final_policy_loss) + (champion_version * HYZERO_CHAMPION_SCORE_WEIGHT) - (avg_game_length / 100)`
 - **Run command**: `bash scripts/run_baseline.sh 1800`
 - **Extract command**: `python3 -c "import json; print(json.load(open('logs/baseline_score.json'))['score'])"`
 - **Time budget**: `1800s`
-- **Baseline**: `4.78` (commit c1e5cdc, 2026-04-13)
-- **Components**: Policy loss decrease (network learning), decisive game ratio (tactical play), shorter games (efficiency)
+- **Baseline**: TBD — requires re-measurement after dual-model-eval landing (formula changed 2026-04-15)
+- **Previous baseline**: `6.78` (commit d407281, 2026-04-14, old formula with decisive_ratio)
+- **Components**: Policy loss decrease (network learning), champion promotions (ladder wins * weight), shorter games (efficiency)
+- **Env vars**: `HYZERO_CHAMPION_SCORE_WEIGHT` (default 2.0), `HYZERO_GAMES_PER_SIDE` (default 4), `HYZERO_PROMOTION_THRESHOLD` (default 0.55)
+- **Smoke test**: `bash scripts/smoke_dual_eval.sh` — 120s run with threshold=0.0, greps for `[eval] promoted`
 
 <!-- BOOTSTRAPPED: Do not remove this marker. /bootstrap uses it to detect re-runs. -->

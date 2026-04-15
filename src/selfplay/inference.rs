@@ -1,3 +1,5 @@
+use std::sync::{Arc, Mutex};
+
 use async_trait::async_trait;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{timeout, Duration};
@@ -54,6 +56,32 @@ impl InferenceBackend for RandomBackend {
             }
         }
 
+    }
+}
+
+/// A backend that delegates to a hot-swappable inner backend.
+///
+/// The eval task calls `swap()` during promotion to replace the champion's
+/// backend without restarting the batcher task. All other batch calls proceed
+/// concurrently without interference (the Mutex is held only during swap and
+/// for the duration of a single `evaluate_batch` call).
+pub struct SwappableBackend {
+    inner: Arc<Mutex<Box<dyn InferenceBackend>>>,
+}
+
+impl SwappableBackend {
+    /// Create a new `SwappableBackend` wrapping `initial`.
+    pub fn new(initial: Box<dyn InferenceBackend>) -> (Self, Arc<Mutex<Box<dyn InferenceBackend>>>) {
+        let shared = Arc::new(Mutex::new(initial));
+        let backend = SwappableBackend { inner: shared.clone() };
+        (backend, shared)
+    }
+}
+
+impl InferenceBackend for SwappableBackend {
+    fn evaluate_batch(&mut self, requests: Vec<InferenceRequest>) {
+        // Lock is released immediately after the call — safe for concurrent swaps.
+        self.inner.lock().expect("SwappableBackend lock poisoned").evaluate_batch(requests);
     }
 }
 

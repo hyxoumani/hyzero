@@ -4,9 +4,10 @@ set +m
 
 # ── Configuration ──────────────────────────────────────────────
 DURATION=${1:-1800}          # 30 minutes default
-EVAL_INTERVAL=${HYZERO_EVAL_INTERVAL:-25}
-EVAL_GAMES=${HYZERO_EVAL_GAMES:-10}
 EVAL_SIMS=${HYZERO_EVAL_SIMS:-25}
+GAMES_PER_SIDE=${HYZERO_GAMES_PER_SIDE:-4}
+PROMOTION_THRESHOLD=${HYZERO_PROMOTION_THRESHOLD:-0.55}
+CHAMPION_SCORE_WEIGHT=${HYZERO_CHAMPION_SCORE_WEIGHT:-2.0}
 BASELINE_FILE="logs/baseline_score.json"
 LOG_DIR="logs"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
@@ -16,18 +17,29 @@ mkdir -p "$LOG_DIR"
 
 echo "=== hyzero Baseline Run ==="
 echo "Duration: ${DURATION}s"
-echo "Eval: every ${EVAL_INTERVAL} versions × ${EVAL_GAMES} games × ${EVAL_SIMS} sims"
+echo "Eval: ${GAMES_PER_SIDE} games/side, threshold=${PROMOTION_THRESHOLD}, weight=${CHAMPION_SCORE_WEIGHT}"
 echo "Log: ${LOG_FILE}"
 
 # ── Build ──────────────────────────────────────────────────────
 echo "[1/5] Building release binary..."
 cargo build --release --bin selfplay 2>&1 | tail -1
 
+# ── Cleanup: remove ONLY training checkpoints, preserve champion files ─────
+# model_vNNNNNN.pt = training checkpoints → delete
+# best.pt and best_vNNN.pt = champion archive → PRESERVE across runs
+echo "[1b/5] Cleaning up old training checkpoints (preserving champion files)..."
+if [ -d checkpoints ]; then
+    find checkpoints -maxdepth 1 -name 'model_v*.pt' -delete 2>/dev/null || true
+    echo "  Retained champion files:"
+    ls checkpoints/best*.pt 2>/dev/null || echo "  (none yet)"
+fi
+
 # ── Run ────────────────────────────────────────────────────────
 echo "[2/5] Running selfplay for ${DURATION}s..."
-HYZERO_EVAL_INTERVAL=$EVAL_INTERVAL \
-HYZERO_EVAL_GAMES=$EVAL_GAMES \
 HYZERO_EVAL_SIMS=$EVAL_SIMS \
+HYZERO_GAMES_PER_SIDE=$GAMES_PER_SIDE \
+HYZERO_PROMOTION_THRESHOLD=$PROMOTION_THRESHOLD \
+HYZERO_CHAMPION_SCORE_WEIGHT=$CHAMPION_SCORE_WEIGHT \
 target/release/selfplay > "$LOG_FILE" 2>&1 &
 PID=$!
 sleep "$DURATION"
@@ -55,35 +67,44 @@ ERRORS=$(awk 'tolower($0) ~ /error|panic/{n++} END{print n+0}' "$LOG_FILE")
 CHECKPOINTS=$(awk '/\[py_training\].*Checkpoint saved/{n++} END{print n+0}' "$LOG_FILE")
 AVG_STEPS=$(awk '/\[py_training\].*Game received/{split($0,a,"received: "); split(a[2],b," "); sum+=b[1]; n++} END{if(n>0) printf "%.1f", sum/n; else print "0"}' "$LOG_FILE")
 
-# Extract eval metrics (use MAX decisive_ratio across all eval cycles)
-EVAL_CYCLES=$(awk '/\[eval\]/{n++} END{print n+0}' "$LOG_FILE")
-if [ "$EVAL_CYCLES" -gt 0 ]; then
+# Extract eval metrics from ladder_match lines
+# Format: [eval] v{v} cycle={c} ladder_wins={w} ... decisive_ratio is computed here
+EVAL_CYCLES=$(awk '/\[eval\].*ladder_match/{n++} END{print n+0}' "$LOG_FILE")
 
-    # For each eval line, print cycle_number decisive_ratio avg_length
-    EVAL_SUMMARY=$(awk '/\[eval\]/{
+# Extract promotions count and MAX champion_version
+PROMOTIONS=$(awk '/\[eval\].*promoted/{n++} END{print n+0}' "$LOG_FILE")
+MAX_CHAMPION_VERSION=$(awk '/\[eval\].*promoted/{
+    for (i=1; i<=NF; i++) {
+        if ($i ~ /^champion_version=/) { split($i, a, "="); v=a[2]+0; if(v>max) max=v }
+    }
+} END{print max+0}' "$LOG_FILE")
+MAX_CHAMPION_VERSION=${MAX_CHAMPION_VERSION:-0}
+
+if [ "$EVAL_CYCLES" -gt 0 ]; then
+    # Parse ladder_match lines: compute win_rate and avg game info from wins/draws/losses
+    EVAL_SUMMARY=$(awk '/\[eval\].*ladder_match/{
         cycle++
-        dr = "0.0"; al = "0.0"
+        wr = "0.0"
         for (i=1; i<=NF; i++) {
-            if ($i ~ /^decisive_ratio=/) { split($i, a, "="); dr = a[2] }
-            if ($i ~ /^avg_length=/)    { split($i, a, "="); al = a[2] }
+            if ($i ~ /^win_rate=/) { split($i, a, "="); wr = a[2] }
         }
-        print cycle, dr, al
+        print cycle, wr
     }' "$LOG_FILE")
 
-    # Report all cycles
-    echo "  Eval cycles detail:"
-    echo "$EVAL_SUMMARY" | while read -r cyc dr al; do
-        echo "    Cycle $cyc: decisive=${dr} avg_length=${al}"
+    echo "  Eval cycles (ladder_match):"
+    echo "$EVAL_SUMMARY" | while read -r cyc wr; do
+        echo "    Cycle $cyc: win_rate=${wr}"
     done
 
-    # Pick the line with max decisive_ratio
-    BEST_EVAL=$(echo "$EVAL_SUMMARY" | awk 'BEGIN{max=-1; best_dr="0.0"; best_al="0.0"} {
-        if ($2+0 > max) { max=$2+0; best_dr=$2; best_al=$3 }
-    } END{ print best_dr, best_al }')
-
-    DECISIVE_RATIO=$(echo "$BEST_EVAL" | awk '{print $1}')
-    EVAL_AVG_LEN=$(echo "$BEST_EVAL" | awk '{print $2}')
-    echo "  Using MAX: decisive=${DECISIVE_RATIO} avg_length=${EVAL_AVG_LEN}"
+    # Use the last win_rate as decisive proxy (higher win_rate = better)
+    # We use win_rate rather than decisive_ratio for the new ladder
+    LAST_WIN_RATE=$(echo "$EVAL_SUMMARY" | awk '{last=$2} END{print last+0}')
+    DECISIVE_RATIO=${LAST_WIN_RATE:-0.0}
+    # avg_length from game received logs
+    EVAL_AVG_LEN=$AVG_STEPS
+    echo "  Max champion_version: $MAX_CHAMPION_VERSION"
+    echo "  Promotions: $PROMOTIONS"
+    echo "  Last win_rate: $DECISIVE_RATIO"
 else
     EVAL_CYCLES=0
     DECISIVE_RATIO="0.0"
@@ -91,16 +112,17 @@ else
 fi
 
 # ── Compute composite score ────────────────────────────────────
-# score = (initial_loss - final_policy_loss) + (decisive_ratio * 10) - (avg_game_length / 100)
-# Higher is better. Rewards: fast loss decrease, decisive games, shorter games.
+# score = (8.55 - final_policy_loss) + (champion_version * CHAMPION_SCORE_WEIGHT) - (avg_length / 100)
+# Higher is better. Rewards: fast policy learning, promoted champions, shorter games.
 echo "[4/5] Computing score..."
 
 SCORE=$(awk "BEGIN {
     init_loss = 8.55;
     policy_loss = $LAST_POLICY;
-    decisive = $DECISIVE_RATIO;
+    champ_ver = $MAX_CHAMPION_VERSION;
+    weight = $CHAMPION_SCORE_WEIGHT;
     avg_len = $AVG_STEPS;
-    score = (init_loss - policy_loss) + (decisive * 10) - (avg_len / 100);
+    score = (init_loss - policy_loss) + (champ_ver * weight) - (avg_len / 100);
     printf \"%.4f\", score
 }")
 
@@ -108,17 +130,20 @@ GIT_COMMIT=$(git rev-parse --short HEAD)
 
 echo ""
 echo "=== Results ==="
-echo "  Games:           $GAMES"
-echo "  Training steps:  $TRAIN_STEPS"
-echo "  Loss:            $FIRST_LOSS → $LAST_LOSS"
-echo "  Policy loss:     $LAST_POLICY"
-echo "  Avg game length: $AVG_STEPS"
-echo "  Decisive ratio:  $DECISIVE_RATIO"
-echo "  Eval cycles:     $EVAL_CYCLES"
-echo "  Checkpoints:     $CHECKPOINTS"
-echo "  Errors:          $ERRORS"
+echo "  Games:               $GAMES"
+echo "  Training steps:      $TRAIN_STEPS"
+echo "  Loss:                $FIRST_LOSS → $LAST_LOSS"
+echo "  Policy loss:         $LAST_POLICY"
+echo "  Avg game length:     $AVG_STEPS"
+echo "  Eval cycles:         $EVAL_CYCLES"
+echo "  Promotions:          $PROMOTIONS"
+echo "  Max champion ver:    $MAX_CHAMPION_VERSION"
+echo "  Last win_rate:       $DECISIVE_RATIO"
+echo "  Champion weight:     $CHAMPION_SCORE_WEIGHT"
+echo "  Checkpoints:         $CHECKPOINTS"
+echo "  Errors:              $ERRORS"
 echo "  ────────────────────"
-echo "  SCORE:           $SCORE"
+echo "  SCORE:               $SCORE"
 echo ""
 
 # ── Write baseline ─────────────────────────────────────────────
@@ -149,17 +174,20 @@ cat > "$BASELINE_FILE" << EOF
         "last_loss": $LAST_LOSS,
         "last_policy_loss": $LAST_POLICY,
         "avg_game_length": $AVG_STEPS,
-        "decisive_ratio": $DECISIVE_RATIO,
+        "last_win_rate": $DECISIVE_RATIO,
         "eval_cycles": $EVAL_CYCLES,
+        "promotions": $PROMOTIONS,
+        "max_champion_version": $MAX_CHAMPION_VERSION,
         "checkpoints": $CHECKPOINTS,
         "errors": $ERRORS
     },
     "config": {
-        "eval_interval_steps": $EVAL_INTERVAL,
-        "eval_games": $EVAL_GAMES,
+        "games_per_side": $GAMES_PER_SIDE,
+        "promotion_threshold": $PROMOTION_THRESHOLD,
+        "champion_score_weight": $CHAMPION_SCORE_WEIGHT,
         "eval_sims": $EVAL_SIMS,
-        "concurrent_games": ${HYZERO_GAMES:-4},
-        "simulations": ${HYZERO_SIMS:-50}
+        "concurrent_games": ${HYZERO_GAMES:-5},
+        "simulations": ${HYZERO_SIMS:-40}
     },
     "log_file": "$LOG_FILE"
 }
