@@ -130,7 +130,31 @@ git revert --no-edit 0bf906f
 - Dual-model eval infra implemented and merged (commits 8387fce..4a73c05, 725fef4)
 - Value head soft outcome blend merged (commit 618ff46, 8856f20)
 - Cross-run champion loading merged (commit d419f08)
-- Run 1 baseline: 6.7634 with β=0.1 (value head alive for the first time)
-- Run 2 β=0.2 running (started 06:56, results expected ~30 min after start)
-- Queued: β=0.05, LR cosine, temperature smoothing
-- Known issue: ladder stalls at v1 within run — challenger and champion drift in parallel. Not yet addressed.
+- Metric formula corrected (commit 2a273d4): uses `promotions` count, not `max_champion_version`
+- Env-var tunable loss weights added (commit 17dce57, opt-in, defaults preserve behavior)
+- Cosine LR schedule added (commit a64e547, opt-in via HYZERO_LR_SCHEDULE=cosine)
+- Reward soft-blend γ added (commit 294e63e, opt-in via HYZERO_REWARD_OUTCOME_GAMMA)
+
+**11 experiments completed. Session CLOSED.**
+
+| # | Config | Score |
+|---|---|---|
+| 1 | β=0.1 defaults | 6.76 |
+| 2 | β=0.2 defaults | 8.33 |
+| 3 | β=0.3 defaults | **11.63** ← winner |
+| 4 | β=0.4 defaults | 6.80 |
+| 5 | β=0.5 defaults | 8.07 |
+| 6 | β=0.3 + value_weight=5 | 4.84 |
+| 7 | β=0.3 + num_sims=60 | 8.01 |
+| 8 | β=0.3 + eval_sims=15 | 5.69 |
+| 9 | β=0.3 + games_per_side=6 | 5.10 |
+| 10 | β=0.3 + LR_cosine(T_max=5000) | 6.47 |
+| 11 | β=0.3 + reward_γ=0.1 | 6.81 |
+
+**Findings:**
+- β=0.3 is Pareto-optimal; single-knob tuning space exhausted
+- Every deviation from β=0.3 defaults regressed ("fast training / low promotions" anti-pattern)
+- Root cause: MCTS depends on value head quality; amplifying training speed without matching MCTS quality degrades self-play data (garbage-in/garbage-out)
+- Baseline established: **11.63** (commit 294e63e)
+
+**Next recommended direction:** reward head fix (sparse bootstrap targets analogous to value β) combined with architecture scaling (capacity/depth). Single-knob changes in the current architecture appear unable to beat β=0.3 defaults. A combined fix (reward-blend + capacity + longer eval window) may unlock the next score range.

@@ -17,7 +17,8 @@ All runs 1800s unless noted. Metric: `(8.55 - policy_loss) + (champion_version *
 | 7 | β=0.3 + eval_sims=15 | 5.69 | 1 | 3.33 | 153.7 | noisy eval missed promotions |
 | 8 | β=0.3 + games_per_side=6 | 5.10 | 0 | 2.41 | 104.2 | best-ever policy loss, 0 promotions — same pattern as val_wt=5 |
 | 9 | β=0.3 + LR_cosine(T_max=5000) | 6.47 | 1 | 2.76 | 131.2 | decay too aggressive, LR near zero by end |
-| 10 | β=0.4 defaults | running | - | - | - | confirm β sweep peak |
+| 10 | β=0.4 defaults | 6.80 | 2 | 2.98 | 113.5 | regressed from β=0.3; β sweep peak confirmed at 0.3 |
+| 11 | β=0.3 + reward_γ=0.1 | 6.81 | 1 | 2.78 | 108.4 | soft reward blend; matched β=0.1 — no improvement |
 
 ## Decisions
 
@@ -160,3 +161,11 @@ Root cause: MCTS uses value estimates for pruning. When the value head is miscal
 
 - All β sweep runs must be compared only to other fresh-start runs.
 - Do not compare a fresh-start run score to a ratcheted-run score.
+
+## Final Session Verdict
+
+**Established baseline for future sessions: β=0.3, all other defaults, score 11.63 (commit 294e63e / main autoresearch/apr13)**.
+
+Protocol: `rm -f checkpoints/best*.pt && HYZERO_VALUE_OUTCOME_BETA=0.3 bash scripts/run_baseline.sh 1800`.
+
+11 experiments confirmed β=0.3 is Pareto-optimal. Every single-dimension deviation regresses. Next improvements likely require architectural change (capacity/depth) or a combined fix (e.g. reward-blend + capacity + longer eval) rather than single-knob tuning.
