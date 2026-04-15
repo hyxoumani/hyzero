@@ -8,40 +8,48 @@ use tokio::sync::{mpsc, watch};
 use hyzero::PrecomputedItems;
 use hyzero::py::{PyO3Backend, PyTrainingThread};
 use hyzero::selfplay::{
-    InferenceBatcher, BatcherConfig, ChannelEvaluator,
+    InferenceBatcher, BatcherConfig, ChannelEvaluator, SwappableBackend,
+    RandomBackend,
     SelfPlayConfig, SelfPlayCoordinator,
     EvaluationConfig, EvaluationTask,
+    ChampionStore,
 };
 use hyzero::selfplay::game_task::GameConfig;
+use hyzero::selfplay::evaluation::RandomEvaluator;
 use hyzero::mcts::evaluator::Evaluator;
 
 /// Runtime configuration for the self-play binary.
 /// All fields can be overridden via environment variables; falls back to Default.
 struct RunConfig {
     // Self-play
-    max_concurrent_games: usize,
+    /// Total game slots (1 reserved for eval, rest for self-play). Default 5.
+    total_games: usize,
     num_simulations: u32,
     temperature_moves: u32,
     // Batching
     max_batch_size: usize,
     batch_timeout_ms: u64,
-    // Evaluation
-    eval_interval_steps: u64,
-    eval_games: usize,
+    // Evaluation ladder
+    games_per_side: usize,
+    promotion_threshold: f64,
+    promotion_cooldown_games: usize,
     eval_num_simulations: u32,
+    champion_score_weight: f64,
 }
 
 impl Default for RunConfig {
     fn default() -> Self {
         Self {
-            max_concurrent_games: 4,
+            total_games: 5,
             num_simulations: 40,
             temperature_moves: 15,
             max_batch_size: 32,
             batch_timeout_ms: 10,
-            eval_interval_steps: 200,
-            eval_games: 10,
+            games_per_side: 4,
+            promotion_threshold: 0.55,
+            promotion_cooldown_games: 0,
             eval_num_simulations: 50,
+            champion_score_weight: 2.0,
         }
     }
 }
@@ -52,10 +60,10 @@ async fn main() {
 
     let defaults = RunConfig::default();
     let config = RunConfig {
-        max_concurrent_games: env::var("HYZERO_GAMES")
+        total_games: env::var("HYZERO_GAMES")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(defaults.max_concurrent_games),
+            .unwrap_or(defaults.total_games),
         num_simulations: env::var("HYZERO_SIMS")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -72,19 +80,30 @@ async fn main() {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(defaults.batch_timeout_ms),
-        eval_interval_steps: env::var("HYZERO_EVAL_INTERVAL")
+        games_per_side: env::var("HYZERO_GAMES_PER_SIDE")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(defaults.eval_interval_steps),
-        eval_games: env::var("HYZERO_EVAL_GAMES")
+            .unwrap_or(defaults.games_per_side),
+        promotion_threshold: env::var("HYZERO_PROMOTION_THRESHOLD")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(defaults.eval_games),
+            .unwrap_or(defaults.promotion_threshold),
+        promotion_cooldown_games: env::var("HYZERO_PROMOTION_COOLDOWN")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(defaults.promotion_cooldown_games),
         eval_num_simulations: env::var("HYZERO_EVAL_SIMS")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(defaults.eval_num_simulations),
+        champion_score_weight: env::var("HYZERO_CHAMPION_SCORE_WEIGHT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(defaults.champion_score_weight),
     };
+
+    // Derive self-play concurrency: N-1 slots for games, 1 for eval.
+    let selfplay_games = config.total_games.saturating_sub(1).max(1);
 
     // 1. Precompute move tables
     let precomputed = Arc::new(PrecomputedItems::begin_precomputing());
@@ -97,7 +116,6 @@ async fn main() {
     let (weight_tx, weight_rx) = watch::channel::<Option<Vec<u8>>>(None);
 
     // 3. Create the Python InferenceServer first so we can share it.
-    //    We need one reference for the backend and a clone for the weight loader.
     println!("[selfplay] Creating Python InferenceServer...");
     let (server, hidden_channels): (Py<PyAny>, usize) = Python::attach(|py| {
         let config_obj = PyModule::import(py, "hyzero.config")
@@ -129,27 +147,45 @@ async fn main() {
     // Clone the Py<PyAny> ref-counted handle for the weight loader task.
     let server_for_weights: Py<PyAny> = Python::attach(|py| server.clone_ref(py));
 
-    // 4. Spawn inference batcher with the PyO3Backend.
+    // 4. Spawn inference batcher with the PyO3Backend (for challenger / self-play).
     let backend = Box::new(PyO3Backend::new(server, hidden_channels));
     let batcher_config = BatcherConfig {
         max_batch_size: config.max_batch_size,
         batch_timeout_ms: config.batch_timeout_ms,
     };
-    let mut batcher = InferenceBatcher::new(inference_rx, backend, batcher_config);
+    let mut batcher = InferenceBatcher::new(inference_rx, backend, batcher_config.clone());
     tokio::spawn(async move {
         batcher.run().await;
         println!("[selfplay] Inference batcher stopped");
     });
 
-    // 5. Spawn training thread backed by the Python Trainer.
+    // 5. Create swappable champion backend handle for hot-swap on promotion.
+    //    The champion evaluator itself is stored in ChampionStore; the backend
+    //    handle allows the eval task to swap the champion's inference backend
+    //    (e.g., from Random to a loaded checkpoint) in a future iteration.
+    let initial_champion_backend: Box<dyn hyzero::selfplay::InferenceBackend> =
+        Box::new(RandomBackend::new(hidden_channels));
+    let (_swappable, champion_backend_handle) = SwappableBackend::new(initial_champion_backend);
+
+    // 6. Spawn training thread backed by the Python Trainer.
     println!("[selfplay] Creating Python Trainer...");
-    let mut training = PyTrainingThread::from_default_config("cpu", trajectory_rx, version_tx, weight_tx, None)
-        .expect("Failed to create PyTrainingThread — is hyzero Python package installed?");
+    let mut training = PyTrainingThread::from_default_config(
+        "cpu",
+        trajectory_rx,
+        version_tx,
+        weight_tx,
+        None,
+    )
+    .expect("Failed to create PyTrainingThread — is hyzero Python package installed?");
+
+    // Share the latest-checkpoint-path handle with the eval task.
+    let latest_ckpt_path = training.latest_checkpoint_path.clone();
+
     tokio::spawn(async move {
         training.run().await;
     });
 
-    // 6. Spawn weight loader: watch for new weights and push them into the InferenceServer.
+    // 7. Spawn weight loader: watch for new weights and push them into the InferenceServer.
     let mut weight_rx_task = weight_rx;
     tokio::spawn(async move {
         while weight_rx_task.changed().await.is_ok() {
@@ -166,14 +202,11 @@ async fn main() {
         println!("[selfplay] Weight loader stopped");
     });
 
-    // 7. Create evaluator and coordinator.
-    // Clone inference_tx so the evaluation task can also send requests to the same batcher.
-    let eval_inference_tx = inference_tx.clone();
-    let evaluator: Arc<dyn Evaluator> =
-        Arc::new(ChannelEvaluator::new(inference_tx));
+    // 8. Create evaluator and coordinator.
+    let evaluator: Arc<dyn Evaluator> = Arc::new(ChannelEvaluator::new(inference_tx.clone()));
 
     let selfplay_config = SelfPlayConfig {
-        max_concurrent_games: config.max_concurrent_games,
+        max_concurrent_games: selfplay_games,
         game_config: GameConfig {
             num_simulations: config.num_simulations,
             exploration_constant: 1.5,
@@ -189,20 +222,38 @@ async fn main() {
         selfplay_config,
     );
 
-    // 8. Spawn evaluation task — runs model-vs-itself games to track learning signal.
-    let eval_evaluator: Arc<dyn Evaluator> = Arc::new(ChannelEvaluator::new(eval_inference_tx));
+    // 9. Create the champion store. Initial champion = RandomEvaluator (version 0).
+    let initial_champion: Arc<dyn Evaluator> = Arc::new(RandomEvaluator);
+    let champion_store = Arc::new(ChampionStore::new(initial_champion, 5));
+
+    // 10. Spawn evaluation ladder task.
+    let challenger_eval: Arc<dyn Evaluator> = Arc::new(ChannelEvaluator::new(inference_tx));
     let eval_config = EvaluationConfig {
-        eval_interval_steps: config.eval_interval_steps,
-        eval_games: config.eval_games,
+        games_per_side: config.games_per_side,
+        promotion_threshold: config.promotion_threshold,
+        promotion_cooldown_games: config.promotion_cooldown_games,
         num_simulations: config.eval_num_simulations,
         temperature_moves: config.temperature_moves,
+        poll_interval_ms: 500,
+        champion_score_weight: config.champion_score_weight,
     };
-    let mut eval_task = EvaluationTask::new(
-        precomputed,
-        eval_evaluator,
-        version_rx,
-        eval_config,
+
+    println!(
+        "[selfplay] Starting evaluation ladder ({} games/side, threshold={:.2}, weight={:.1})",
+        config.games_per_side, config.promotion_threshold, config.champion_score_weight
     );
+
+    let eval_task_obj = EvaluationTask::new(
+        precomputed.clone(),
+        challenger_eval,
+        version_rx,
+        latest_ckpt_path,
+        champion_store,
+        eval_config,
+    )
+    .with_champion_backend(champion_backend_handle);
+
+    let mut eval_task = eval_task_obj;
     tokio::spawn(async move {
         eval_task.run().await;
         println!("[selfplay] Evaluation task stopped");
@@ -210,7 +261,7 @@ async fn main() {
 
     println!(
         "[selfplay] Starting self-play loop ({} concurrent games, {} sims/move)",
-        config.max_concurrent_games, config.num_simulations
+        selfplay_games, config.num_simulations
     );
     coordinator.run().await;
 }
