@@ -294,8 +294,14 @@ async fn main() {
 
     // 6. Spawn training thread backed by the Python Trainer.
     println!("[selfplay] Creating Python Trainer...");
+    let resume_ckpt: Option<&str> = if best_pt_path.exists() {
+        println!("[selfplay] Resuming training from checkpoints/best.pt");
+        Some("checkpoints/best.pt")
+    } else {
+        None
+    };
     let mut training =
-        PyTrainingThread::from_default_config(&device, trajectory_rx, version_tx, weight_tx, None)
+        PyTrainingThread::from_default_config(&device, trajectory_rx, version_tx, weight_tx, resume_ckpt)
             .expect("Failed to create PyTrainingThread — is hyzero Python package installed?");
 
     // Share the latest-checkpoint-path handle with the eval task.
