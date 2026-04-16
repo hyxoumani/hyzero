@@ -8,7 +8,7 @@ use crate::PrecomputedItems;
 use crate::data::{BoardObservation, HiddenState, Policy, ActionIndex, NUM_ACTIONS};
 use crate::mcts::evaluator::Evaluator;
 use crate::selfplay::champion::ChampionStore;
-use crate::selfplay::game_task::{GameConfig, play_game_dual};
+use crate::selfplay::game_task::{DualGameOutcome, GameConfig, play_game_dual};
 
 /// Evaluator that returns uniform policy and zero value — a pure random baseline.
 pub struct RandomEvaluator;
@@ -116,6 +116,62 @@ impl EvaluationTask {
         self
     }
 
+    /// Write a single game to `logs/eval_games.pgn` in standard PGN format.
+    fn write_pgn_game(
+        cycle: u64,
+        game_num: usize,
+        white_label: &str,
+        black_label: &str,
+        outcome: &DualGameOutcome,
+    ) {
+        use std::io::Write;
+        let result_str = if outcome.game_outcome > 0.5 {
+            "1-0"
+        } else if outcome.game_outcome < -0.5 {
+            "0-1"
+        } else {
+            "1/2-1/2"
+        };
+
+        let pgn_path = "logs/eval_games.pgn";
+        let _ = std::fs::create_dir_all("logs");
+
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(pgn_path)
+            .unwrap_or_else(|e| panic!("Failed to open {pgn_path}: {e}"));
+
+        writeln!(file, "[Event \"Eval Cycle {cycle} Game {game_num}\"]").ok();
+        writeln!(file, "[White \"{white_label}\"]").ok();
+        writeln!(file, "[Black \"{black_label}\"]").ok();
+        writeln!(file, "[Result \"{result_str}\"]").ok();
+        writeln!(file).ok();
+
+        // Write moves in PGN format: 1. e2e4 e7e5 2. d2d4 ...
+        let moves = &outcome.moves;
+        let mut pgn_line = String::new();
+        for (i, m) in moves.iter().enumerate() {
+            if i % 2 == 0 {
+                pgn_line.push_str(&format!("{}. ", i / 2 + 1));
+            }
+            pgn_line.push_str(m);
+            pgn_line.push(' ');
+            // Line wrap at ~80 chars
+            if pgn_line.len() > 75 {
+                writeln!(file, "{}", pgn_line.trim()).ok();
+                pgn_line.clear();
+            }
+        }
+        if !pgn_line.is_empty() {
+            pgn_line.push_str(result_str);
+            writeln!(file, "{}", pgn_line.trim()).ok();
+        } else {
+            writeln!(file, "{result_str}").ok();
+        }
+        writeln!(file).ok(); // Blank line between games
+    }
+
     /// Run the evaluation ladder loop.
     ///
     /// On each cycle:
@@ -159,7 +215,7 @@ impl EvaluationTask {
             let mut ladder_losses: usize = 0;
 
             // games_per_side games with challenger as White, champion as Black.
-            for _ in 0..gps {
+            for game_idx in 0..gps {
                 let outcome = play_game_dual(
                     self.precomputed.clone(),
                     self.challenger_evaluator.clone(),
@@ -167,6 +223,14 @@ impl EvaluationTask {
                     game_config.clone(),
                 )
                 .await;
+
+                Self::write_pgn_game(
+                    self.cycle,
+                    game_idx + 1,
+                    &format!("challenger v{challenger_version}"),
+                    &format!("champion v{champion_version}"),
+                    &outcome,
+                );
 
                 // game_outcome is White-perspective. Challenger = White.
                 match outcome.game_outcome {
@@ -178,7 +242,7 @@ impl EvaluationTask {
             }
 
             // games_per_side games with champion as White, challenger as Black.
-            for _ in 0..gps {
+            for game_idx in 0..gps {
                 let outcome = play_game_dual(
                     self.precomputed.clone(),
                     champion_eval.clone(),
@@ -186,6 +250,14 @@ impl EvaluationTask {
                     game_config.clone(),
                 )
                 .await;
+
+                Self::write_pgn_game(
+                    self.cycle,
+                    gps + game_idx + 1,
+                    &format!("champion v{champion_version}"),
+                    &format!("challenger v{challenger_version}"),
+                    &outcome,
+                );
 
                 // game_outcome is White-perspective. Champion = White, challenger = Black.
                 // Flip to get challenger-perspective.

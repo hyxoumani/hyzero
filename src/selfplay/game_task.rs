@@ -31,12 +31,14 @@ impl Default for GameConfig {
 }
 
 /// Outcome of a dual-evaluator game (White-perspective: +1 White, -1 Black, 0 Draw).
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct DualGameOutcome {
     /// Raw game outcome: +1 White wins, -1 Black wins, 0 draw.
     pub game_outcome: f32,
     /// How many moves the game lasted.
     pub num_moves: usize,
+    /// Move list in coordinate notation (e.g. "e2e4"), one entry per ply.
+    pub moves: Vec<String>,
 }
 
 /// Play a game with two distinct evaluators (challenger = White, champion = Black).
@@ -58,6 +60,7 @@ pub async fn play_game_dual(
     let mut turn_count: usize = 0;
     let mut side_to_move = Color::White;
     let mut history: VecDeque<BoardSnapshot> = VecDeque::with_capacity(7);
+    let mut moves: Vec<String> = Vec::new();
 
     const MAX_GAME_LENGTH: usize = 300;
 
@@ -112,6 +115,7 @@ pub async fn play_game_dual(
         let snapshot = board_to_snapshot(&board);
 
         let move_str = action_to_notation(action, side_to_move);
+        moves.push(move_str.clone());
         match board.process_move(&move_str, side_to_move, turn_count) {
             Ok(_) => {}
             Err(_) => break,
@@ -139,6 +143,7 @@ pub async fn play_game_dual(
     DualGameOutcome {
         game_outcome,
         num_moves: turn_count,
+        moves,
     }
 }
 
@@ -697,6 +702,7 @@ mod tests {
         let white_wins = DualGameOutcome {
             game_outcome: 1.0,
             num_moves: 40,
+            moves: vec![],
         };
         // When champion played Black, negate to get champion perspective
         let champion_perspective_when_black = -white_wins.game_outcome;
@@ -709,6 +715,7 @@ mod tests {
         let black_wins = DualGameOutcome {
             game_outcome: -1.0,
             num_moves: 40,
+            moves: vec![],
         };
         let champion_perspective_when_black = -black_wins.game_outcome;
         assert_eq!(
@@ -720,6 +727,7 @@ mod tests {
         let draw = DualGameOutcome {
             game_outcome: 0.0,
             num_moves: 300,
+            moves: vec![],
         };
         let champion_perspective_when_black = -draw.game_outcome;
         assert_eq!(
