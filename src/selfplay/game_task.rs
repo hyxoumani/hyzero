@@ -304,7 +304,7 @@ pub async fn play_game(
     }
 
     // Determine game outcome.
-    // For genuine checkmates/stalemates/draws: use rule-based result.
+    // For genuine checkmates: use rule-based result.
     // For 300-move cap: substitute material-based proxy (White-absolute convention).
     let game_outcome = match board.result() {
         GameResult::Checkmate(Color::White) => 1.0,
@@ -314,7 +314,14 @@ pub async fn play_game(
             let delta = compute_material_diff(&board);
             (delta as f32 / 5.0).tanh()
         }
-        _ => 0.0, // Stalemate, 50-move, insufficient material, threefold
+        _ => {
+            // Draw (stalemate, 50-move, repetition, insufficient material).
+            // Use material proxy instead of 0: teaches value head that material
+            // advantage is good even when the game draws — curriculum signal that
+            // prevents zero-target collapse from draw-heavy play.
+            let delta = compute_material_diff(&board);
+            (delta as f32 / 5.0).tanh()
+        }
     };
 
     // Set terminal reward on last step
