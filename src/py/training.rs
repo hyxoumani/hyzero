@@ -8,8 +8,8 @@ use pyo3::types::PyDict;
 use tokio::sync::{mpsc, watch};
 
 use crate::data::{
-    encode_action_spatial, GameTrajectory, ReplayBuffer, TrainingSample, NUM_ACTIONS,
-    NUM_OBS_PLANES,
+    encode_action_spatial, flip_action, flip_action_planes, flip_obs_planes, GameTrajectory,
+    ReplayBuffer, TrainingSample, NUM_ACTIONS, NUM_OBS_PLANES,
 };
 
 /// Flat arrays assembled from a batch of `TrainingSample` for Python training.
@@ -93,23 +93,40 @@ pub fn assemble_batch_arrays(samples: &[TrainingSample], unroll_k: usize) -> Bat
             unroll_k
         );
 
-        // observations[bi] = steps[0].observation.planes
+        // Color augmentation: randomly flip board perspective for 50% of samples.
+        let apply_flip: bool = rand::random();
+        let effective_outcome = if apply_flip { -sample.game_outcome } else { sample.game_outcome };
+
+        // observations[bi] = steps[0].observation.planes (optionally color-flipped)
         let obs_base = bi * obs_stride;
-        observations[obs_base..obs_base + obs_stride]
-            .copy_from_slice(&steps[0].observation.planes[..obs_stride]);
+        if apply_flip {
+            let flipped = flip_obs_planes(&steps[0].observation.planes[..obs_stride]);
+            observations[obs_base..obs_base + obs_stride].copy_from_slice(&flipped);
+        } else {
+            observations[obs_base..obs_base + obs_stride]
+                .copy_from_slice(&steps[0].observation.planes[..obs_stride]);
+        }
 
         // actions[bi, k] = encode_action_spatial(steps[k+1].action) for k in 0..K
         for k in 0..unroll_k {
-            let action_idx = steps[k + 1].action;
-            let encoded = encode_action_spatial(action_idx);
+            let raw_action_idx = steps[k + 1].action;
+            let encoded = encode_action_spatial(raw_action_idx);
+            let encoded = if apply_flip {
+                flip_action_planes(&encoded)
+            } else {
+                encoded
+            };
             let act_base = (bi * unroll_k + k) * act_stride;
             actions[act_base..act_base + act_stride].copy_from_slice(&encoded);
         }
 
         // Determine root side-to-move from observation plane 101 (1.0 = White).
         // steps[0] is the root position of this training sample.
+        // When flipped, plane 101 was already inverted by flip_obs_planes, so we
+        // read the same cell from the (possibly-flipped) observations buffer.
         // Computed once per sample; only ply_flip is per-k.
-        let root_white_to_move = steps[0].observation.planes[101 * 64] > 0.5;
+        let root_white_to_move_val = observations[obs_base + 101 * 64];
+        let root_white_to_move = root_white_to_move_val > 0.5;
         let root_side_sign: f32 = if root_white_to_move { 1.0 } else { -1.0 };
 
         // target_policies, target_values, target_rewards for k in 0..=K
@@ -119,10 +136,15 @@ pub fn assemble_batch_arrays(samples: &[TrainingSample], unroll_k: usize) -> Bat
             // Map visit_distribution entries to their action indices.
             // visit_distribution[i] corresponds to legal_moves[i], so write to
             // target_policies[pol_base + legal_moves[i]] rather than pol_base + i.
+            // When apply_flip, flip each action index before scattering.
             let pol_base = (bi * kp1 + k) * pol_stride;
             for (slot, &prob) in step.visit_distribution.iter().enumerate() {
                 if let Some(&action) = step.legal_moves.get(slot) {
-                    let idx = action as usize;
+                    let idx = if apply_flip {
+                        flip_action(action as usize)
+                    } else {
+                        action as usize
+                    };
                     if idx < pol_stride {
                         target_policies[pol_base + idx] = prob;
                     }
@@ -134,7 +156,7 @@ pub fn assemble_batch_arrays(samples: &[TrainingSample], unroll_k: usize) -> Bat
             // to the perspective of whoever is to move at step k.
             let ply_flip: f32 = if k % 2 == 0 { 1.0 } else { -1.0 };
             let outcome_in_step_perspective =
-                sample.game_outcome * root_side_sign * ply_flip;
+                effective_outcome * root_side_sign * ply_flip;
 
             // Soft blend: 90% MCTS Q (preserves learned signal), 10% outcome
             // (injects outcome-aligned gradient to break self-referential bootstrap).
@@ -147,9 +169,14 @@ pub fn assemble_batch_arrays(samples: &[TrainingSample], unroll_k: usize) -> Bat
         }
 
         // legal_masks[bi]: derive from steps[0].legal_moves (root position only)
+        // When apply_flip, flip each legal move index before marking.
         let mask_base = bi * pol_stride;
         for &action in &steps[0].legal_moves {
-            let idx = action as usize;
+            let idx = if apply_flip {
+                flip_action(action as usize)
+            } else {
+                action as usize
+            };
             if idx < pol_stride {
                 legal_masks[mask_base + idx] = true;
             }
@@ -579,6 +606,8 @@ mod tests {
 
     #[test]
     fn test_batch_assembly_maps_visit_dist_to_action_indices() {
+        use crate::data::encoding::flip_action;
+
         let k = 2usize;
         let kp1 = k + 1;
 
@@ -606,28 +635,46 @@ mod tests {
         // Total policy entries: B=1 * (K+1) * NUM_ACTIONS
         assert_eq!(arrays.target_policies.len(), kp1 * NUM_ACTIONS);
 
-        // Step 0's policy: probability mass at the correct action indices
-        assert!((arrays.target_policies[10] - 0.2).abs() < 1e-6, "action 10 should be 0.2");
-        assert!((arrays.target_policies[42] - 0.5).abs() < 1e-6, "action 42 should be 0.5");
-        assert!((arrays.target_policies[100] - 0.3).abs() < 1e-6, "action 100 should be 0.3");
+        // Color augmentation may or may not have been applied (random).
+        // Determine which case by checking where 0.5 probability (action 42) landed.
+        // Under no-flip: idx=42. Under flip: idx=flip_action(42).
+        let flipped_42 = flip_action(42);
+        let did_flip = (arrays.target_policies[42] - 0.5).abs() > 1e-6;
 
-        // All other positions should be 0.0
-        for i in 0..NUM_ACTIONS {
-            if i != 10 && i != 42 && i != 100 {
-                assert_eq!(
-                    arrays.target_policies[i], 0.0,
-                    "entry {i} should be 0.0, got {}",
-                    arrays.target_policies[i]
-                );
-            }
+        if did_flip {
+            // Flipped path: each action index was mirrored
+            let idx_10 = flip_action(10);
+            let idx_42 = flipped_42;
+            let idx_100 = flip_action(100);
+            assert!((arrays.target_policies[idx_10] - 0.2).abs() < 1e-6,
+                "flipped: action flip(10)={idx_10} should be 0.2");
+            assert!((arrays.target_policies[idx_42] - 0.5).abs() < 1e-6,
+                "flipped: action flip(42)={idx_42} should be 0.5");
+            assert!((arrays.target_policies[idx_100] - 0.3).abs() < 1e-6,
+                "flipped: action flip(100)={idx_100} should be 0.3");
+            // Legal masks at flipped positions
+            assert!(arrays.legal_masks[idx_10], "legal_masks[flip(10)] should be true");
+            assert!(arrays.legal_masks[idx_42], "legal_masks[flip(42)] should be true");
+            assert!(arrays.legal_masks[idx_100], "legal_masks[flip(100)] should be true");
+        } else {
+            // Non-flipped path: original indices
+            assert!((arrays.target_policies[10] - 0.2).abs() < 1e-6, "action 10 should be 0.2");
+            assert!((arrays.target_policies[42] - 0.5).abs() < 1e-6, "action 42 should be 0.5");
+            assert!((arrays.target_policies[100] - 0.3).abs() < 1e-6, "action 100 should be 0.3");
+            // Legal masks at original positions
+            assert!(arrays.legal_masks[10], "legal_masks[10] should be true");
+            assert!(arrays.legal_masks[42], "legal_masks[42] should be true");
+            assert!(arrays.legal_masks[100], "legal_masks[100] should be true");
+            assert!(!arrays.legal_masks[0], "legal_masks[0] should be false");
+            assert!(!arrays.legal_masks[50], "legal_masks[50] should be false");
         }
 
-        // Legal mask for step 0 should have true only at positions 10, 42, 100
-        assert!(arrays.legal_masks[10], "legal_masks[10] should be true");
-        assert!(arrays.legal_masks[42], "legal_masks[42] should be true");
-        assert!(arrays.legal_masks[100], "legal_masks[100] should be true");
-        assert!(!arrays.legal_masks[0], "legal_masks[0] should be false");
-        assert!(!arrays.legal_masks[50], "legal_masks[50] should be false");
+        // In both cases: exactly 3 non-zero entries in policy for step 0, and total mass ~ 1.0
+        let step0_policy = &arrays.target_policies[..NUM_ACTIONS];
+        let nonzero_count = step0_policy.iter().filter(|&&v| v > 0.0).count();
+        assert_eq!(nonzero_count, 3, "exactly 3 non-zero policy entries expected");
+        let total_mass: f32 = step0_policy.iter().sum();
+        assert!((total_mass - 1.0).abs() < 1e-5, "policy mass should sum to 1.0, got {total_mass}");
     }
 
     /// Simulate the checkpoint window pruning logic without needing Python.

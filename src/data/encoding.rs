@@ -279,6 +279,119 @@ pub fn num_actions() -> usize {
     NUM_ACTIONS
 }
 
+// ─── Color-augmentation helpers ───────────────────────────────────────────────
+
+/// Flip a square index rank-wise: rank 0↔7, 1↔6, etc.
+///
+/// `sq = rank * 8 + file`; the flipped square is `(7 - rank) * 8 + file`.
+pub(crate) fn flip_sq(sq: usize) -> usize {
+    (7 - sq / 8) * 8 + (sq % 8)
+}
+
+/// Flip a base action index (`from_sq * 64 + to_sq`) under rank mirror.
+pub(crate) fn flip_base_action(a: usize) -> usize {
+    flip_sq(a / 64) * 64 + flip_sq(a % 64)
+}
+
+/// Flip any action index (handles both base 0..4095 and underpromo 4096..4671).
+///
+/// Underpromotion indices are invariant — they encode files, not ranks, and the
+/// rank is inferred from color at decode time; so the same index is used for
+/// both White and Black underpromotions.
+pub(crate) fn flip_action(action: usize) -> usize {
+    if action < NUM_BASE_ACTIONS {
+        flip_base_action(action)
+    } else {
+        action
+    }
+}
+
+/// Rank-mirror a single 64-element plane block: read from `src`, write to `dst`.
+fn rank_mirror_plane(src: &[f32], dst: &mut [f32]) {
+    for sq in 0..64 {
+        dst[(7 - sq / 8) * 8 + (sq % 8)] = src[sq];
+    }
+}
+
+/// Flip all 103 observation planes for color augmentation.
+///
+/// Produces a new 6592-element Vec representing the board from the opponent's
+/// perspective:
+/// - For each of the 8 history groups (12 planes each): swap White (0-5) ↔ Black
+///   (6-11) within the group, then rank-mirror every 64-element plane.
+/// - Castling planes: 96↔98 and 97↔99 (constant-fill, no rank mirror needed).
+/// - En-passant plane 100: rank-mirrored.
+/// - Side-to-move plane 101: `1.0 - value` for every square.
+/// - Halfmove clock plane 102: unchanged.
+pub(crate) fn flip_obs_planes(obs: &[f32]) -> Vec<f32> {
+    debug_assert_eq!(
+        obs.len(),
+        103 * 64,
+        "flip_obs_planes: expected 103*64 elements"
+    );
+    let mut out = vec![0.0f32; 103 * 64];
+
+    // 8 history groups × 12 planes each (current + 7 past)
+    for group in 0..8usize {
+        let base = group * 12;
+        // Within each group: swap White piece planes (0-5) ↔ Black piece planes (6-11),
+        // and rank-mirror each plane.
+        for pt in 0..6usize {
+            // White side goes to Black slot, rank-mirrored
+            let src_w = &obs[(base + pt) * 64..(base + pt) * 64 + 64];
+            let dst_b = &mut out[(base + 6 + pt) * 64..(base + 6 + pt) * 64 + 64];
+            rank_mirror_plane(src_w, dst_b);
+
+            // Black side goes to White slot, rank-mirrored
+            let src_b_start = (base + 6 + pt) * 64;
+            let dst_w_start = (base + pt) * 64;
+            // Avoid overlapping borrows by using index-based copy
+            for sq in 0..64 {
+                out[dst_w_start + (7 - sq / 8) * 8 + (sq % 8)] = obs[src_b_start + sq];
+            }
+        }
+    }
+
+    // Castling planes: constant-fill, swap in pairs (no rank mirror needed)
+    // 96 (W kingside) ↔ 98 (B kingside)
+    // 97 (W queenside) ↔ 99 (B queenside)
+    out[96 * 64..97 * 64].copy_from_slice(&obs[98 * 64..99 * 64]);
+    out[97 * 64..98 * 64].copy_from_slice(&obs[99 * 64..100 * 64]);
+    out[98 * 64..99 * 64].copy_from_slice(&obs[96 * 64..97 * 64]);
+    out[99 * 64..100 * 64].copy_from_slice(&obs[97 * 64..98 * 64]);
+
+    // Plane 100: en passant target — rank-mirror the one-hot square
+    let ep_src = &obs[100 * 64..101 * 64];
+    let ep_dst = &mut out[100 * 64..101 * 64];
+    rank_mirror_plane(ep_src, ep_dst);
+
+    // Plane 101: side-to-move — flip constant fill (all-1.0 → all-0.0, and vice versa)
+    for i in 0..64 {
+        out[101 * 64 + i] = 1.0 - obs[101 * 64 + i];
+    }
+
+    // Plane 102: halfmove clock — unchanged
+    out[102 * 64..103 * 64].copy_from_slice(&obs[102 * 64..103 * 64]);
+
+    out
+}
+
+/// Flip the 3-plane (192-element) spatial action encoding under rank mirror.
+///
+/// Plane 0 (source) and Plane 1 (dest): rank-mirror the one-hot square.
+/// Plane 2 (promotion flag): constant-fill, unchanged.
+pub(crate) fn flip_action_planes(planes: &[f32; 192]) -> [f32; 192] {
+    let mut out = [0.0f32; 192];
+    for sq in 0..64 {
+        let fsq = flip_sq(sq);
+        out[fsq] = planes[sq]; // plane 0: source
+        out[64 + fsq] = planes[64 + sq]; // plane 1: dest
+    }
+    // Plane 2: promotion flag — copy as-is (constant fill)
+    out[128..192].copy_from_slice(&planes[128..192]);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -583,6 +696,166 @@ mod tests {
                     "white piece plane {plane} sq {sq} mismatch"
                 );
             }
+        }
+    }
+
+    // ── Color-augmentation helper tests ──────────────────────────────────────
+
+    #[test]
+    fn test_flip_sq_known_squares() {
+        // A1 (sq 0, rank 0, file 0) → A8 (sq 56, rank 7, file 0)
+        assert_eq!(flip_sq(0), 56, "A1 should flip to A8");
+        // H1 (sq 7, rank 0, file 7) → H8 (sq 63, rank 7, file 7)
+        assert_eq!(flip_sq(7), 63, "H1 should flip to H8");
+        // H8 (sq 63) → H1 (sq 7)
+        assert_eq!(flip_sq(63), 7, "H8 should flip to H1");
+        // flip is its own inverse for all squares
+        for sq in 0..64 {
+            assert_eq!(
+                flip_sq(flip_sq(sq)),
+                sq,
+                "flip_sq round-trip failed at sq {sq}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_flip_action_base_e2e4() {
+        // e2e4: from=E2=sq12 (rank1,fileE=4), to=E4=sq28 (rank3,fileE=4)
+        // action = 12*64+28 = 796
+        // After flip: from_flip = flip_sq(12) = (7-1)*8+4 = 52 (E7),
+        //             to_flip   = flip_sq(28) = (7-3)*8+4 = 36 (E5)
+        // flipped action = 52*64+36 = 3364
+        let action = 12 * 64 + 28;
+        let flipped = flip_action(action);
+        assert_eq!(flipped, flip_sq(12) * 64 + flip_sq(28));
+        assert_eq!(flip_sq(12), 52);
+        assert_eq!(flip_sq(28), 36);
+        assert_eq!(flipped, 52 * 64 + 36);
+    }
+
+    #[test]
+    fn test_flip_action_underpromo_invariant() {
+        // Underpromotion actions (>= 4096) must be unchanged
+        assert_eq!(flip_action(4096), 4096);
+        assert_eq!(flip_action(4671), 4671);
+    }
+
+    #[test]
+    fn test_flip_action_base_is_own_inverse() {
+        // flip_action is its own inverse for all base actions
+        for a in 0..NUM_BASE_ACTIONS {
+            assert_eq!(
+                flip_action(flip_action(a)),
+                a,
+                "flip_action round-trip failed at action {a}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_flip_obs_planes_round_trip() {
+        // Build a non-trivial observation: put a white pawn bit at A2 (plane 0, sq 8)
+        // and set side-to-move to White (plane 101 = all-1.0).
+        let mut obs = vec![0.0f32; 103 * 64];
+        obs[0 * 64 + 8] = 1.0; // White pawn at A2
+        for sq in 0..64 {
+            obs[101 * 64 + sq] = 1.0; // White to move
+        }
+
+        let flipped = flip_obs_planes(&obs);
+        let round_trip = flip_obs_planes(&flipped);
+
+        for i in 0..103 * 64 {
+            assert!(
+                (round_trip[i] - obs[i]).abs() < 1e-6,
+                "round-trip mismatch at index {i}: expected {}, got {}",
+                obs[i],
+                round_trip[i]
+            );
+        }
+    }
+
+    #[test]
+    fn test_flip_obs_planes_piece_swap() {
+        // White pawn at A2: plane 0 (White Pawn), sq 8 (rank 1, file 0)
+        // After color flip:
+        //   - The piece becomes a Black pawn in plane 6 (Black Pawn)
+        //   - A2 rank-mirrors to A7: sq = (7-1)*8+0 = 48
+        let mut obs = vec![0.0f32; 103 * 64];
+        obs[0 * 64 + 8] = 1.0; // White pawn at A2 (plane 0, sq 8)
+
+        let flipped = flip_obs_planes(&obs);
+
+        // Black pawn at A7 should be set: plane 6, sq 48
+        assert!(
+            (flipped[6 * 64 + 48] - 1.0).abs() < 1e-6,
+            "expected Black pawn at A7 (plane 6, sq 48) after flip, got {}",
+            flipped[6 * 64 + 48]
+        );
+        // White pawn plane should be all-zero after flip
+        for sq in 0..64 {
+            assert_eq!(
+                flipped[0 * 64 + sq],
+                0.0,
+                "White pawn plane should be zero after flip at sq {sq}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_flip_obs_planes_side_to_move_flips() {
+        // White to move (plane 101 = all-1.0) → after flip → Black to move (all-0.0)
+        let mut obs = vec![0.0f32; 103 * 64];
+        for sq in 0..64 {
+            obs[101 * 64 + sq] = 1.0;
+        }
+        let flipped = flip_obs_planes(&obs);
+        for sq in 0..64 {
+            assert!(
+                flipped[101 * 64 + sq].abs() < 1e-6,
+                "side-to-move plane should be 0.0 after flip at sq {sq}"
+            );
+        }
+
+        // Black to move (plane 101 = all-0.0) → after flip → White to move (all-1.0)
+        let obs_black = vec![0.0f32; 103 * 64];
+        let flipped2 = flip_obs_planes(&obs_black);
+        for sq in 0..64 {
+            assert!(
+                (flipped2[101 * 64 + sq] - 1.0).abs() < 1e-6,
+                "side-to-move plane should be 1.0 after flip-from-black at sq {sq}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_flip_obs_planes_castling_swap() {
+        // Set White kingside (plane 96) and Black queenside (plane 99)
+        let mut obs = vec![0.0f32; 103 * 64];
+        for sq in 0..64 {
+            obs[96 * 64 + sq] = 1.0; // W kingside
+            obs[99 * 64 + sq] = 1.0; // B queenside
+        }
+        let flipped = flip_obs_planes(&obs);
+        // W kingside (96) → B kingside (98)
+        for sq in 0..64 {
+            assert!(
+                (flipped[98 * 64 + sq] - 1.0).abs() < 1e-6,
+                "B kingside should be set after flip (sq {sq})"
+            );
+            // W kingside slot should now be 0 (was from B kingside which was 0)
+            assert!(
+                flipped[96 * 64 + sq].abs() < 1e-6,
+                "W kingside slot should be 0 after flip (sq {sq})"
+            );
+        }
+        // B queenside (99) → W queenside (97)
+        for sq in 0..64 {
+            assert!(
+                (flipped[97 * 64 + sq] - 1.0).abs() < 1e-6,
+                "W queenside should be set after flip (sq {sq})"
+            );
         }
     }
 }
