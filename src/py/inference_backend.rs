@@ -339,8 +339,12 @@ mod tests {
         backend.evaluate_batch(vec![req]);
 
         let (hs, policy, value) = rx.try_recv().expect("no reply received");
-        assert_eq!(hs.channels, 64, "hidden_channels should be 64");
-        assert_eq!(hs.data.len(), 64 * 64, "hidden data length should be 64*64");
+        assert_eq!(hs.channels, 128, "hidden_channels should be 128");
+        assert_eq!(
+            hs.data.len(),
+            128 * 64,
+            "hidden data length should be 128*64"
+        );
         assert_eq!(
             policy.len(),
             NUM_ACTIONS,
@@ -371,11 +375,11 @@ mod tests {
         backend.evaluate_batch(vec![req]);
 
         let (hs_out, reward, policy, value) = rx.try_recv().expect("no reply received");
-        assert_eq!(hs_out.channels, 64, "hidden_channels should be 64");
+        assert_eq!(hs_out.channels, 128, "hidden_channels should be 128");
         assert_eq!(
             hs_out.data.len(),
-            64 * 64,
-            "hidden data length should be 64*64"
+            128 * 64,
+            "hidden data length should be 128*64"
         );
         assert_eq!(
             policy.len(),
