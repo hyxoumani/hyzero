@@ -5,6 +5,7 @@ use crate::data::{
     board_to_snapshot, encode_board, move_to_action, ActionIndex, BoardSnapshot, GameTrajectory,
     StepRecord, NUM_BASE_ACTIONS,
 };
+use crate::data::encoding::flip_action;
 use crate::game::board::GameResult;
 use crate::game::{GameBoard, Move, Player};
 use crate::mcts::evaluator::Evaluator;
@@ -80,7 +81,17 @@ pub async fn play_game_dual(
 
         let hist_slice = history.make_contiguous();
         let observation = encode_board(&board, side_to_move, hist_slice);
-        let legal_actions = get_legal_moves(&board, side_to_move);
+        let raw_legal = get_legal_moves(&board, side_to_move);
+
+        // Flip legal actions to current-player perspective for Black.
+        let legal_actions: Vec<ActionIndex> = if side_to_move == Color::Black {
+            raw_legal
+                .iter()
+                .map(|&a| flip_action(a as usize) as ActionIndex)
+                .collect()
+        } else {
+            raw_legal
+        };
 
         if legal_actions.is_empty() {
             break;
@@ -110,11 +121,18 @@ pub async fn play_game_dual(
         tree.run_simulations(evaluator.as_ref()).await;
 
         // Use near-greedy temperature for eval games (no exploration needed).
-        let action = tree.select_action(0.01);
+        let selected_action = tree.select_action(0.01);
+
+        // Flip action back to absolute coordinates before applying to the board.
+        let absolute_action = if side_to_move == Color::Black {
+            flip_action(selected_action as usize) as ActionIndex
+        } else {
+            selected_action
+        };
 
         let snapshot = board_to_snapshot(&board);
 
-        let move_str = action_to_notation(action, side_to_move);
+        let move_str = action_to_notation(absolute_action, side_to_move);
         moves.push(move_str.clone());
         match board.process_move(&move_str, side_to_move, turn_count) {
             Ok(_) => {}
@@ -232,7 +250,17 @@ pub async fn play_game(
 
         let hist_slice = history.make_contiguous();
         let observation = encode_board(&board, side_to_move, hist_slice);
-        let legal_actions = get_legal_moves(&board, side_to_move);
+        let raw_legal = get_legal_moves(&board, side_to_move);
+
+        // Flip legal actions to current-player perspective for Black.
+        let legal_actions: Vec<ActionIndex> = if side_to_move == Color::Black {
+            raw_legal
+                .iter()
+                .map(|&a| flip_action(a as usize) as ActionIndex)
+                .collect()
+        } else {
+            raw_legal
+        };
 
         if legal_actions.is_empty() {
             break;
@@ -267,12 +295,21 @@ pub async fn play_game(
         } else {
             0.01
         };
-        let action = tree.select_action(temperature);
+        // selected_action is in current-player (flipped) coordinate space for Black.
+        let selected_action = tree.select_action(temperature);
 
-        // Record step before applying move
+        // Flip action back to absolute coordinates before applying to the board.
+        let absolute_action = if side_to_move == Color::Black {
+            flip_action(selected_action as usize) as ActionIndex
+        } else {
+            selected_action
+        };
+
+        // Record step — store selected_action (current-player perspective) in trajectory.
+        // legal_moves also stored in current-player perspective.
         steps.push(StepRecord {
             observation,
-            action,
+            action: selected_action,
             visit_distribution,
             root_value,
             reward: 0.0, // Set terminal reward after game ends
@@ -282,8 +319,8 @@ pub async fn play_game(
         // Snapshot position before applying the move (for history encoding on next turn)
         let snapshot = board_to_snapshot(&board);
 
-        // Convert action to move notation and apply
-        let move_str = action_to_notation(action, side_to_move);
+        // Convert absolute action to move notation and apply
+        let move_str = action_to_notation(absolute_action, side_to_move);
         match board.process_move(&move_str, side_to_move, turn_count) {
             Ok(_) => {}
             Err(_) => {
@@ -388,9 +425,14 @@ fn action_to_notation(action: ActionIndex, color: Color) -> String {
     let to_file = (b'a' + to_sq % 8) as char;
     let to_rank = (b'1' + to_sq / 8) as char;
 
-    // Add queen promotion suffix if pawn reaches back rank
+    // Only add queen promotion suffix for moves from penultimate rank to back rank.
+    // This avoids erroneously appending 'q' to king/rook moves that happen to land
+    // on rank 1 or 8 (e.g. castling, back-rank rook moves).
+    let from_rank_num = from_sq / 8;
     let to_rank_num = to_sq / 8;
-    if to_rank_num == 7 || to_rank_num == 0 {
+    let is_promotion = (color == Color::White && from_rank_num == 6 && to_rank_num == 7)
+        || (color == Color::Black && from_rank_num == 1 && to_rank_num == 0);
+    if is_promotion {
         format!("{}{}{}{}q", from_file, from_rank, to_file, to_rank)
     } else {
         format!("{}{}{}{}", from_file, from_rank, to_file, to_rank)

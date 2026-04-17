@@ -18,50 +18,80 @@ pub fn encode_board(
 ) -> BoardObservation {
     let mut obs = BoardObservation::default();
 
-    // Planes 0-11: Current position pieces
-    // Planes 0-5:  White pieces (Pawn=0, Knight=1, Bishop=2, Rook=3, Queen=4, King=5)
+    let is_black = side_to_move == Color::Black;
+
+    // Current-player perspective (AlphaZero/MuZero convention):
+    // Planes 0-5:  Current player's pieces
+    // Planes 6-11: Opponent's pieces
+    // When Black to move, rank-mirror all square indices and swap which player's
+    // bitboards go into each plane group.
+    let (my_player, opp_player) = if is_black {
+        (&board.player2, &board.player1)
+    } else {
+        (&board.player1, &board.player2)
+    };
+
+    // Planes 0-5: current player's pieces
     for pt in 0..6 {
-        let bb = board.player1.pieces_bb[pt];
+        let bb = my_player.pieces_bb[pt];
         for sq in BitIterator::new(bb) {
-            obs.planes[pt * 64 + sq] = 1.0;
+            let esq = if is_black { flip_sq(sq) } else { sq };
+            obs.planes[pt * 64 + esq] = 1.0;
         }
     }
-    // Planes 6-11: Black pieces
+    // Planes 6-11: opponent's pieces
     for pt in 0..6 {
-        let bb = board.player2.pieces_bb[pt];
+        let bb = opp_player.pieces_bb[pt];
         for sq in BitIterator::new(bb) {
-            obs.planes[(pt + 6) * 64 + sq] = 1.0;
+            let esq = if is_black { flip_sq(sq) } else { sq };
+            obs.planes[(pt + 6) * 64 + esq] = 1.0;
         }
     }
 
     // Planes 12-95: Past positions (up to 7), each encoded as 12 piece planes.
     // history[0] is the oldest position provided; we place it at the earliest available slot.
     // If history has N entries (N <= 7), they fill planes 12..12+N*12; remainder is zeros.
+    // Same perspective flip applied: current player's pieces in planes 0-5 of each slot.
     for (i, snap) in history.iter().enumerate() {
         let plane_base = (1 + i) * 12; // position slot 1..=7
-                                       // White pieces (6 planes)
-        for pt in 0..6 {
-            let bb = snap.white_pieces_bb[pt];
+        let (my_bb, opp_bb) = if is_black {
+            (&snap.black_pieces_bb, &snap.white_pieces_bb)
+        } else {
+            (&snap.white_pieces_bb, &snap.black_pieces_bb)
+        };
+        // Current player's pieces (6 planes)
+        for (pt, &bb) in my_bb.iter().enumerate() {
             for sq in BitIterator::new(bb) {
-                obs.planes[(plane_base + pt) * 64 + sq] = 1.0;
+                let esq = if is_black { flip_sq(sq) } else { sq };
+                obs.planes[(plane_base + pt) * 64 + esq] = 1.0;
             }
         }
-        // Black pieces (6 planes)
-        for pt in 0..6 {
-            let bb = snap.black_pieces_bb[pt];
+        // Opponent's pieces (6 planes)
+        for (pt, &bb) in opp_bb.iter().enumerate() {
             for sq in BitIterator::new(bb) {
-                obs.planes[(plane_base + 6 + pt) * 64 + sq] = 1.0;
+                let esq = if is_black { flip_sq(sq) } else { sq };
+                obs.planes[(plane_base + 6 + pt) * 64 + esq] = 1.0;
             }
         }
     }
 
-    // Planes 96-99: Castling rights (current position only — constant planes)
-    let castling = [
-        board.white_kingside,
-        board.white_queenside,
-        board.black_kingside,
-        board.black_queenside,
-    ];
+    // Planes 96-99: Castling rights — current player's castling in 96-97, opponent's in 98-99.
+    let (p1_ks, p1_qs, p2_ks, p2_qs) = if is_black {
+        (
+            board.black_kingside,
+            board.black_queenside,
+            board.white_kingside,
+            board.white_queenside,
+        )
+    } else {
+        (
+            board.white_kingside,
+            board.white_queenside,
+            board.black_kingside,
+            board.black_queenside,
+        )
+    };
+    let castling = [p1_ks, p1_qs, p2_ks, p2_qs];
     for (i, &has_right) in castling.iter().enumerate() {
         if has_right {
             let plane_offset = (96 + i) * 64;
@@ -71,12 +101,15 @@ pub fn encode_board(
         }
     }
 
-    // Plane 100: En passant target (one-hot, current position only)
+    // Plane 100: En passant target (one-hot, current position only).
+    // Flip the EP square when Black to keep it in current-player coordinate space.
     if let Some(ep_sq) = board.en_passant_target {
-        obs.planes[100 * 64 + ep_sq] = 1.0;
+        let encoded_ep = if is_black { flip_sq(ep_sq) } else { ep_sq };
+        obs.planes[100 * 64 + encoded_ep] = 1.0;
     }
 
-    // Plane 101: Side to move (all 1.0 if white, all 0.0 if black)
+    // Plane 101: Side to move (all 1.0 if white, all 0.0 if black).
+    // Tells the network which color the current player is.
     if side_to_move == Color::White {
         let plane_offset = 101 * 64;
         for sq in 0..64 {
