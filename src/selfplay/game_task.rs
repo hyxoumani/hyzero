@@ -535,10 +535,10 @@ fn compute_material_diff(board: &GameBoard) -> i32 {
     // Piece values: P=1, N=3, B=3, R=5, Q=9, K=0 (king never captured).
     const VALUES: [i32; 6] = [1, 3, 3, 5, 9, 0];
     let mut delta: i32 = 0;
-    for pt in 0..6 {
+    for (pt, &val) in VALUES.iter().enumerate() {
         let white_count = board.player1.pieces_bb[pt].count_ones() as i32;
         let black_count = board.player2.pieces_bb[pt].count_ones() as i32;
-        delta += VALUES[pt] * (white_count - black_count);
+        delta += val * (white_count - black_count);
     }
     delta
 }
