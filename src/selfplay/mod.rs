@@ -4,6 +4,7 @@ pub mod coordinator;
 pub mod training;
 pub mod evaluation;
 pub mod champion;
+pub mod pgn;
 
 pub use inference::{
     InferenceRequest, InferenceBackend, RandomBackend, SwappableBackend,

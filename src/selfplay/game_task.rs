@@ -191,6 +191,8 @@ pub async fn play_game(
         add_root_noise: true, // self-play: inject exploration
     };
 
+    let mut moves: Vec<String> = Vec::new();
+
     loop {
         if board.result() != GameResult::Ongoing {
             break;
@@ -273,6 +275,7 @@ pub async fn play_game(
 
         // Convert absolute action to move notation and apply
         let move_str = action_to_notation(absolute_action, side_to_move);
+        moves.push(move_str.clone());
         match board.process_move(&move_str, side_to_move, turn_count) {
             Ok(_) => {}
             Err(_) => {
@@ -317,6 +320,24 @@ pub async fn play_game(
     // Set terminal reward on last step
     if let Some(last) = steps.last_mut() {
         last.reward = game_outcome;
+    }
+
+    // Sampled self-play PGN logging: 1% of games, for opening-diversity analysis.
+    // Cheaply keyed on a single rng call; no impact on training dynamics.
+    if rand::random::<f32>() < 0.01 {
+        let result_str = match game_outcome {
+            x if x > 0.5 => "1-0",
+            x if x < -0.5 => "0-1",
+            _ => "1/2-1/2",
+        };
+        crate::selfplay::pgn::write_pgn_game(
+            "logs/selfplay_sample.pgn",
+            &format!("Selfplay model_v{model_version}"),
+            "selfplay_white",
+            "selfplay_black",
+            result_str,
+            &moves,
+        );
     }
 
     GameTrajectory {
