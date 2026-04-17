@@ -297,13 +297,21 @@ pub async fn play_game(
         turn_count += 1;
     }
 
-    // Game outcome — only real checkmates produce ±1 signal.
-    // All other terminals (stalemate, 50-move, repetition, insufficient material, 300-move cap)
-    // produce 0.0. This is the canonical AlphaZero approach: sparse but clean value signal.
+    // Game outcome.
+    // Checkmates produce ±1 signal (strong). Non-decisive terminals (stalemate, repetition,
+    // 50-move rule, 300-move cap) use tanh(Δmaterial/5) as a weak material-proxy signal to
+    // keep the value head learning when games don't reach checkmate. Adjudication is NOT
+    // re-enabled — it was the primary cause of the passivity attractor. Material-at-cap
+    // alone (without early termination on material imbalance) is a weaker incentive:
+    // preserving material only pays off IF you survive to a real terminal, so passive
+    // play still risks getting checkmated.
     let game_outcome = match board.result() {
         GameResult::Checkmate(Color::White) => 1.0,
         GameResult::Checkmate(Color::Black) => -1.0,
-        _ => 0.0,
+        _ => {
+            let delta = compute_material_diff(&board);
+            (delta as f32 / 5.0).tanh()
+        }
     };
 
     // Set terminal reward on last step
@@ -497,6 +505,21 @@ fn get_legal_moves(board: &GameBoard, color: Color) -> Vec<ActionIndex> {
     }
 
     legal
+}
+
+/// Material balance = white_total - black_total, in standard piece values.
+/// Used for the material-proxy outcome on non-decisive terminals. Scale by tanh(Δ/5)
+/// at call sites to bound to [-1, 1].
+fn compute_material_diff(board: &GameBoard) -> i32 {
+    // Piece values: P=1, N=3, B=3, R=5, Q=9, K=0 (king never captured).
+    const VALUES: [i32; 6] = [1, 3, 3, 5, 9, 0];
+    let mut delta: i32 = 0;
+    for pt in 0..6 {
+        let white_count = board.player1.pieces_bb[pt].count_ones() as i32;
+        let black_count = board.player2.pieces_bb[pt].count_ones() as i32;
+        delta += VALUES[pt] * (white_count - black_count);
+    }
+    delta
 }
 
 #[cfg(test)]
