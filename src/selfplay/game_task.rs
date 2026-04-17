@@ -12,6 +12,22 @@ use crate::mcts::evaluator::Evaluator;
 use crate::mcts::tree::{MCTSConfig, MCTSTree};
 use crate::{BitIterator, CastleOption, Color, PieceType, PrecomputedItems, Square};
 
+/// Parse an env var as i32, defaulting if absent or unparseable.
+fn parse_env_i32(name: &str, default: i32) -> i32 {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
+
+/// Parse an env var as u32, defaulting if absent or unparseable.
+fn parse_env_u32(name: &str, default: u32) -> u32 {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
+}
+
 /// Configuration for a self-play game.
 #[derive(Debug, Clone)]
 pub struct GameConfig {
@@ -193,6 +209,15 @@ pub async fn play_game(
 
     let mut moves: Vec<String> = Vec::new();
 
+    // High-threshold adjudication: only fires when one side has a CRUSHING material
+    // advantage (queen+rook = 14, queen+2 pawns = 11, etc.) sustained for 10 plies.
+    // Higher threshold than the original buggy 6 — avoids passivity trap because
+    // merely preserving a small material edge doesn't trigger it; only decisively
+    // won positions do. Provides strong ±1 signal to value head in ~5-20% of games.
+    let adj_threshold = parse_env_i32("HYZERO_ADJ_THRESHOLD", 12);
+    let adj_plies = parse_env_u32("HYZERO_ADJ_PLIES", 10);
+    let mut adj_counter: u32 = 0;
+
     loop {
         if board.result() != GameResult::Ongoing {
             break;
@@ -200,6 +225,33 @@ pub async fn play_game(
 
         if turn_count >= MAX_GAME_LENGTH {
             break;
+        }
+
+        // High-threshold adjudication: end game early if material dominance
+        // is sustained for N plies. Provides strong ±1 signal to value head.
+        {
+            let delta = compute_material_diff(&board);
+            if delta.abs() >= adj_threshold {
+                adj_counter += 1;
+                if adj_counter >= adj_plies {
+                    let adj_outcome = if delta > 0 { 1.0f32 } else { -1.0f32 };
+                    // Set reward on last step so training sees the terminal signal.
+                    if let Some(last) = steps.last_mut() {
+                        last.reward = adj_outcome;
+                    }
+                    eprintln!(
+                        "[selfplay] adjudicated turn={} delta={} adj_outcome={}",
+                        turn_count, delta, adj_outcome
+                    );
+                    return GameTrajectory {
+                        steps,
+                        game_outcome: adj_outcome,
+                        model_version,
+                    };
+                }
+            } else {
+                adj_counter = 0;
+            }
         }
 
         let hist_slice = history.make_contiguous();
