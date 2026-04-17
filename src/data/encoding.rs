@@ -286,11 +286,12 @@ pub fn encode_action_spatial(action: ActionIndex) -> [f32; 3 * 64] {
         let to_sq = 7 * 8 + to_file as usize; // rank 8 (0-indexed 7)
         (from_sq, to_sq, true)
     } else {
+        // Base actions: cannot reliably distinguish queen promotion from rook/king moves
+        // to rank 1 or rank 8 using only the action index. Queen promotions lose their
+        // flag here (rare event); correctness gained on castling and back-rank piece moves.
         let from_sq = (action / 64) as usize;
         let to_sq = (action % 64) as usize;
-        let to_rank = to_sq / 8;
-        let is_promo = to_rank == 7 || to_rank == 0;
-        (from_sq, to_sq, is_promo)
+        (from_sq, to_sq, false)
     };
 
     // Plane 0: source square
