@@ -32,8 +32,9 @@ cargo run --bin client       # client
 cargo run --bin selfplay     # self-play training loop
 cargo run --release --bin perft -- <FEN> <depth>  # perft CLI
 
-# Baseline
-bash scripts/run_baseline.sh 1800    # 30-min training run, outputs score to logs/baseline_score.json
+# Baseline & Training
+bash scripts/run_baseline.sh 1800    # 30-min fresh-start training run, controlled baseline experiment
+bash scripts/run_training.sh         # Keep training mode (7200s default, no checkpoint cleanup)
 ```
 
 ## Architecture
@@ -99,11 +100,16 @@ subtask being worked on, and any test commands or error output from the most rec
 
 - **Name**: `training_score`
 - **Direction**: higher is better
-- **Formula**: `(8.55 - final_policy_loss) + (decisive_ratio * 10) - (avg_game_length / 100)`
+- **Formula**: `(8.55 - final_policy_loss) + (promotions * HYZERO_CHAMPION_SCORE_WEIGHT) - (avg_game_length / 100)`
 - **Run command**: `bash scripts/run_baseline.sh 1800`
 - **Extract command**: `python3 -c "import json; print(json.load(open('logs/baseline_score.json'))['score'])"`
 - **Time budget**: `1800s`
-- **Baseline**: `4.78` (commit c1e5cdc, 2026-04-13)
-- **Components**: Policy loss decrease (network learning), decisive game ratio (tactical play), shorter games (efficiency)
+- **Baseline**: **14.51** (β=0.3, commit 294e63e, 2026-04-15 autoresearch session, 12-experiment sweep + 1 repro; peak of two β=0.3 runs (11.63, 14.51) — ~3pt run-to-run variance expected)
+- **Previous baseline**: `6.7634` (β=0.1 run, corrected formula); `6.78` (commit d407281, 2026-04-14, old formula with decisive_ratio)
+- **Components**: Policy loss decrease (network learning), champion promotions (ladder wins * weight), shorter games (efficiency)
+- **Env vars**: `HYZERO_CHAMPION_SCORE_WEIGHT` (default 2.0), `HYZERO_GAMES_PER_SIDE` (default 4), `HYZERO_PROMOTION_THRESHOLD` (default 0.55), `HYZERO_VALUE_OUTCOME_BETA` (default 0.1, recommended 0.3), `HYZERO_REWARD_OUTCOME_GAMMA` (default 0.0), `HYZERO_ADJ_THRESHOLD` (default 6, material delta in standard piece values to trigger adjudication), `HYZERO_ADJ_PLIES` (default 10, consecutive plies required to adjudicate), `HYZERO_LR_SCHEDULE` (default none; set to `cosine` to enable), `HYZERO_VALUE_LOSS_WEIGHT` / `HYZERO_REWARD_LOSS_WEIGHT` / `HYZERO_POLICY_LOSS_WEIGHT` (default 1.0 each)
+- **Best known config (2026-04-15)**: `HYZERO_VALUE_OUTCOME_BETA=0.3`, all other defaults.
+- **Smoke test**: `bash scripts/smoke_dual_eval.sh` — 120s run with threshold=0.0, greps for `[eval] promoted`
+- **Note on `promotions` vs `max_champion_version`**: `promotions` counts how many times the challenger beat the current champion by ≥threshold. Distinct from `max_champion_version`, which tags the training-version-number of the latest champion (kept in JSON for debugging but not part of the score). The old formula used `champion_version` (the version tag), which inflated scores when training ran faster than eval cycles (e.g., a single promotion could jump from v1 to v12, yielding 24 points instead of 2).
 
 <!-- BOOTSTRAPPED: Do not remove this marker. /bootstrap uses it to detect re-runs. -->

@@ -1,0 +1,26 @@
+{
+    "timestamp": "20260415_232836",
+    "git_commit": "1846b78",
+    "duration_s": 120,
+    "metrics": {
+        "games_played": 12,
+        "training_steps": 126,
+        "final_policy_loss": 4.2672,
+        "final_total_loss": 4.2777,
+        "avg_game_length": 40.2,
+        "promotions": 0,
+        "max_champion_version": 0,
+        "adjudicated_games": 11,
+        "adjudication_rate": 0.9167,
+        "errors": 0
+    },
+    "config": {
+        "sims": 80,
+        "eval_sims": 50,
+        "concurrent_games": 8,
+        "value_outcome_beta": 0.3,
+        "promotion_threshold": 0.55,
+        "champion_score_weight": 2.0
+    },
+    "log_file": "logs/training_20260415_232836.log"
+}

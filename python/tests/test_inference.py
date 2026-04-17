@@ -113,9 +113,9 @@ def test_load_weights_from_trainer() -> None:
     # Train a few steps so weights diverge from init.
     trainer = Trainer(device="cpu")
     batch = {
-        "observations": np.random.randn(4, 19, 8, 8).astype(np.float32),
+        "observations": np.random.randn(4, INPUT_PLANES, 8, 8).astype(np.float32),
         "actions": np.random.randn(4, 3, 3, 8, 8).astype(np.float32),
-        "target_policies": np.full((4, 4, 4096), 1.0 / 4096, dtype=np.float32),
+        "target_policies": np.full((4, 4, NUM_ACTIONS), 1.0 / NUM_ACTIONS, dtype=np.float32),
         "target_values": np.zeros((4, 4), dtype=np.float32),
         "target_rewards": np.zeros((4, 4), dtype=np.float32),
     }
@@ -142,9 +142,9 @@ def test_load_weights_produces_consistent_output() -> None:
 
     trainer = Trainer(device="cpu")
     batch = {
-        "observations": np.random.randn(4, 19, 8, 8).astype(np.float32),
+        "observations": np.random.randn(4, INPUT_PLANES, 8, 8).astype(np.float32),
         "actions": np.random.randn(4, 3, 3, 8, 8).astype(np.float32),
-        "target_policies": np.full((4, 4, 4096), 1.0 / 4096, dtype=np.float32),
+        "target_policies": np.full((4, 4, NUM_ACTIONS), 1.0 / NUM_ACTIONS, dtype=np.float32),
         "target_values": np.zeros((4, 4), dtype=np.float32),
         "target_rewards": np.zeros((4, 4), dtype=np.float32),
     }

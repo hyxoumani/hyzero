@@ -1,24 +1,43 @@
-/// Index into the 4096 action space (from_square * 64 + to_square)
+/// Index into the 4672 action space (from_square * 64 + to_square, or underpromotion range)
 pub type ActionIndex = u16;
 
 /// Probability distribution over the action space
 pub type Policy = Vec<f32>;
 
-/// Total number of actions in the action space (64 * 64)
-pub const NUM_ACTIONS: usize = 4096;
+/// Total number of actions in the action space: 4096 base + 576 underpromotion slots.
+/// Base encoding: from_sq * 64 + to_sq for queen promotions and all non-promotion moves.
+/// Underpromotion range: 4096 + piece_idx * 192 + from_file * 24 + to_file_offset * 8 + 0
+/// where piece_idx is 0=Knight, 1=Bishop, 2=Rook, and from_file is 0-7.
+/// Total: 4096 + 3 * 192 = 4096 + 576 = 4672.
+pub const NUM_ACTIONS: usize = 4672;
 
-/// Number of observation planes for the representation network
-pub const NUM_OBS_PLANES: usize = 19;
+/// Number of base (non-underpromotion) actions (from_sq * 64 + to_sq encoding).
+pub const NUM_BASE_ACTIONS: usize = 4096;
 
-/// Board observation encoded as 19 float planes (8x8 each).
+/// Number of underpromotion action slots (3 piece types * 8 from-files * 24 slots per file).
+pub const NUM_UNDERPROMO_ACTIONS: usize = 576;
+
+/// Number of history positions (current + 7 past) encoded in board observations.
+pub const NUM_HISTORY_POSITIONS: usize = 8;
+
+/// Number of observation planes for the representation network.
+/// Layout: 8 positions * 12 piece planes each = 96, plus 7 game-state planes.
+/// Current position: planes 0-11 (pieces), planes 96-102 (castling x4, EP, side-to-move, halfmove).
+/// Past positions 1-7: planes 12-95 (12 piece planes each, no castling/EP for history).
+pub const NUM_OBS_PLANES: usize = 103;
+
+/// Board observation encoded as 103 float planes (8x8 each).
 ///
 /// Plane layout:
-///   0-5:   White pieces (Pawn, Knight, Bishop, Rook, Queen, King)
-///   6-11:  Black pieces (same order)
-///   12-15: Castling rights (WK, WQ, BK, BQ) — constant plane per right
-///   16:    En passant target square (one-hot)
-///   17:    Side to move (all 1.0 = white, all 0.0 = black)
-///   18:    Halfmove clock (all squares = clock / 100.0)
+///   0-11:   Current position pieces (White Pawn..King, Black Pawn..King)
+///   12-23:  Past position 1 pieces (oldest in window)
+///   24-35:  Past position 2 pieces
+///   ...
+///   84-95:  Past position 7 pieces
+///   96-99:  Castling rights (WK, WQ, BK, BQ) — current position only
+///   100:    En passant target square (one-hot) — current position only
+///   101:    Side to move (all 1.0 = white, all 0.0 = black)
+///   102:    Halfmove clock (all squares = clock / 100.0)
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct BoardObservation {
     pub planes: Vec<f32>,
@@ -30,6 +49,16 @@ impl Default for BoardObservation {
             planes: vec![0.0; NUM_OBS_PLANES * 64],
         }
     }
+}
+
+/// Lightweight snapshot of a board position for history encoding.
+/// Stores only the 12 piece-placement bitboards (6 types × 2 colors).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct BoardSnapshot {
+    /// Piece bitboards indexed by piece type (0-5: Pawn..King) for white.
+    pub white_pieces_bb: [u64; 6],
+    /// Piece bitboards indexed by piece type (0-5: Pawn..King) for black.
+    pub black_pieces_bb: [u64; 6],
 }
 
 /// Latent state produced by the representation or dynamics network.

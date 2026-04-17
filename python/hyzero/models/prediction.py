@@ -15,12 +15,12 @@ class PredictionNetwork(nn.Module):
     def __init__(
         self,
         hidden_channels: int = 64,
-        num_actions: int = 4096,
+        num_actions: int = 4672,
     ) -> None:
         super().__init__()
         board_size = 8 * 8  # 64 spatial positions
 
-        # Policy head: 1x1 conv (64->2) -> BN -> ReLU -> flatten -> linear (128->4096)
+        # Policy head: 1x1 conv (64->2) -> BN -> ReLU -> flatten -> linear (128->4672)
         self.policy_head = nn.Sequential(
             nn.Conv2d(hidden_channels, 2, kernel_size=1, bias=False),
             nn.BatchNorm2d(2),

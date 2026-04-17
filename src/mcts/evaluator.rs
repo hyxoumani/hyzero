@@ -7,7 +7,10 @@ use crate::data::{BoardObservation, HiddenState, Policy, ActionIndex};
 pub trait Evaluator: Send + Sync {
     /// Representation + prediction: encode real board into latent space, predict policy + value.
     /// Combines h() + f() into one call.
-    async fn root_setup(&self, observation: &BoardObservation) -> (HiddenState, Policy, f32);
+    ///
+    /// `legal_mask` is a boolean mask of length NUM_ACTIONS; `true` entries are legal moves.
+    /// Implementations may use this to zero out illegal logits before softmax.
+    async fn root_setup(&self, observation: &BoardObservation, legal_mask: &[bool]) -> (HiddenState, Policy, f32);
 
     /// Dynamics + prediction: advance hidden state by one action, predict policy + value.
     /// Combines g() + f() into one call.

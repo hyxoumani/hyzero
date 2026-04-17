@@ -1,3 +1,5 @@
+use std::sync::{Arc, Mutex};
+
 use async_trait::async_trait;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{timeout, Duration};
@@ -9,6 +11,8 @@ use crate::mcts::evaluator::Evaluator;
 pub enum InferenceRequest {
     RootSetup {
         observation: BoardObservation,
+        /// Boolean mask of length NUM_ACTIONS; `true` means the action is legal.
+        legal_mask: Vec<bool>,
         reply: oneshot::Sender<(HiddenState, Policy, f32)>,
     },
     ExpandLeaf {
@@ -51,6 +55,33 @@ impl InferenceBackend for RandomBackend {
                 }
             }
         }
+
+    }
+}
+
+/// A backend that delegates to a hot-swappable inner backend.
+///
+/// The eval task calls `swap()` during promotion to replace the champion's
+/// backend without restarting the batcher task. All other batch calls proceed
+/// concurrently without interference (the Mutex is held only during swap and
+/// for the duration of a single `evaluate_batch` call).
+pub struct SwappableBackend {
+    inner: Arc<Mutex<Box<dyn InferenceBackend>>>,
+}
+
+impl SwappableBackend {
+    /// Create a new `SwappableBackend` wrapping `initial`.
+    pub fn new(initial: Box<dyn InferenceBackend>) -> (Self, Arc<Mutex<Box<dyn InferenceBackend>>>) {
+        let shared = Arc::new(Mutex::new(initial));
+        let backend = SwappableBackend { inner: shared.clone() };
+        (backend, shared)
+    }
+}
+
+impl InferenceBackend for SwappableBackend {
+    fn evaluate_batch(&mut self, requests: Vec<InferenceRequest>) {
+        // Lock is released immediately after the call — safe for concurrent swaps.
+        self.inner.lock().expect("SwappableBackend lock poisoned").evaluate_batch(requests);
     }
 }
 
@@ -127,10 +158,11 @@ impl ChannelEvaluator {
 
 #[async_trait]
 impl Evaluator for ChannelEvaluator {
-    async fn root_setup(&self, observation: &BoardObservation) -> (HiddenState, Policy, f32) {
+    async fn root_setup(&self, observation: &BoardObservation, legal_mask: &[bool]) -> (HiddenState, Policy, f32) {
         let (reply_tx, reply_rx) = oneshot::channel();
         let req = InferenceRequest::RootSetup {
             observation: observation.clone(),
+            legal_mask: legal_mask.to_vec(),
             reply: reply_tx,
         };
         self.tx.send(req).await.expect("inference channel closed");
@@ -166,7 +198,8 @@ mod tests {
         let batcher_handle = tokio::spawn(async move { batcher.run().await });
 
         let obs = BoardObservation::default();
-        let (hs, policy, value) = evaluator.root_setup(&obs).await;
+        let mask = vec![true; NUM_ACTIONS];
+        let (hs, policy, value) = evaluator.root_setup(&obs, &mask).await;
 
         assert_eq!(hs.channels, 64);
         assert_eq!(hs.data.len(), 64 * 64);
@@ -243,7 +276,8 @@ mod tests {
         for _ in 0..4 {
             let eval = ChannelEvaluator::new(tx.clone());
             handles.push(tokio::spawn(async move {
-                eval.root_setup(&BoardObservation::default()).await
+                let mask = vec![true; NUM_ACTIONS];
+                eval.root_setup(&BoardObservation::default(), &mask).await
             }));
         }
 
@@ -253,7 +287,7 @@ mod tests {
 
         // With batch size 4 and 4 concurrent requests, should be 1-2 batches
         let batches = batch_count.load(Ordering::SeqCst);
-        assert!(batches >= 1 && batches <= 2, "Expected 1-2 batches, got {}", batches);
+        assert!((1..=2).contains(&batches), "Expected 1-2 batches, got {}", batches);
 
         drop(tx);
         let _ = batcher_handle.await;

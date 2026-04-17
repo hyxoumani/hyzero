@@ -2,7 +2,7 @@ use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple};
 
-use crate::data::{BoardObservation, HiddenState, Policy, NUM_ACTIONS};
+use crate::data::{BoardObservation, HiddenState, Policy, NUM_ACTIONS, NUM_OBS_PLANES};
 use crate::selfplay::inference::{InferenceBackend, InferenceRequest};
 
 /// PyO3 backend that delegates batch inference to the Python InferenceServer.
@@ -64,6 +64,7 @@ impl InferenceBackend for PyO3Backend {
     fn evaluate_batch(&mut self, requests: Vec<InferenceRequest>) {
         // Separate requests by type, preserving reply senders.
         let mut root_obs: Vec<BoardObservation> = Vec::new();
+        let mut root_masks: Vec<Vec<bool>> = Vec::new();
         let mut root_replies: Vec<tokio::sync::oneshot::Sender<(HiddenState, Policy, f32)>> =
             Vec::new();
 
@@ -74,8 +75,13 @@ impl InferenceBackend for PyO3Backend {
 
         for req in requests {
             match req {
-                InferenceRequest::RootSetup { observation, reply } => {
+                InferenceRequest::RootSetup {
+                    observation,
+                    legal_mask,
+                    reply,
+                } => {
                     root_obs.push(observation);
+                    root_masks.push(legal_mask);
                     root_replies.push(reply);
                 }
                 InferenceRequest::ExpandLeaf {
@@ -94,23 +100,31 @@ impl InferenceBackend for PyO3Backend {
             // --- RootSetup batch ---
             if !root_obs.is_empty() {
                 let b = root_obs.len();
-                // Stack observations: each planes Vec<f32> length 19*64 = 1216
-                let mut flat: Vec<f32> = Vec::with_capacity(b * 19 * 64);
+                // Stack observations: each planes Vec<f32> length NUM_OBS_PLANES*64
+                let mut flat: Vec<f32> = Vec::with_capacity(b * NUM_OBS_PLANES * 64);
                 for obs in &root_obs {
                     flat.extend_from_slice(&obs.planes);
                 }
 
                 let result: PyResult<()> = (|| {
-                    // Create numpy array [B*19*64] then reshape to [B, 19, 8, 8]
+                    // Create numpy array [B*NUM_OBS_PLANES*64] then reshape to [B, NUM_OBS_PLANES, 8, 8]
                     let arr = flat.into_pyarray(py);
-                    let obs_np = arr.reshape([b, 19, 8, 8])?;
+                    let obs_np = arr.reshape([b, NUM_OBS_PLANES, 8, 8])?;
 
-                    let ret = self
-                        .server
-                        .call_method1(py, "root_setup_batch", (obs_np,))?;
+                    // Build legal-mask array [B * NUM_ACTIONS] -> reshape to [B, NUM_ACTIONS]
+                    let mut flat_masks: Vec<bool> = Vec::with_capacity(b * NUM_ACTIONS);
+                    for mask in &root_masks {
+                        flat_masks.extend_from_slice(mask);
+                    }
+                    let mask_arr = flat_masks.into_pyarray(py);
+                    let masks_np = mask_arr.reshape([b, NUM_ACTIONS])?;
+
+                    let ret =
+                        self.server
+                            .call_method1(py, "root_setup_batch", (obs_np, masks_np))?;
                     let tuple = ret.cast_bound::<PyTuple>(py)?;
 
-                    // Unpack: (hidden [B,64,8,8], policies [B,4096], values [B])
+                    // Unpack: (hidden [B,64,8,8], policies [B,NUM_ACTIONS], values [B])
                     // Call .flatten() via Python to get a 1-D contiguous array we can read
                     let hidden_flat: PyReadonlyArray1<f32> = tuple
                         .get_item(0)?
@@ -318,14 +332,19 @@ mod tests {
         let obs = BoardObservation::default();
         let req = InferenceRequest::RootSetup {
             observation: obs,
+            legal_mask: vec![true; NUM_ACTIONS],
             reply: tx,
         };
 
         backend.evaluate_batch(vec![req]);
 
         let (hs, policy, value) = rx.try_recv().expect("no reply received");
-        assert_eq!(hs.channels, 64, "hidden_channels should be 64");
-        assert_eq!(hs.data.len(), 64 * 64, "hidden data length should be 64*64");
+        assert_eq!(hs.channels, 128, "hidden_channels should be 128");
+        assert_eq!(
+            hs.data.len(),
+            128 * 64,
+            "hidden data length should be 128*64"
+        );
         assert_eq!(
             policy.len(),
             NUM_ACTIONS,
@@ -356,11 +375,11 @@ mod tests {
         backend.evaluate_batch(vec![req]);
 
         let (hs_out, reward, policy, value) = rx.try_recv().expect("no reply received");
-        assert_eq!(hs_out.channels, 64, "hidden_channels should be 64");
+        assert_eq!(hs_out.channels, 128, "hidden_channels should be 128");
         assert_eq!(
             hs_out.data.len(),
-            64 * 64,
-            "hidden data length should be 64*64"
+            128 * 64,
+            "hidden data length should be 128*64"
         );
         assert_eq!(
             policy.len(),

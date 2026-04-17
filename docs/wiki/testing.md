@@ -93,14 +93,52 @@ Useful for debugging mismatches: run `--divide` on both our engine and Stockfish
 
 ## 5. Adding New Tests
 
-**Move generation**: Find failing FEN, run `--divide` at d1 vs python-chess, add to `EDGE_CASE_FENS` in `cross_validate.py`, add perft test if standard position.
+Find failing FEN, verify vs python-chess, add to appropriate test list (`EDGE_CASE_FENS`, `TERMINATION_FENS`) and Rust test in `board.rs`.
 
-**Termination**: Construct FEN, verify status with python-chess, add to `TERMINATION_FENS`, add Rust test in `board.rs`.
+## 6. Autoresearch Fresh-Start Protocol
 
-**Draw rules** (threefold, 50-move): Require move sequences. Add Rust tests in `board.rs` that loop `compute_turn_items()` and assert `game_result`.
+When running multiple experiments with different hyperparameters (e.g., β sweep):
+
+```bash
+# Before each experiment:
+rm -f checkpoints/best*.pt  # Fresh start — no prior ladder state
+rm -f checkpoints/model_v*.pt  # Clear all checkpoints
+
+# Run experiment
+HYZERO_VALUE_OUTCOME_BETA=0.3 bash scripts/run_baseline.sh 1800
+```
+
+**Why**: The `best.pt` checkpoint from one β setting is ladder state (model version trained on different blend). If you keep it, the next β experiment starts biased. Always delete for fair comparison between independent experiments.
+
+**Exception**: Production validation (measuring stability of a known-good configuration) can reuse `best.pt` to continue from prior run.
+
+## 7. Baseline & Validation
+
+Current baseline: **14.51** (commit 63afdbe, 2026-04-15, reproducibility run, β=0.3)
+- Prior run: 11.63 (commit 294e63e, 2026-04-15, first β=0.3 run)
+- Variance: ±3 points observed between two runs at identical config (11.63 and 14.51)
+
+Previous baseline: **6.78** (commit d407281, 2026-04-14 — Dirichlet alpha fix: 0.03 → 0.3 for chess).
+
+The metric has ±1.5 point noise floor for single runs. **Rule**: Changes <1.5 points need 2–3 reruns; median reported. Variance is expected due to binomial eval noise (10-game samples) and ±50% training step count jitter.
+
+## 8. Metric Definition Precision
+
+Score multipliers must count discrete events (e.g., promotions), not version tags or checkpoint indices. A single promotion can update a version tag by arbitrary amounts depending on producer/consumer rate ratios. Always verify metric extraction against ground truth:
+```bash
+# Example: validate promotion count
+expected_promotions=2
+actual=$(grep -c "\[eval\] promoted" run.log)
+if [ "$actual" -ne "$expected_promotions" ]; then
+  echo "ERROR: Metric extraction mismatch"
+fi
+```
+
+See 2026-04-15 mistakes.md entry "Metric Inflation from Training-Version Tag vs Promotion Count" for the inflation bug and fix.
 
 ## Related
 
-- [Chess Engine](chess-engine.md) — board representation, move generation, gotchas
-- [MCTS & Self-Play](mcts-selfplay.md) — pipeline architecture
-- [Mistakes Log](mistakes.md) — past bugs with root cause analysis
+- [Chess Engine](chess-engine.md) — move generation, gotchas
+- [MCTS & Self-Play](mcts-selfplay.md) — pipeline, closed-loop paradox
+- [Neural Networks](neural-networks.md) — β protocol, loss weight safety
+- [Mistakes Log](mistakes.md) — past bugs, including fast-training paradox (2026-04-15)
