@@ -15,7 +15,8 @@ use crate::data::{
 /// Flat arrays assembled from a batch of `TrainingSample` for Python training.
 ///
 /// Array shapes:
-///   observations:    [B, 102, 8, 8]  stored flat as B * NUM_OBS_PLANES * 64 (f32)
+///   observations:    [B, K+1, 102, 8, 8]  stored flat as B * (K+1) * NUM_OBS_PLANES * 64 (f32)
+///                    All K+1 steps are included for EfficientZero consistency loss.
 ///   actions:         [B, K, 3, 8, 8] stored flat as B * K * 192 (f32)
 ///   target_policies: [B, K+1, 4672]  stored flat as B * (K+1) * NUM_ACTIONS (f32)
 ///   target_values:   [B, K+1]        stored flat as B * (K+1) (f32)
@@ -76,7 +77,9 @@ pub fn assemble_batch_arrays(samples: &[TrainingSample], unroll_k: usize) -> Bat
     let beta = outcome_blend_beta();
     let gamma = reward_blend_gamma();
 
-    let mut observations = vec![0.0f32; b * obs_stride];
+    // observations now includes all K+1 steps for EfficientZero consistency loss.
+    // Shape: [B, K+1, NUM_OBS_PLANES, 8, 8] stored flat as B * (K+1) * obs_stride.
+    let mut observations = vec![0.0f32; b * kp1 * obs_stride];
     let mut actions = vec![0.0f32; b * unroll_k * act_stride];
     let mut target_policies = vec![0.0f32; b * kp1 * pol_stride];
     let mut target_values = vec![0.0f32; b * kp1];
@@ -97,14 +100,17 @@ pub fn assemble_batch_arrays(samples: &[TrainingSample], unroll_k: usize) -> Bat
         let apply_flip: bool = rand::random();
         let effective_outcome = if apply_flip { -sample.game_outcome } else { sample.game_outcome };
 
-        // observations[bi] = steps[0].observation.planes (optionally color-flipped)
-        let obs_base = bi * obs_stride;
-        if apply_flip {
-            let flipped = flip_obs_planes(&steps[0].observation.planes[..obs_stride]);
-            observations[obs_base..obs_base + obs_stride].copy_from_slice(&flipped);
-        } else {
-            observations[obs_base..obs_base + obs_stride]
-                .copy_from_slice(&steps[0].observation.planes[..obs_stride]);
+        // observations[bi, k] = steps[k].observation.planes (optionally color-flipped)
+        // for k in 0..=unroll_k. All K+1 steps are stored for consistency loss.
+        for (k, step_k) in steps.iter().enumerate().take(unroll_k + 1) {
+            let obs_base = (bi * kp1 + k) * obs_stride;
+            if apply_flip {
+                let flipped = flip_obs_planes(&step_k.observation.planes[..obs_stride]);
+                observations[obs_base..obs_base + obs_stride].copy_from_slice(&flipped);
+            } else {
+                observations[obs_base..obs_base + obs_stride]
+                    .copy_from_slice(&step_k.observation.planes[..obs_stride]);
+            }
         }
 
         // actions[bi, k] = encode_action_spatial(steps[k+1].action) for k in 0..K
@@ -202,13 +208,15 @@ pub struct TrainResult {
     pub policy_loss: f64,
     pub value_loss: f64,
     pub reward_loss: f64,
+    pub consistency_loss: f64,
 }
 
 /// Call `trainer.train_batch(batch_dict)` through the GIL and return all loss components.
 ///
-/// Converts flat Rust `Vec<f32>` arrays into shaped numpy arrays (`[B, 102, 8, 8]` obs,
-/// `[B, K+1, 4672]` policies), builds the Python dict, calls `train_batch`, and extracts
-/// all four loss values.
+/// Converts flat Rust `Vec<f32>` arrays into shaped numpy arrays:
+///   observations: `[B, K+1, 102, 8, 8]` — all K+1 steps for EfficientZero consistency loss
+///   policies: `[B, K+1, 4672]`
+/// Builds the Python dict, calls `train_batch`, and extracts all five loss values.
 pub fn train_batch_python(
     py: Python<'_>,
     trainer: &Py<PyAny>,
@@ -222,7 +230,7 @@ pub fn train_batch_python(
 
     // Build shaped numpy arrays
     let obs_arr = arrays.observations.into_pyarray(py);
-    let obs_np = obs_arr.reshape([b, NUM_OBS_PLANES, 8, 8])?;
+    let obs_np = obs_arr.reshape([b, kp1, NUM_OBS_PLANES, 8, 8])?;
 
     let act_arr = arrays.actions.into_pyarray(py);
     let actions_np = act_arr.reshape([b, k, 3, 8, 8])?;
@@ -257,6 +265,7 @@ pub fn train_batch_python(
         policy_loss: bound.get_item("policy_loss")?.extract()?,
         value_loss: bound.get_item("value_loss")?.extract()?,
         reward_loss: bound.get_item("reward_loss")?.extract()?,
+        consistency_loss: bound.get_item("consistency_loss")?.extract()?,
     })
 }
 
@@ -462,12 +471,13 @@ impl PyTrainingThread {
                             }
 
                             println!(
-                                "[py_training] step {}: total={:.4} policy={:.4} value={:.4} reward={:.4} (v{})",
+                                "[py_training] step {}: total={:.4} policy={:.4} value={:.4} reward={:.4} consistency={:.4} (v{})",
                                 self.total_train_steps,
                                 result.total_loss,
                                 result.policy_loss,
                                 result.value_loss,
                                 result.reward_loss,
+                                result.consistency_loss,
                                 self.model_version,
                             );
                         }
@@ -574,9 +584,9 @@ mod tests {
 
         assert_eq!(
             arrays.observations.len(),
-            b * NUM_OBS_PLANES * 64,
-            "observations length should be B * NUM_OBS_PLANES * 64 = {}",
-            b * NUM_OBS_PLANES * 64
+            b * kp1 * NUM_OBS_PLANES * 64,
+            "observations length should be B * (K+1) * NUM_OBS_PLANES * 64 = {}",
+            b * kp1 * NUM_OBS_PLANES * 64
         );
         assert_eq!(
             arrays.actions.len(),

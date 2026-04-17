@@ -111,9 +111,10 @@ def test_load_weights_from_trainer() -> None:
     _, policies_before, values_before = server.root_setup_batch(obs)
 
     # Train a few steps so weights diverge from init.
+    # K=3 steps; observations shape [B, K+1, INPUT_PLANES, 8, 8]
     trainer = Trainer(device="cpu")
     batch = {
-        "observations": np.random.randn(4, INPUT_PLANES, 8, 8).astype(np.float32),
+        "observations": np.random.randn(4, 4, INPUT_PLANES, 8, 8).astype(np.float32),
         "actions": np.random.randn(4, 3, 3, 8, 8).astype(np.float32),
         "target_policies": np.full((4, 4, NUM_ACTIONS), 1.0 / NUM_ACTIONS, dtype=np.float32),
         "target_values": np.zeros((4, 4), dtype=np.float32),
@@ -141,8 +142,9 @@ def test_load_weights_produces_consistent_output() -> None:
     np.random.seed(42)
 
     trainer = Trainer(device="cpu")
+    # K=3 steps; observations shape [B, K+1, INPUT_PLANES, 8, 8]
     batch = {
-        "observations": np.random.randn(4, INPUT_PLANES, 8, 8).astype(np.float32),
+        "observations": np.random.randn(4, 4, INPUT_PLANES, 8, 8).astype(np.float32),
         "actions": np.random.randn(4, 3, 3, 8, 8).astype(np.float32),
         "target_policies": np.full((4, 4, NUM_ACTIONS), 1.0 / NUM_ACTIONS, dtype=np.float32),
         "target_values": np.zeros((4, 4), dtype=np.float32),

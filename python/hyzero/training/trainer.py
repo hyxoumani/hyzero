@@ -188,7 +188,7 @@ class Trainer:
 
         Args:
             batch: Dictionary of numpy arrays:
-                "observations":    [B, 103, 8, 8]
+                "observations":    [B, K+1, 102, 8, 8]  — all K+1 steps for consistency loss
                 "actions":         [B, K, 3, 8, 8]
                 "target_policies": [B, K+1, 4672]
                 "target_values":   [B, K+1]
@@ -198,11 +198,13 @@ class Trainer:
                                    gradients do not push logits at illegal positions.
 
         Returns:
-            dict with keys: total_loss, policy_loss, value_loss, reward_loss, model_version
-            (all loss values are Python floats).
+            dict with keys: total_loss, policy_loss, value_loss, reward_loss,
+            consistency_loss, model_version, lr (all loss values are Python floats).
         """
         # Convert numpy arrays to tensors on the target device.
-        obs = torch.from_numpy(batch["observations"]).to(self.device)          # [B, 103, 8, 8]
+        # observations: [B, K+1, 102, 8, 8] — step 0 is root, steps 1..K for consistency
+        obs_all = torch.from_numpy(batch["observations"]).to(self.device)      # [B, K+1, 102, 8, 8]
+        obs = obs_all[:, 0]                                                     # [B, 102, 8, 8]
         actions = torch.from_numpy(batch["actions"]).to(self.device)           # [B, K, 3, 8, 8]
         tgt_policies = torch.from_numpy(batch["target_policies"]).to(self.device)  # [B, K+1, 4672]
         tgt_values = torch.from_numpy(batch["target_values"]).to(self.device)  # [B, K+1]
@@ -223,8 +225,14 @@ class Trainer:
         total_value_loss = torch.tensor(0.0, device=self.device)
         total_reward_loss = torch.tensor(0.0, device=self.device)
 
+        # Collect hidden states at each step for consistency loss computation.
+        # hidden_states[k] = latent output of g after k dynamics steps
+        # (hidden_states[0] = h(obs_root), hidden_states[k] = g(hidden_{k-1}, a_{k-1}))
+        hidden_states: list[torch.Tensor] = []
+
         # Step 0: encode observation, predict (policy, value).
-        hidden = self.h(obs)  # [B, 64, 8, 8]
+        hidden = self.h(obs)  # [B, hidden_channels, 8, 8]
+        hidden_states.append(hidden)
         policy_logits, value = self.f(hidden)  # [B, 4672], [B, 1]
 
         # Policy loss at step 0 — apply legal mask if provided.
@@ -237,7 +245,8 @@ class Trainer:
         # Steps 1..K: unroll dynamics.
         for k in range(1, k_steps + 1):
             action_plane = actions[:, k - 1]  # [B, 3, 8, 8]
-            hidden, reward = self.g(hidden, action_plane)  # [B, 64, 8, 8], [B, 1]
+            hidden, reward = self.g(hidden, action_plane)  # [B, hidden_channels, 8, 8], [B, 1]
+            hidden_states.append(hidden)
 
             # MuZero: scale gradient at dynamics boundary (Appendix G) to stabilize K-step unroll
             hidden.register_hook(lambda grad: grad * 0.5)
@@ -255,10 +264,33 @@ class Trainer:
         avg_value_loss = total_value_loss / n_steps
         avg_reward_loss = total_reward_loss / k_steps
 
+        # EfficientZero self-supervised consistency loss (Ye et al., NeurIPS 2021).
+        # For each dynamics step k in 1..K, force:
+        #   g(h(obs_{k-1}), a_{k-1}) ≈ h(obs_k)
+        # via cosine similarity, with stop-gradient on the target (h(obs_k)) side.
+        # This gives the dynamics network `g` a DIRECT training signal independent of `f`.
+        consistency_weight = _parse_loss_weight_env("HYZERO_CONSISTENCY_LOSS_WEIGHT", default=0.5)
+        consistency_loss = torch.tensor(0.0, device=self.device)
+        if consistency_weight > 0 and k_steps > 0:
+            for k_idx in range(1, k_steps + 1):
+                # Dynamics branch: project -> predict (online branch, receives gradients)
+                dyn_latent_k = hidden_states[k_idx]  # [B, C, 8, 8]
+                p1 = self.h.predict(self.h.project(dyn_latent_k))  # [B, proj_dim]
+                # Target branch: h(obs_k) projected with stop-gradient (no gradient flows here)
+                obs_k = obs_all[:, k_idx]  # [B, 102, 8, 8]
+                target_latent = self.h(obs_k)  # [B, C, 8, 8]
+                p2 = self.h.project(target_latent).detach()  # [B, proj_dim], stop-grad
+                # Cosine similarity loss: 1 - cos_sim (maximize similarity → minimize loss)
+                consistency_loss = consistency_loss + (
+                    1 - F.cosine_similarity(p1, p2, dim=-1).mean()
+                )
+            consistency_loss = consistency_loss / k_steps
+
         total_loss = (
             self.policy_loss_weight * avg_policy_loss
             + self.value_loss_weight * avg_value_loss
             + self.reward_loss_weight * avg_reward_loss
+            + consistency_weight * consistency_loss
         )
 
         total_loss.backward()
@@ -273,6 +305,7 @@ class Trainer:
             "policy_loss": avg_policy_loss.item(),
             "value_loss": avg_value_loss.item(),
             "reward_loss": avg_reward_loss.item(),
+            "consistency_loss": consistency_loss.item(),
             "model_version": self.model_version,
             "lr": self.optimizer.param_groups[0]["lr"],
         }
