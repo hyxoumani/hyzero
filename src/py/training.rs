@@ -15,7 +15,7 @@ use crate::data::{
 /// Flat arrays assembled from a batch of `TrainingSample` for Python training.
 ///
 /// Array shapes:
-///   observations:    [B, 103, 8, 8]  stored flat as B * NUM_OBS_PLANES * 64 (f32)
+///   observations:    [B, 102, 8, 8]  stored flat as B * NUM_OBS_PLANES * 64 (f32)
 ///   actions:         [B, K, 3, 8, 8] stored flat as B * K * 192 (f32)
 ///   target_policies: [B, K+1, 4672]  stored flat as B * (K+1) * NUM_ACTIONS (f32)
 ///   target_values:   [B, K+1]        stored flat as B * (K+1) (f32)
@@ -68,7 +68,7 @@ pub fn assemble_batch_arrays(samples: &[TrainingSample], unroll_k: usize) -> Bat
     let b = samples.len();
     let kp1 = unroll_k + 1; // K+1
 
-    let obs_stride = NUM_OBS_PLANES * 64; // 103 * 64 = 6592
+    let obs_stride = NUM_OBS_PLANES * 64; // 102 * 64 = 6528
     let act_stride = 3 * 64;             // 192
     let pol_stride = NUM_ACTIONS;         // 4672
 
@@ -120,13 +120,14 @@ pub fn assemble_batch_arrays(samples: &[TrainingSample], unroll_k: usize) -> Bat
             actions[act_base..act_base + act_stride].copy_from_slice(&encoded);
         }
 
-        // Determine root side-to-move from observation plane 101 (1.0 = White).
-        // steps[0] is the root position of this training sample.
-        // When flipped, plane 101 was already inverted by flip_obs_planes, so we
-        // read the same cell from the (possibly-flipped) observations buffer.
+        // Determine root side-to-move from StepRecord.white_to_move (plane 101 removed in Phase 3b).
+        // When color augmentation flips the sample, the perspective also flips.
         // Computed once per sample; only ply_flip is per-k.
-        let root_white_to_move_val = observations[obs_base + 101 * 64];
-        let root_white_to_move = root_white_to_move_val > 0.5;
+        let root_white_to_move = if apply_flip {
+            !steps[0].white_to_move
+        } else {
+            steps[0].white_to_move
+        };
         let root_side_sign: f32 = if root_white_to_move { 1.0 } else { -1.0 };
 
         // target_policies, target_values, target_rewards for k in 0..=K
@@ -205,7 +206,7 @@ pub struct TrainResult {
 
 /// Call `trainer.train_batch(batch_dict)` through the GIL and return all loss components.
 ///
-/// Converts flat Rust `Vec<f32>` arrays into shaped numpy arrays (`[B, 103, 8, 8]` obs,
+/// Converts flat Rust `Vec<f32>` arrays into shaped numpy arrays (`[B, 102, 8, 8]` obs,
 /// `[B, K+1, 4672]` policies), builds the Python dict, calls `train_batch`, and extracts
 /// all four loss values.
 pub fn train_batch_python(
@@ -548,6 +549,7 @@ mod tests {
             root_value: 0.5,
             reward: 0.1,
             legal_moves: vec![42],
+            white_to_move: true,
         }
     }
 
@@ -623,6 +625,7 @@ mod tests {
             root_value: 0.5,
             reward: 0.1,
             legal_moves: legal_moves.clone(),
+            white_to_move: true,
         };
 
         let sample = TrainingSample {
@@ -787,26 +790,19 @@ mod tests {
         drop(traj_tx);
     }
 
-    /// Build a minimal StepRecord with all-zero planes except plane 101 (side-to-move).
+    /// Build a minimal StepRecord with the given side-to-move and root value.
     ///
-    /// `white_to_move` sets plane 101 to 1.0 (White) or 0.0 (Black).
+    /// `white_to_move` is stored directly on the record (plane 101 removed in Phase 3b).
     /// `root_value` is the MCTS Q-estimate for this step.
     fn make_step_with_side(white_to_move: bool, root_value: f32) -> StepRecord {
-        let mut planes = vec![0.0f32; NUM_OBS_PLANES * 64];
-        if white_to_move {
-            // Set all 64 squares of plane 101 to 1.0
-            let base = 101 * 64;
-            for sq in 0..64 {
-                planes[base + sq] = 1.0;
-            }
-        }
         StepRecord {
-            observation: BoardObservation { planes },
+            observation: BoardObservation::default(),
             action: 0,
             visit_distribution: vec![1.0],
             root_value,
             reward: 0.0,
             legal_moves: vec![0],
+            white_to_move,
         }
     }
 

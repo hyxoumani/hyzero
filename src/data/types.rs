@@ -21,23 +21,23 @@ pub const NUM_UNDERPROMO_ACTIONS: usize = 576;
 pub const NUM_HISTORY_POSITIONS: usize = 8;
 
 /// Number of observation planes for the representation network.
-/// Layout: 8 positions * 12 piece planes each = 96, plus 7 game-state planes.
-/// Current position: planes 0-11 (pieces), planes 96-102 (castling x4, EP, side-to-move, halfmove).
+/// Layout: 8 positions * 12 piece planes each = 96, plus 6 game-state planes.
+/// Current position: planes 0-11 (pieces), planes 96-101 (castling x4, EP, halfmove).
 /// Past positions 1-7: planes 12-95 (12 piece planes each, no castling/EP for history).
-pub const NUM_OBS_PLANES: usize = 103;
+/// Side-to-move is NOT encoded (removed in Phase 3b for color-invariant observations).
+pub const NUM_OBS_PLANES: usize = 102;
 
-/// Board observation encoded as 103 float planes (8x8 each).
+/// Board observation encoded as 102 float planes (8x8 each).
 ///
 /// Plane layout:
-///   0-11:   Current position pieces (White Pawn..King, Black Pawn..King)
+///   0-11:   Current position pieces (my pawn..king, opp pawn..king)
 ///   12-23:  Past position 1 pieces (oldest in window)
 ///   24-35:  Past position 2 pieces
 ///   ...
 ///   84-95:  Past position 7 pieces
-///   96-99:  Castling rights (WK, WQ, BK, BQ) — current position only
-///   100:    En passant target square (one-hot) — current position only
-///   101:    Side to move (all 1.0 = white, all 0.0 = black)
-///   102:    Halfmove clock (all squares = clock / 100.0)
+///   96-99:  Castling rights (my KS, my QS, opp KS, opp QS) — current position only
+///   100:    En passant target square (one-hot, rank-mirrored for Black)
+///   101:    Halfmove clock (all squares = clock / 100.0)
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct BoardObservation {
     pub planes: Vec<f32>,
@@ -87,6 +87,10 @@ pub struct StepRecord {
     pub root_value: f32,
     pub reward: f32,
     pub legal_moves: Vec<ActionIndex>,
+    /// White-to-move at the position this step records. Needed by the trainer
+    /// to convert absolute-White game_outcome to step-k perspective. Stored
+    /// out-of-band since plane 101 (side-to-move) was removed from observations.
+    pub white_to_move: bool,
 }
 
 /// Complete trajectory of a played game — moved to replay buffer when game ends.

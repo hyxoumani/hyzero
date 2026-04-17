@@ -4,11 +4,12 @@ use crate::{BitIterator, CastleOption, Color, Piece, PieceType, Square};
 
 /// Encode a GameBoard into a BoardObservation for the representation network.
 ///
-/// Produces 103 planes: 8 positions × 12 piece planes + 7 game-state planes.
+/// Produces 102 planes: 8 positions × 12 piece planes + 6 game-state planes.
+/// Side-to-move is NOT encoded; the observation is fully color-invariant (Phase 3b).
 ///
 /// # Arguments
 /// * `board`        — current board state
-/// * `side_to_move` — whose turn it is
+/// * `side_to_move` — whose turn it is (used for rank-mirroring, not encoded as a plane)
 /// * `history`      — slice of up to 7 past `BoardSnapshot`s, oldest first.
 ///   If fewer than 7 are provided, missing positions are all-zeros.
 pub fn encode_board(
@@ -108,18 +109,9 @@ pub fn encode_board(
         obs.planes[100 * 64 + encoded_ep] = 1.0;
     }
 
-    // Plane 101: Side to move (all 1.0 if white, all 0.0 if black).
-    // Tells the network which color the current player is.
-    if side_to_move == Color::White {
-        let plane_offset = 101 * 64;
-        for sq in 0..64 {
-            obs.planes[plane_offset + sq] = 1.0;
-        }
-    }
-
-    // Plane 102: Halfmove clock (normalized by 100)
+    // Plane 101: Halfmove clock (normalized by 100)
     let clock_val = board.halfmove_clock as f32 / 100.0;
-    let plane_offset = 102 * 64;
+    let plane_offset = 101 * 64;
     for sq in 0..64 {
         obs.planes[plane_offset + sq] = clock_val;
     }
@@ -347,36 +339,37 @@ fn rank_mirror_plane(src: &[f32], dst: &mut [f32]) {
     }
 }
 
-/// Flip all 103 observation planes for color augmentation.
+/// Flip all 102 observation planes for color augmentation.
 ///
-/// Produces a new 6592-element Vec representing the board from the opponent's
+/// Produces a new 6528-element Vec representing the board from the opponent's
 /// perspective:
-/// - For each of the 8 history groups (12 planes each): swap White (0-5) ↔ Black
+/// - For each of the 8 history groups (12 planes each): swap my-pieces (0-5) ↔ opp-pieces
 ///   (6-11) within the group, then rank-mirror every 64-element plane.
 /// - Castling planes: 96↔98 and 97↔99 (constant-fill, no rank mirror needed).
 /// - En-passant plane 100: rank-mirrored.
-/// - Side-to-move plane 101: `1.0 - value` for every square.
-/// - Halfmove clock plane 102: unchanged.
+/// - Halfmove clock plane 101: unchanged.
+///
+/// Side-to-move is NOT a plane (removed in Phase 3b); caller flips `white_to_move` field.
 pub(crate) fn flip_obs_planes(obs: &[f32]) -> Vec<f32> {
     debug_assert_eq!(
         obs.len(),
-        103 * 64,
-        "flip_obs_planes: expected 103*64 elements"
+        102 * 64,
+        "flip_obs_planes: expected 102*64 elements"
     );
-    let mut out = vec![0.0f32; 103 * 64];
+    let mut out = vec![0.0f32; 102 * 64];
 
     // 8 history groups × 12 planes each (current + 7 past)
     for group in 0..8usize {
         let base = group * 12;
-        // Within each group: swap White piece planes (0-5) ↔ Black piece planes (6-11),
+        // Within each group: swap my piece planes (0-5) ↔ opp piece planes (6-11),
         // and rank-mirror each plane.
         for pt in 0..6usize {
-            // White side goes to Black slot, rank-mirrored
+            // My-pieces side goes to opp slot, rank-mirrored
             let src_w = &obs[(base + pt) * 64..(base + pt) * 64 + 64];
             let dst_b = &mut out[(base + 6 + pt) * 64..(base + 6 + pt) * 64 + 64];
             rank_mirror_plane(src_w, dst_b);
 
-            // Black side goes to White slot, rank-mirrored
+            // Opp-pieces side goes to my slot, rank-mirrored
             let src_b_start = (base + 6 + pt) * 64;
             let dst_w_start = (base + pt) * 64;
             // Avoid overlapping borrows by using index-based copy
@@ -387,8 +380,8 @@ pub(crate) fn flip_obs_planes(obs: &[f32]) -> Vec<f32> {
     }
 
     // Castling planes: constant-fill, swap in pairs (no rank mirror needed)
-    // 96 (W kingside) ↔ 98 (B kingside)
-    // 97 (W queenside) ↔ 99 (B queenside)
+    // 96 (my kingside) ↔ 98 (opp kingside)
+    // 97 (my queenside) ↔ 99 (opp queenside)
     out[96 * 64..97 * 64].copy_from_slice(&obs[98 * 64..99 * 64]);
     out[97 * 64..98 * 64].copy_from_slice(&obs[99 * 64..100 * 64]);
     out[98 * 64..99 * 64].copy_from_slice(&obs[96 * 64..97 * 64]);
@@ -399,13 +392,8 @@ pub(crate) fn flip_obs_planes(obs: &[f32]) -> Vec<f32> {
     let ep_dst = &mut out[100 * 64..101 * 64];
     rank_mirror_plane(ep_src, ep_dst);
 
-    // Plane 101: side-to-move — flip constant fill (all-1.0 → all-0.0, and vice versa)
-    for i in 0..64 {
-        out[101 * 64 + i] = 1.0 - obs[101 * 64 + i];
-    }
-
-    // Plane 102: halfmove clock — unchanged
-    out[102 * 64..103 * 64].copy_from_slice(&obs[102 * 64..103 * 64]);
+    // Plane 101: halfmove clock — unchanged
+    out[101 * 64..102 * 64].copy_from_slice(&obs[101 * 64..102 * 64]);
 
     out
 }
@@ -789,18 +777,14 @@ mod tests {
 
     #[test]
     fn test_flip_obs_planes_round_trip() {
-        // Build a non-trivial observation: put a white pawn bit at A2 (plane 0, sq 8)
-        // and set side-to-move to White (plane 101 = all-1.0).
-        let mut obs = vec![0.0f32; 103 * 64];
-        obs[0 * 64 + 8] = 1.0; // White pawn at A2
-        for sq in 0..64 {
-            obs[101 * 64 + sq] = 1.0; // White to move
-        }
+        // Build a non-trivial observation: put a pawn bit at A2 (plane 0, sq 8).
+        let mut obs = vec![0.0f32; 102 * 64];
+        obs[0 * 64 + 8] = 1.0; // Current player's pawn at A2
 
         let flipped = flip_obs_planes(&obs);
         let round_trip = flip_obs_planes(&flipped);
 
-        for i in 0..103 * 64 {
+        for i in 0..102 * 64 {
             assert!(
                 (round_trip[i] - obs[i]).abs() < 1e-6,
                 "round-trip mismatch at index {i}: expected {}, got {}",
@@ -812,83 +796,80 @@ mod tests {
 
     #[test]
     fn test_flip_obs_planes_piece_swap() {
-        // White pawn at A2: plane 0 (White Pawn), sq 8 (rank 1, file 0)
+        // Current player's pawn at A2: plane 0, sq 8 (rank 1, file 0)
         // After color flip:
-        //   - The piece becomes a Black pawn in plane 6 (Black Pawn)
+        //   - The piece becomes the opponent's pawn in plane 6
         //   - A2 rank-mirrors to A7: sq = (7-1)*8+0 = 48
-        let mut obs = vec![0.0f32; 103 * 64];
-        obs[0 * 64 + 8] = 1.0; // White pawn at A2 (plane 0, sq 8)
+        let mut obs = vec![0.0f32; 102 * 64];
+        obs[0 * 64 + 8] = 1.0; // Current player's pawn at A2 (plane 0, sq 8)
 
         let flipped = flip_obs_planes(&obs);
 
-        // Black pawn at A7 should be set: plane 6, sq 48
+        // Opponent's pawn at A7 should be set: plane 6, sq 48
         assert!(
             (flipped[6 * 64 + 48] - 1.0).abs() < 1e-6,
-            "expected Black pawn at A7 (plane 6, sq 48) after flip, got {}",
+            "expected opp pawn at A7 (plane 6, sq 48) after flip, got {}",
             flipped[6 * 64 + 48]
         );
-        // White pawn plane should be all-zero after flip
+        // My-pawn plane should be all-zero after flip
         for sq in 0..64 {
             assert_eq!(
                 flipped[0 * 64 + sq],
                 0.0,
-                "White pawn plane should be zero after flip at sq {sq}"
+                "my-pawn plane should be zero after flip at sq {sq}"
             );
         }
     }
 
     #[test]
-    fn test_flip_obs_planes_side_to_move_flips() {
-        // White to move (plane 101 = all-1.0) → after flip → Black to move (all-0.0)
-        let mut obs = vec![0.0f32; 103 * 64];
+    fn test_encode_board_has_no_side_to_move_plane() {
+        let board = make_board();
+        let obs_white = encode_board(&board, Color::White, &[]);
+        let obs_black = encode_board(&board, Color::Black, &[]);
+        // Plane 101 is now the halfmove clock. For the starting position, halfmove=0,
+        // so plane 101 should be all zeros for BOTH colors.
         for sq in 0..64 {
-            obs[101 * 64 + sq] = 1.0;
-        }
-        let flipped = flip_obs_planes(&obs);
-        for sq in 0..64 {
-            assert!(
-                flipped[101 * 64 + sq].abs() < 1e-6,
-                "side-to-move plane should be 0.0 after flip at sq {sq}"
+            assert_eq!(
+                obs_white.planes[101 * 64 + sq],
+                0.0,
+                "plane 101 (clock) should be 0 at start for White, got {}",
+                obs_white.planes[101 * 64 + sq]
             );
-        }
-
-        // Black to move (plane 101 = all-0.0) → after flip → White to move (all-1.0)
-        let obs_black = vec![0.0f32; 103 * 64];
-        let flipped2 = flip_obs_planes(&obs_black);
-        for sq in 0..64 {
-            assert!(
-                (flipped2[101 * 64 + sq] - 1.0).abs() < 1e-6,
-                "side-to-move plane should be 1.0 after flip-from-black at sq {sq}"
+            assert_eq!(
+                obs_black.planes[101 * 64 + sq],
+                0.0,
+                "plane 101 (clock) should be 0 at start for Black, got {}",
+                obs_black.planes[101 * 64 + sq]
             );
         }
     }
 
     #[test]
     fn test_flip_obs_planes_castling_swap() {
-        // Set White kingside (plane 96) and Black queenside (plane 99)
-        let mut obs = vec![0.0f32; 103 * 64];
+        // Set my kingside (plane 96) and opp queenside (plane 99)
+        let mut obs = vec![0.0f32; 102 * 64];
         for sq in 0..64 {
-            obs[96 * 64 + sq] = 1.0; // W kingside
-            obs[99 * 64 + sq] = 1.0; // B queenside
+            obs[96 * 64 + sq] = 1.0; // my kingside
+            obs[99 * 64 + sq] = 1.0; // opp queenside
         }
         let flipped = flip_obs_planes(&obs);
-        // W kingside (96) → B kingside (98)
+        // my kingside (96) → opp kingside (98)
         for sq in 0..64 {
             assert!(
                 (flipped[98 * 64 + sq] - 1.0).abs() < 1e-6,
-                "B kingside should be set after flip (sq {sq})"
+                "opp kingside should be set after flip (sq {sq})"
             );
-            // W kingside slot should now be 0 (was from B kingside which was 0)
+            // my kingside slot should now be 0 (was from opp kingside which was 0)
             assert!(
                 flipped[96 * 64 + sq].abs() < 1e-6,
-                "W kingside slot should be 0 after flip (sq {sq})"
+                "my kingside slot should be 0 after flip (sq {sq})"
             );
         }
-        // B queenside (99) → W queenside (97)
+        // opp queenside (99) → my queenside (97)
         for sq in 0..64 {
             assert!(
                 (flipped[97 * 64 + sq] - 1.0).abs() < 1e-6,
-                "W queenside should be set after flip (sq {sq})"
+                "my queenside should be set after flip (sq {sq})"
             );
         }
     }

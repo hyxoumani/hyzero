@@ -261,6 +261,7 @@ pub async fn play_game(
 
         // Record step — store selected_action (current-player perspective) in trajectory.
         // legal_moves also stored in current-player perspective.
+        // white_to_move stored out-of-band since plane 101 (side-to-move) was removed.
         steps.push(StepRecord {
             observation,
             action: selected_action,
@@ -268,6 +269,7 @@ pub async fn play_game(
             root_value,
             reward: 0.0, // Set terminal reward after game ends
             legal_moves: legal_actions,
+            white_to_move: side_to_move == Color::White,
         });
 
         // Snapshot position before applying the move (for history encoding on next turn)

@@ -1,10 +1,10 @@
 use std::collections::VecDeque;
+use std::fs;
 use std::io;
 use std::path::Path;
-use std::fs;
 
-use rand::Rng;
 use super::types::{GameTrajectory, StepRecord};
+use rand::Rng;
 
 /// A sample drawn from the replay buffer for training.
 /// Contains K+1 consecutive steps from a single game.
@@ -52,7 +52,9 @@ impl ReplayBuffer {
 
         let min_len = unroll_k + 1;
         // Build weighted list: (trajectory index, weight = num valid start positions)
-        let weights: Vec<(usize, usize)> = self.trajectories.iter()
+        let weights: Vec<(usize, usize)> = self
+            .trajectories
+            .iter()
             .enumerate()
             .filter_map(|(i, t)| {
                 if t.steps.len() >= min_len {
@@ -111,23 +113,21 @@ impl ReplayBuffer {
 
     /// Serialize to disk using bincode.
     pub fn checkpoint_to_disk(&self, path: &Path) -> Result<(), io::Error> {
-        let bytes = bincode::serialize(self)
-            .map_err(io::Error::other)?;
+        let bytes = bincode::serialize(self).map_err(io::Error::other)?;
         fs::write(path, bytes)
     }
 
     /// Deserialize from disk.
     pub fn load_from_disk(path: &Path) -> Result<Self, io::Error> {
         let bytes = fs::read(path)?;
-        bincode::deserialize(&bytes)
-            .map_err(io::Error::other)
+        bincode::deserialize(&bytes).map_err(io::Error::other)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::data::types::{BoardObservation, StepRecord, GameTrajectory};
+    use crate::data::types::{BoardObservation, GameTrajectory, StepRecord};
 
     fn make_step() -> StepRecord {
         StepRecord {
@@ -137,6 +137,7 @@ mod tests {
             root_value: 0.0,
             reward: 0.0,
             legal_moves: vec![0],
+            white_to_move: true,
         }
     }
 
