@@ -509,6 +509,58 @@ This is not a bug in code — it's a **metric misalignment**. The metric "policy
 
 ---
 
+## 2026-04-17: Encoding Asymmetry — Network Learned One-Sided Evaluation
+
+**Date**: 2026-04-17
+**Agent**: Batch 1 Autoresearch session (April 17 improvements)
+**Domain**: Board representation (encoding)
+**Error Type**: Context — fundamental perspective mismatch between encoding and training
+
+**What happened**: Original encoding always placed White in planes 0–5 and Black in 6–11, regardless of whose turn it was. This violated AlphaZero convention (current-player perspective). Result: 85–90% Black-win bias in evaluation. Network learned to evaluate positions asymmetrically — White's pieces were always in the same plane locations, so the network learned "planes 0–5 = my side's chances, 6–11 = opponent's strength." When Black-to-move, this mapping was inverted relative to who was moving, causing systematic evaluation bias.
+
+**Root Cause**: The encoding predated the value-head bootstrap crisis investigation. The original design assumed "White absolute" would be simpler, but didn't account for how the network learns feature maps. A piece in plane 0 (White pawn) is semantically different depending on whose turn it is: my weakness vs opponent's weakness.
+
+**Fix** (commit bb39db6):
+- Observation encoding now uses current-player perspective: planes 0–5 always = my pieces, 6–11 = opponent's
+- Board is rank-mirrored for Black-to-move so the current player always occupies bottom ranks
+- Actions encoded in current-player space, flipped to absolute board space at MCTS boundary via `flip_action()`
+- `action_to_notation()` bug fix: no longer appends 'q' to all back-rank moves, only pawn promotions
+
+**Residual issue**: Black-win bias persists even with fixed encoding. Empirically ~50% in fresh runs, but asymmetric when adjudication is enabled. Root cause likely the adjudication passivity trap (see next entry), not the encoding.
+
+**Escalation Tier**: Gotcha → documented in [Board Encoding](board-encoding.md) and [MCTS & Self-Play](mcts-selfplay.md). Code pattern: always flip actions at MCTS boundary when using current-player observations.
+
+---
+
+## 2026-04-17: Adjudication Passivity Trap — Degenerate Play from Inverted Incentives
+
+**Date**: 2026-04-17
+**Agent**: Batch 1 Autoresearch session (eval_games.pgn inspection)
+**Domain**: Self-play training dynamics (adjudication mechanism)
+**Error Type**: Quality — training signal that rewards the wrong behavior
+
+**What happened**: Model converged to degenerate play: e.g., Na3 (knight move) followed by rook shuttle between a1 and b1 for 100+ moves. This pattern persisted across 2026-04-17 session despite encoding fix and all other experimental variations. PGN logs (commit d8aa3c1) revealed the exact pattern: the model finds a "safe" move (one that doesn't lose material), then learns nothing from adjudication (no threshold breach) and material-at-cap (near 0 outcome), so the policy gets stuck.
+
+**Root Cause**: Adjudication mechanism introduced in commit 1846b78 aims to bootstrap the value head by early-declaring winners based on material. However, it only has a **negative signal** ("you will lose because you're down material") and **no positive incentive** ("you should move because passive play loses"). In the early-training regime where value estimates are poor, MCTS explores via Dirichlet noise. Once a passive move is found (e.g., Na3), the policy learns "this is safe" without learning "this is bad." The model then shuttles moves to preserve material without ever learning that passive play loses via checkmate.
+
+**AlphaZero precedent**: AlphaZero never used adjudication. All games play to completion (checkmate, stalemate, or game-length cap). This natural feedback — "if you play passively, you will eventually get checkmated" — prevents the trap. Adjudication removed this signal and replaced it with a narrower one that can be gamed.
+
+**Manifestation across all configurations**:
+- Encoding fix (bb39db6): Persists
+- Model size increase (0f35653): Persists
+- Color augmentation (0a07591): Persists
+- All hyperparameter sweeps (2026-04-15 autoresearch): Only manifests in high-adjudication regimes (low material threshold)
+
+**Proposed fix (not yet committed)**:
+- Remove adjudication entirely
+- Keep material-at-cap as weak bootstrap for 300-move games (outcome = tanh(Δmaterial / 5))
+- Keep material-for-draws as weak signal for equal-material positions
+- Hypothesis: Games playing to completion (checkmate, stalemate, or cap) will form patterns that punish passivity; value head learns "passive play = loss" through real game outcomes
+
+**Escalation Tier**: Gotcha → documented in [MCTS & Self-Play](mcts-selfplay.md) section "Passivity Trap" with manifestation patterns and AlphaZero precedent. Escalation to Rule once fix is validated.
+
+---
+
 ## Escalation Tiers
 
 Mistakes escalate from manual avoidance to automation:

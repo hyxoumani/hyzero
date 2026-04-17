@@ -8,7 +8,7 @@ Three networks on 8×8 boards, C=64 channels:
 | **g** | [B, 67, 8, 8] | [B, 64, 8, 8] + [B] | Dynamics: next hidden + reward |
 | **f** | [B, 64, 8, 8] | [B, 4096] + [B] | Policy logits + value |
 
-Observation planes (19): 6 white pieces + 6 black pieces + 4 castling rights + en passant + side to move + halfmove clock.
+Observation planes (19): encoded from current-player perspective (AlphaZero convention, commit bb39db6). Planes 0–5 = current player's pieces, 6–11 = opponent, rank-mirrored for Black to move. Includes 4 castling rights, en passant, side-to-move, halfmove clock. See [Board Encoding](board-encoding.md) for details.
 
 ## Network Shapes
 
@@ -143,7 +143,7 @@ Loss weights (HYZERO_{POLICY,VALUE,REWARD}_LOSS_WEIGHT) default to 1.0 and shoul
 1. **Policy**: Network outputs logits. Inference server applies softmax; training uses raw logits + CE.
 2. **Value**: Tanh [-1, 1]. Currently predicts MCTS root_value (bootstrapped Q-estimates) + soft outcome blend (β=0.3 by default).
 3. **Reward**: Per-step (immediate), not cumulative. Real rewards come from trajectory — terminal reward only.
-4. **Action encoding**: 4096 = 64×64, queen-default promotion. Underpromotion (4672) unimplemented.
+4. **Action encoding**: 4096 = 64×64, queen-default promotion. Underpromotion (4672) unimplemented. Actions are in current-player space; flipped to absolute board space at MCTS boundary (commit bb39db6). See [Board Encoding](board-encoding.md).
 5. **Value not negated per ply** in backup — intentional (same sign across turns), verify during training.
 6. **Reward loss K not K+1**: Only K reward terms (steps 1..K), policy/value have K+1 (steps 0..K). Divide reward loss by K.
 7. **Gradient hook on g output**: `register_hook(lambda grad: grad * 0.5)` on dynamics OUTPUT for correct chained K-step scaling (MuZero Appendix G).
@@ -154,6 +154,7 @@ Loss weights (HYZERO_{POLICY,VALUE,REWARD}_LOSS_WEIGHT) default to 1.0 and shoul
 
 ## Related
 
+- [Board Encoding](board-encoding.md) — current-player perspective convention, action flipping
 - [MCTS & Self-Play](mcts-selfplay.md) — value/reward head dead analysis, replay buffer dynamics
 - `docs/wiki/mistakes.md` — entries on dead value/reward heads and perspective consistency
 

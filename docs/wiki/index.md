@@ -9,6 +9,7 @@ session findings, reviewer feedback, experiments, and architectural decisions.
 
 ## Engine Core
 - [Chess Engine](chess-engine.md) — board representation, move generation, validation gotchas
+- [Board Encoding](board-encoding.md) — observation tensor, current-player perspective, action flipping
 - [Special Moves & Draw Rules](special-moves-draws.md) — castling, en passant, promotion, game termination
 
 ## Learning Pipeline

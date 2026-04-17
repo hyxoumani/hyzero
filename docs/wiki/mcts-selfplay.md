@@ -94,6 +94,8 @@ Separate async task watches `model_version` via watch channel. When version adva
 - `decisive_ratio` ((white_wins + black_wins) / total)
 - `avg_length` (mean game length)
 
+**PGN Logging** (commit d8aa3c1): Eval games append PGN-formatted moves to `logs/eval_games.pgn` with headers (event, white, black, result) and numbered move pairs. Critical debugging tool — allows inspection of what the model is actually playing during eval cycles. Revealed 2026-04-17 session's passivity trap (rook shuffle patterns).
+
 Provides continuous signal of model quality during training. Runs in parallel with main self-play loop.
 
 ## Action Encoding
@@ -125,6 +127,32 @@ This divergence signals value-head collapse: policy learned to avoid loss but va
 
 See neural-networks.md sections "Canonical MuZero Value Target" and "MCTS as Policy Improvement" for architecture discussion.
 
+## Passivity Trap — Adjudication Creates Degenerate Training Signal (2026-04-17)
+
+**CRITICAL FINDING**: Adjudication mechanism (commit 1846b78) introduces a fundamental training signal inversion. The mechanism says "if you lose material, you lose" but never says "if you don't move, you lose." Result: the model learns to avoid losing material by *not moving*, converging to degenerate play (Na3 + rook shuffle a1↔b1) that stalemates itself.
+
+**Manifestation** (observed in eval_games.pgn from 2026-04-17 session):
+- Games get stuck in patterns: e.g., Na3, then rook shuttles between a1 and b1 for 100+ moves
+- Eval terminates by 300-move cap, not by checkmate or adjudication
+- Score improves on "not losing" (material-for-draws at cap) but actual play quality is unsalvageable
+
+**Root cause**: Adjudication only considers material threshold, not move frequency/repetition. Early in training with poor value estimates, MCTS explores via Dirichlet noise. Once a safe material-preserving move is found (e.g., Na3), the policy pins to it because:
+1. Value estimate says "don't move, that's risky"
+2. Adjudication never fires (only 3 pawns on board, well below threshold)
+3. Material proxy at cap gives ~0.0 outcome (no gradient)
+4. Network learns "this move is safe" without learning "it's also useless"
+
+Passive play persists across ALL configs tested (encoding fix, model size, hyperparameters).
+
+**AlphaZero precedent**: AlphaZero never used adjudication. Games played to completion (checkmate, stalemate, or game-length cap). This forces the value head to learn that passive play eventually loses via checkmate. Adjudication short-circuits this signal — you can be passive forever as long as you don't lose material.
+
+**Proposed fix (not yet committed)**:
+- Remove adjudication entirely
+- Keep material-at-cap for games reaching 300 moves
+- Keep material-for-draws as weak bootstrap signal
+- Accept slower early training (material signal initially weak)
+- Hypothesis: Games playing to completion will form checkmate patterns that punish passivity, breaking the trap
+
 ## Dual-Model Ladder Stall — Symmetry Collapse
 
 After a promotion to v1 (new challenger = champion snapshot), both models have identical architecture + weights at t=0. They drift together due to simultaneous training on the same replay buffer. Eval often returns **win_rate ≈ 0.50** for many cycles, delaying the next promotion. This is **expected behavior** (symmetric play → draws) but slows improvement.
@@ -149,6 +177,12 @@ After a promotion to v1 (new challenger = champion snapshot), both models have i
 10. **action_to_move signature**: `action_to_move(action, board, color)` requires board state and active color to correctly reconstruct castling and en passant moves. The selfplay game_task.rs already handles this correctly; only direct callers of action_to_move need updating.
 11. **Legal-move masking NaN**: `log_softmax(-inf)` produces NaN in log-probs. Use `nan_to_num(neginf=0.0)` after softmax to replace illegal-move NaNs with 0.
 12. **Game outcome perspective**: `game_outcome` is absolute White-perspective (+1 for White win, -1 for Black win), but observation planes encode absolute piece positions. When using outcome as a value target, account for whose turn it is (plane 101).
+
+## Related
+
+- [Board Encoding](board-encoding.md) — current-player perspective, action flipping at MCTS boundary
+- [Neural Networks](neural-networks.md) — value/reward training, loss weighting
+- `docs/wiki/mistakes.md` — adjudication passivity trap, encoding asymmetry fixes
 
 ## Related Files
 
