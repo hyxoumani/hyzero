@@ -68,6 +68,7 @@ pub async fn play_game_dual(
     let mcts_config = MCTSConfig {
         num_simulations: config.num_simulations,
         exploration_constant: config.exploration_constant,
+        add_root_noise: false, // eval: no exploration noise
     };
 
     loop {
@@ -165,22 +166,6 @@ pub async fn play_game_dual(
     }
 }
 
-/// Parse an env var as i32, returning default if absent or unparseable.
-fn parse_env_i32(name: &str, default: i32) -> i32 {
-    std::env::var(name)
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(default)
-}
-
-/// Parse an env var as u32, returning default if absent or unparseable.
-fn parse_env_u32(name: &str, default: u32) -> u32 {
-    std::env::var(name)
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(default)
-}
-
 /// Play a complete game using MCTS, producing a GameTrajectory for training.
 pub async fn play_game(
     precomputed: Arc<PrecomputedItems>,
@@ -200,13 +185,10 @@ pub async fn play_game(
 
     const MAX_GAME_LENGTH: usize = 300;
 
-    let adj_threshold = parse_env_i32("HYZERO_ADJ_THRESHOLD", 6);
-    let adj_plies = parse_env_u32("HYZERO_ADJ_PLIES", 10);
-    let mut adj_counter: u32 = 0; // Consecutive plies with |Δmaterial| >= adj_threshold
-
     let mcts_config = MCTSConfig {
         num_simulations: config.num_simulations,
         exploration_constant: config.exploration_constant,
+        add_root_noise: true, // self-play: inject exploration
     };
 
     loop {
@@ -215,37 +197,7 @@ pub async fn play_game(
         }
 
         if turn_count >= MAX_GAME_LENGTH {
-            // Material-based outcome at cap: tanh(Δ/5) in White-absolute convention.
-            // Trainer converts to side-to-move perspective via plane 101.
-            break; // game_outcome will be set from material after the loop
-        }
-
-        // Adjudication: end early if one side is materially dominant for N consecutive plies.
-        {
-            let delta = compute_material_diff(&board);
-            if delta.abs() >= adj_threshold {
-                adj_counter += 1;
-                if adj_counter >= adj_plies {
-                    // Adjudicated: use sign of material advantage as outcome
-                    // (White-absolute convention, matching checkmate outcome encoding)
-                    let adj_outcome = if delta > 0 { 1.0f32 } else { -1.0f32 };
-                    // Apply outcome to last step reward and return early
-                    if let Some(last) = steps.last_mut() {
-                        last.reward = adj_outcome;
-                    }
-                    eprintln!(
-                        "[selfplay] adjudicated turn={} delta={} adj_outcome={}",
-                        turn_count, delta, adj_outcome
-                    );
-                    return GameTrajectory {
-                        steps,
-                        game_outcome: adj_outcome,
-                        model_version,
-                    };
-                }
-            } else {
-                adj_counter = 0; // Reset if dominance drops below threshold
-            }
+            break;
         }
 
         let hist_slice = history.make_contiguous();
@@ -345,25 +297,13 @@ pub async fn play_game(
         turn_count += 1;
     }
 
-    // Determine game outcome.
-    // For genuine checkmates: use rule-based result.
-    // For 300-move cap: substitute material-based proxy (White-absolute convention).
+    // Game outcome — only real checkmates produce ±1 signal.
+    // All other terminals (stalemate, 50-move, repetition, insufficient material, 300-move cap)
+    // produce 0.0. This is the canonical AlphaZero approach: sparse but clean value signal.
     let game_outcome = match board.result() {
         GameResult::Checkmate(Color::White) => 1.0,
         GameResult::Checkmate(Color::Black) => -1.0,
-        GameResult::Ongoing => {
-            // Hit the 300-move cap. Use tanh(Δmaterial / 5.0) as outcome signal.
-            let delta = compute_material_diff(&board);
-            (delta as f32 / 5.0).tanh()
-        }
-        _ => {
-            // Draw (stalemate, 50-move, repetition, insufficient material).
-            // Use material proxy instead of 0: teaches value head that material
-            // advantage is good even when the game draws — curriculum signal that
-            // prevents zero-target collapse from draw-heavy play.
-            let delta = compute_material_diff(&board);
-            (delta as f32 / 5.0).tanh()
-        }
+        _ => 0.0,
     };
 
     // Set terminal reward on last step
@@ -557,21 +497,6 @@ fn get_legal_moves(board: &GameBoard, color: Color) -> Vec<ActionIndex> {
     }
 
     legal
-}
-
-/// Compute material balance (White - Black) in centipawn equivalents.
-/// Standard piece values: P=1, N=3, B=3, R=5, Q=9, K=0.
-/// Returns positive if White is ahead, negative if Black is ahead.
-/// Uses the bitboard count from player1 (White) and player2 (Black).
-fn compute_material_diff(board: &GameBoard) -> i32 {
-    const VALUES: [i32; 6] = [1, 3, 3, 5, 9, 0]; // Pawn,Knight,Bishop,Rook,Queen,King
-    let mut white_mat = 0i32;
-    let mut black_mat = 0i32;
-    for (i, &val) in VALUES.iter().enumerate() {
-        white_mat += val * board.player1.pieces_bb[i].count_ones() as i32;
-        black_mat += val * board.player2.pieces_bb[i].count_ones() as i32;
-    }
-    white_mat - black_mat
 }
 
 #[cfg(test)]
@@ -827,81 +752,4 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_compute_material_diff_starting_position() {
-        let precomputed = Arc::new(PrecomputedItems::begin_precomputing());
-        let p1 = Player::init_player(true);
-        let p2 = Player::init_player(false);
-        let board = GameBoard::init_game_board(precomputed, p1, p2);
-        // Starting position is symmetric — material diff should be 0.
-        assert_eq!(compute_material_diff(&board), 0);
-    }
-
-    #[test]
-    fn test_compute_material_diff_asymmetric() {
-        use crate::game::fen::board_from_fen;
-        let precomputed = Arc::new(PrecomputedItems::begin_precomputing());
-        // White queen + king vs black king: Δ = 9
-        let (board2, _, _) =
-            board_from_fen("K6Q/8/8/8/8/8/8/7k w - - 0 1", precomputed)
-                .expect("valid fen");
-        assert_eq!(compute_material_diff(&board2), 9);
-    }
-
-    #[test]
-    fn test_adjudication_counter_logic() {
-        // Simulate the counter state machine: reset on drop below threshold
-        const ADJ_THRESHOLD: i32 = 6;
-        const ADJ_PLIES: u32 = 10;
-        let deltas = [7i32, 7, 7, 5, 7, 7, 7, 7, 7, 7, 7]; // drops at index 3, resets
-        let mut counter = 0u32;
-        let mut adjudicated = false;
-        for delta in deltas {
-            if delta.abs() >= ADJ_THRESHOLD {
-                counter += 1;
-                if counter >= ADJ_PLIES {
-                    adjudicated = true;
-                    break;
-                }
-            } else {
-                counter = 0;
-            }
-        }
-        // Counter reset at index 3, then 7 more plies (indices 4-10) → counter=7, not 10
-        assert!(!adjudicated, "Should not adjudicate: reset dropped counter");
-        assert_eq!(counter, 7);
-
-        // Now try without a break: 10 consecutive plies >= threshold
-        let deltas2 = [8i32; 10];
-        counter = 0;
-        adjudicated = false;
-        for delta in deltas2 {
-            if delta.abs() >= ADJ_THRESHOLD {
-                counter += 1;
-                if counter >= ADJ_PLIES {
-                    adjudicated = true;
-                    break;
-                }
-            } else {
-                counter = 0;
-            }
-        }
-        assert!(adjudicated, "Should adjudicate after 10 consecutive plies");
-    }
-
-    #[tokio::test]
-    async fn test_material_cap_outcome_nonzero_for_asymmetric_position() {
-        // This test verifies the tanh(Δ/5) formula produces non-zero outcome at cap
-        // by directly calling compute_material_diff on an asymmetric board.
-        use crate::game::fen::board_from_fen;
-        let precomputed = Arc::new(PrecomputedItems::begin_precomputing());
-        // White ahead by a queen (Δ = 9) → tanh(9/5) ≈ 0.964
-        let (board, _, _) =
-            board_from_fen("K6Q/8/8/8/8/8/8/7k w - - 0 1", precomputed)
-                .expect("valid fen");
-        let delta = compute_material_diff(&board);
-        let outcome = (delta as f32 / 5.0).tanh();
-        assert!(outcome > 0.9, "Expected outcome ~0.96, got {outcome}");
-        assert!(outcome <= 1.0, "Outcome must be tanh-bounded to <= 1.0");
-    }
 }
