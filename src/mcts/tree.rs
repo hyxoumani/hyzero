@@ -99,6 +99,10 @@ fn dirichlet_noise(n: usize) -> Vec<f32> {
 pub struct MCTSConfig {
     pub num_simulations: u32,
     pub exploration_constant: f32,
+    /// Whether to inject Dirichlet noise into root priors for exploration diversity.
+    /// Set to `true` for self-play (exploration required) and `false` for evaluation
+    /// (deterministic play preferred).
+    pub add_root_noise: bool,
 }
 
 impl Default for MCTSConfig {
@@ -106,6 +110,7 @@ impl Default for MCTSConfig {
         Self {
             num_simulations: 800,
             exploration_constant: 1.5,
+            add_root_noise: true,
         }
     }
 }
@@ -133,11 +138,14 @@ impl MCTSTree {
 
         // Mix Dirichlet noise into root priors for exploration diversity.
         // P(a) = (1 - ε) * P(a) + ε * η_a, where η ~ Dir(α).
-        let n = root.priors.len();
-        if n > 0 {
-            let noise = dirichlet_noise(n);
-            for (prior, eta) in root.priors.iter_mut().zip(noise.iter()) {
-                *prior = (1.0 - NOISE_EPSILON) * *prior + NOISE_EPSILON * eta;
+        // Gated by config.add_root_noise: disabled for evaluation games.
+        if config.add_root_noise {
+            let n = root.priors.len();
+            if n > 0 {
+                let noise = dirichlet_noise(n);
+                for (prior, eta) in root.priors.iter_mut().zip(noise.iter()) {
+                    *prior = (1.0 - NOISE_EPSILON) * *prior + NOISE_EPSILON * eta;
+                }
             }
         }
 
@@ -361,6 +369,7 @@ mod tests {
         let config = MCTSConfig {
             num_simulations: 50,
             exploration_constant: 1.5,
+            add_root_noise: true,
         };
 
         let mut tree = MCTSTree::new(HiddenState::new(64), &policy, 0.5, legal_actions, config);
@@ -379,6 +388,7 @@ mod tests {
         let config = MCTSConfig {
             num_simulations: 100,
             exploration_constant: 1.5,
+            add_root_noise: true,
         };
 
         let mut tree = MCTSTree::new(HiddenState::new(64), &policy, 0.5, legal_actions, config);
@@ -397,6 +407,7 @@ mod tests {
         let config = MCTSConfig {
             num_simulations: 50,
             exploration_constant: 1.5,
+            add_root_noise: true,
         };
 
         let mut tree = MCTSTree::new(HiddenState::new(64), &policy, 0.5, legal_actions, config);
@@ -418,6 +429,7 @@ mod tests {
         let config = MCTSConfig {
             num_simulations: 200,
             exploration_constant: 1.5,
+            add_root_noise: true,
         };
 
         let mut tree = MCTSTree::new(HiddenState::new(64), &policy, 0.5, legal_actions, config);
@@ -456,6 +468,7 @@ mod tests {
         let nil_config = MCTSConfig {
             num_simulations: 0,
             exploration_constant: 1.5,
+            add_root_noise: false,
         };
 
         // Helper: install a freshly-created child at path[0..path.len()] below root.
