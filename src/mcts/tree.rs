@@ -132,10 +132,36 @@ fn top_k_actions(policy: &[f32], k: usize) -> Vec<crate::data::ActionIndex> {
 }
 
 /// Exploration fraction for Dirichlet noise at the root.
-const NOISE_EPSILON: f32 = 0.25;
+/// Default 0.25 (AlphaZero chess). Overridable via `HYZERO_DIRICHLET_EPSILON`.
+const DEFAULT_NOISE_EPSILON: f32 = 0.25;
 /// Dirichlet concentration parameter (alpha) for chess.
 /// AlphaZero paper: 0.3 for chess, 0.15 for shogi, 0.03 for Go.
-const NOISE_ALPHA: f32 = 0.3;
+/// Overridable via `HYZERO_DIRICHLET_ALPHA`.
+const DEFAULT_NOISE_ALPHA: f32 = 0.3;
+
+/// Read Dirichlet ε from env (cached) — fraction of root prior replaced by noise.
+fn noise_epsilon() -> f32 {
+    static CACHED: OnceLock<f32> = OnceLock::new();
+    *CACHED.get_or_init(|| {
+        std::env::var("HYZERO_DIRICHLET_EPSILON")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok())
+            .filter(|v| (0.0..=1.0).contains(v))
+            .unwrap_or(DEFAULT_NOISE_EPSILON)
+    })
+}
+
+/// Read Dirichlet α from env (cached) — concentration of the noise distribution.
+fn noise_alpha() -> f32 {
+    static CACHED: OnceLock<f32> = OnceLock::new();
+    *CACHED.get_or_init(|| {
+        std::env::var("HYZERO_DIRICHLET_ALPHA")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok())
+            .filter(|v| *v > 0.0)
+            .unwrap_or(DEFAULT_NOISE_ALPHA)
+    })
+}
 
 /// Sample from a Dirichlet(alpha, ..., alpha) distribution of length `n`.
 ///
@@ -152,7 +178,7 @@ fn dirichlet_noise(n: usize) -> Vec<f32> {
     // Gamma(alpha, 1) samples via Marsaglia-Tsang for alpha < 1:
     // Let Y ~ Gamma(alpha+1, 1) and U ~ Uniform(0,1).
     // Then X = Y * U^(1/alpha) ~ Gamma(alpha, 1).
-    let alpha = NOISE_ALPHA;
+    let alpha = noise_alpha();
     let d = alpha + 1.0 - 1.0 / 3.0; // alpha+1 shifted for M-T
     let c = 1.0 / (9.0 * d).sqrt();
 
@@ -248,7 +274,7 @@ impl MCTSTree {
             if n > 0 {
                 let noise = dirichlet_noise(n);
                 for (prior, eta) in root.priors.iter_mut().zip(noise.iter()) {
-                    *prior = (1.0 - NOISE_EPSILON) * *prior + NOISE_EPSILON * eta;
+                    *prior = (1.0 - noise_epsilon()) * *prior + noise_epsilon() * eta;
                 }
             }
         }
