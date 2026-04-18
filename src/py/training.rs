@@ -58,18 +58,6 @@ fn reward_blend_gamma() -> f32 {
         .unwrap_or(0.0)
 }
 
-/// Draw penalty for non-decisive terminals. Applied as a CONSTANT subtracted
-/// from target_value for every step of a drawn game (both players, not flipped).
-/// Default 0.2 — makes draws slightly negative for both players so the value
-/// head learns to prefer decisive outcomes over mutual-passivity draws.
-fn draw_penalty() -> f32 {
-    std::env::var("HYZERO_DRAW_PENALTY")
-        .ok()
-        .and_then(|v| v.parse::<f32>().ok())
-        .map(|v| v.clamp(0.0, 1.0))
-        .unwrap_or(0.2)
-}
-
 /// Assemble flat f32 arrays from a slice of `TrainingSample`.
 ///
 /// Each `TrainingSample` contains `K+1` `StepRecord`s. Steps are:
@@ -85,10 +73,9 @@ pub fn assemble_batch_arrays(samples: &[TrainingSample], unroll_k: usize) -> Bat
     let act_stride = 3 * 64;             // 192
     let pol_stride = NUM_ACTIONS;         // 4672
 
-    // Read β, γ, and draw_pen once for the whole batch; env-var overhead amortized.
+    // Read β and γ once for the whole batch; env-var overhead amortized.
     let beta = outcome_blend_beta();
     let gamma = reward_blend_gamma();
-    let draw_pen = draw_penalty();
 
     // observations now includes all K+1 steps for EfficientZero consistency loss.
     // Shape: [B, K+1, NUM_OBS_PLANES, 8, 8] stored flat as B * (K+1) * obs_stride.
@@ -175,15 +162,7 @@ pub fn assemble_batch_arrays(samples: &[TrainingSample], unroll_k: usize) -> Bat
             // At step k, side alternates each ply. Convert game_outcome (White-absolute)
             // to the perspective of whoever is to move at step k.
             let ply_flip: f32 = if k % 2 == 0 { 1.0 } else { -1.0 };
-            let decisive_term = effective_outcome * root_side_sign * ply_flip;
-            // Apply draw penalty: for non-decisive terminals, subtract draw_pen from the
-            // outcome term so both players see "this game ends badly" — breaking the
-            // mutual-shuffle equilibrium where V≈0 everywhere.
-            let outcome_in_step_perspective = if sample.is_draw {
-                decisive_term - draw_pen
-            } else {
-                decisive_term
-            };
+            let outcome_in_step_perspective = effective_outcome * root_side_sign * ply_flip;
 
             // Soft blend: 90% MCTS Q (preserves learned signal), 10% outcome
             // (injects outcome-aligned gradient to break self-referential bootstrap).
@@ -944,17 +923,16 @@ mod tests {
         );
     }
 
-    /// Confirm that the root_value signal is preserved with weight 0.9 when outcome is 0 (draw),
-    /// and that the draw penalty is applied to the outcome term.
+    /// Confirm that the root_value signal is preserved with weight 0.9 when outcome is 0 (draw).
+    /// No draw penalty is applied — draws just produce outcome_in_step_perspective = 0.
     #[test]
     fn test_value_target_outcome_blend_root_value_preserved() {
         std::env::remove_var("HYZERO_VALUE_OUTCOME_BETA");
-        std::env::remove_var("HYZERO_DRAW_PENALTY");
 
         let k = 3usize;
         let kp1 = k + 1;
 
-        // root_value=0.5 for all steps; game_outcome=0.0 (draw) → outcome term gets draw penalty
+        // root_value=0.5 for all steps; game_outcome=0.0 (draw)
         let step = make_step_with_side(true, 0.5);
 
         let sample = TrainingSample {
@@ -965,44 +943,13 @@ mod tests {
 
         let arrays = assemble_batch_arrays(&[sample], k);
 
-        // β=0.1; root_value=0.5; game_outcome=0.0 (draw); draw_penalty=0.2
-        // outcome_in_step_perspective = 0.0 - 0.2 = -0.2
-        // target = 0.9*0.5 + 0.1*(-0.2) = 0.45 - 0.02 = 0.43 for all k
+        // β=0.1; root_value=0.5; game_outcome=0.0 (draw); no penalty
+        // outcome_in_step_perspective = 0.0
+        // target = 0.9*0.5 + 0.1*0.0 = 0.45 for all k
         for k_idx in 0..kp1 {
             assert!(
-                (arrays.target_values[k_idx] - 0.43).abs() < 1e-5,
-                "k={k_idx} expected 0.43, got {}",
-                arrays.target_values[k_idx]
-            );
-        }
-    }
-
-    /// Verify that the draw penalty is applied to value targets when is_draw=true.
-    #[test]
-    fn test_value_target_applies_draw_penalty() {
-        std::env::remove_var("HYZERO_VALUE_OUTCOME_BETA");
-        std::env::remove_var("HYZERO_DRAW_PENALTY");
-
-        let k = 3usize;
-        let kp1 = k + 1;
-
-        // Root is White to move; root_value=0.0; is_draw=true; game_outcome=0 (pure draw)
-        let step = make_step_with_side(true, 0.0);
-
-        let sample = TrainingSample {
-            steps: (0..kp1).map(|_| step.clone()).collect(),
-            game_outcome: 0.0,
-            is_draw: true,
-        };
-
-        let arrays = assemble_batch_arrays(&[sample], k);
-
-        // β=0.1, root_value=0.0, game_outcome=0 (draw), draw_penalty=0.2
-        // For every k: target = 0.9*0.0 + 0.1*(0 - 0.2) = -0.02
-        for k_idx in 0..kp1 {
-            assert!(
-                (arrays.target_values[k_idx] - (-0.02)).abs() < 1e-6,
-                "k={k_idx} expected -0.02, got {}",
+                (arrays.target_values[k_idx] - 0.45).abs() < 1e-5,
+                "k={k_idx} expected 0.45, got {}",
                 arrays.target_values[k_idx]
             );
         }
