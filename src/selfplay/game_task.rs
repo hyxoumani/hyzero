@@ -1,5 +1,6 @@
 use std::collections::VecDeque;
-use std::sync::Arc;
+use std::io::{BufWriter, Write};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::data::{
     board_to_snapshot, encode_board, move_to_action, ActionIndex, BoardSnapshot, GameTrajectory,
@@ -11,6 +12,101 @@ use crate::game::{GameBoard, Move, Player};
 use crate::mcts::evaluator::Evaluator;
 use crate::mcts::tree::{MCTSConfig, MCTSTree};
 use crate::{BitIterator, CastleOption, Color, PieceType, PrecomputedItems, Square};
+
+// --- MCTS summary log (HYZERO_MCTS_TRACE gate) ---
+
+/// Cached env-gate: true if HYZERO_MCTS_TRACE is set and non-zero.
+fn mcts_summary_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("HYZERO_MCTS_TRACE")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .map(|n| n != 0)
+            .unwrap_or(false)
+    })
+}
+
+/// Process-wide summary log writer.  First thread to call creates (truncates) the file.
+fn summary_writer() -> &'static Mutex<Option<BufWriter<std::fs::File>>> {
+    static WRITER: OnceLock<Mutex<Option<BufWriter<std::fs::File>>>> = OnceLock::new();
+    WRITER.get_or_init(|| {
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open("logs/mcts_summary.log")
+            .ok()
+            .map(BufWriter::new);
+        Mutex::new(file)
+    })
+}
+
+/// Write one summary line for the current MCTS root call.
+///
+/// Computes the masked/renormalised prior over `legal_actions`, then emits a
+/// single grep-friendly line to `logs/mcts_summary.log`.
+fn trace_summary(
+    model_version: u64,
+    turn_count: usize,
+    legal_actions: &[ActionIndex],
+    policy: &[f32],
+    visit_distribution: &[f32],
+) {
+    let n_legal = legal_actions.len();
+    if n_legal == 0 {
+        return;
+    }
+
+    // Compute masked prior (renormalised over legal actions).
+    let sum: f32 = legal_actions.iter().map(|&a| policy[a as usize]).sum();
+    let masked: Vec<f32> = if sum < 1e-12f32 {
+        vec![1.0 / n_legal as f32; n_legal]
+    } else {
+        legal_actions.iter().map(|&a| policy[a as usize] / sum).collect()
+    };
+
+    // top_p: index (slot) with highest masked prior.
+    let top_p_idx = masked
+        .iter()
+        .enumerate()
+        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|(i, _)| i)
+        .unwrap_or(0);
+    let top_p = masked[top_p_idx];
+
+    // top_v: index (slot) with highest visit fraction.
+    let top_v_idx = visit_distribution
+        .iter()
+        .enumerate()
+        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+        .map(|(i, _)| i)
+        .unwrap_or(0);
+    let top_v_frac = visit_distribution.get(top_v_idx).copied().unwrap_or(0.0);
+
+    // n_visited: count of children with non-zero visit fraction.
+    let n_visited = visit_distribution.iter().filter(|&&v| v > 0.0).count();
+
+    // entropy over visited children only (natural log).
+    let entropy: f32 = visit_distribution
+        .iter()
+        .filter(|&&v| v > 0.0)
+        .map(|&v| -v * v.ln())
+        .sum();
+
+    let line = format!(
+        "[mcts_summary] v={model_version} move={turn_count} legal={n_legal} \
+         top_p_idx={top_p_idx} top_p={top_p:.4} top_v_idx={top_v_idx} \
+         top_v_frac={top_v_frac:.4} n_visited={n_visited} entropy={entropy:.4}\n"
+    );
+
+    if let Ok(mut guard) = summary_writer().lock() {
+        if let Some(ref mut w) = *guard {
+            let _ = w.write_all(line.as_bytes());
+            let _ = w.flush();
+        }
+    }
+}
 
 /// Configuration for a self-play game.
 #[derive(Debug, Clone)]
@@ -242,6 +338,11 @@ pub async fn play_game(
         // Extract results
         let visit_distribution = tree.extract_visit_distribution();
         let root_value = tree.root_value();
+
+        // Write one-line summary to logs/mcts_summary.log when HYZERO_MCTS_TRACE is set.
+        if mcts_summary_enabled() {
+            trace_summary(model_version, turn_count, &legal_actions, &policy, &visit_distribution);
+        }
 
         // Select action based on temperature
         let temperature = if turn_count < config.temperature_moves as usize {

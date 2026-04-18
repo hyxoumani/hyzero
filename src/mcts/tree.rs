@@ -3,6 +3,110 @@ use crate::mcts::evaluator::Evaluator;
 use crate::mcts::node::MCTSNode;
 use crate::mcts::puct::select_child;
 
+// ---------------------------------------------------------------------------
+// MCTS trace — enabled by HYZERO_MCTS_TRACE=1 (or any non-empty, non-"0" value).
+//
+// Design:
+//   TRACE_ENABLED   — OnceLock<bool>: env read once, zero-overhead when off.
+//   TRACE_WRITER_CLAIMED — AtomicUsize: CAS(0→1) lets the first tokio task claim
+//                           the writer; all others short-circuit.
+//   TRACE_FILE      — OnceLock<Mutex<Option<BufWriter<File>>>>: file handle that
+//                     survives across root calls; truncated on first open.
+//   TRACE_MOVE_CTR  — AtomicUsize: incremented each root call by the writer;
+//                     private to the writer in practice (only one task writes).
+//                     Capped at TRACE_MOVE_LIMIT to bound log size.
+// ---------------------------------------------------------------------------
+use std::fs::{File, OpenOptions};
+use std::io::{BufWriter, Write};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Mutex, OnceLock};
+
+const TRACE_MOVE_LIMIT: usize = 500;
+
+static TRACE_ENABLED: OnceLock<bool> = OnceLock::new();
+/// 0 = unclaimed, 1 = claimed by writer.
+static TRACE_WRITER_CLAIMED: AtomicUsize = AtomicUsize::new(0);
+static TRACE_FILE: OnceLock<Mutex<Option<BufWriter<File>>>> = OnceLock::new();
+static TRACE_MOVE_CTR: AtomicUsize = AtomicUsize::new(0);
+
+/// Returns true if HYZERO_MCTS_TRACE is set to a non-empty value that isn't "0".
+fn trace_enabled() -> bool {
+    *TRACE_ENABLED.get_or_init(|| {
+        std::env::var("HYZERO_MCTS_TRACE")
+            .map(|v| !v.is_empty() && v != "0")
+            .unwrap_or(false)
+    })
+}
+
+/// Attempt to claim the writer role for this task. Returns true only for the
+/// first caller (CAS 0→1 succeeds). All subsequent callers return false.
+fn try_claim_writer() -> bool {
+    TRACE_WRITER_CLAIMED
+        .compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok()
+}
+
+/// Returns true if this task has already claimed the writer (CLAIMED == 1 and
+/// we won the CAS at some earlier point). Since `try_claim_writer` is called
+/// exactly once per `run_simulations` invocation before any writes, we instead
+/// keep a thread-local sentinel to avoid re-CAS on subsequent calls.
+///
+/// Implementation note: tokio tasks run on OS threads; `thread_local!` is the
+/// right scope for "did this task win the CAS". We record the result in a
+/// thread-local so subsequent root calls from the same task skip the CAS.
+fn is_writer() -> bool {
+    WRITER_LOCAL.with(|w| *w.borrow())
+}
+
+use std::cell::RefCell;
+thread_local! {
+    static WRITER_LOCAL: RefCell<bool> = const { RefCell::new(false) };
+}
+
+/// Open (truncating) the trace log file and store the handle in TRACE_FILE.
+/// Must only be called by the writer task on its first root call.
+fn open_trace_file() -> bool {
+    let file_lock = TRACE_FILE.get_or_init(|| Mutex::new(None));
+    let mut guard = file_lock.lock().unwrap();
+    if guard.is_some() {
+        return true; // already open
+    }
+    match OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open("logs/mcts_trace.log")
+    {
+        Ok(f) => {
+            *guard = Some(BufWriter::new(f));
+            true
+        }
+        Err(e) => {
+            eprintln!("[mcts_trace] failed to open logs/mcts_trace.log: {e}");
+            false
+        }
+    }
+}
+
+/// Write a line to the trace file. Must only be called by the writer task.
+/// The trailing newline is added here.
+fn trace_write(line: &str) {
+    let file_lock = TRACE_FILE.get().unwrap();
+    let mut guard = file_lock.lock().unwrap();
+    if let Some(w) = guard.as_mut() {
+        let _ = writeln!(w, "{line}");
+    }
+}
+
+/// Flush the trace file. Called after each `final_visit_dist` write.
+fn trace_flush() {
+    let file_lock = TRACE_FILE.get().unwrap();
+    let mut guard = file_lock.lock().unwrap();
+    if let Some(w) = guard.as_mut() {
+        let _ = w.flush();
+    }
+}
+
 /// Return the top-K action indices by policy weight, descending.
 /// For MuZero's internal MCTS nodes we don't have a ground-truth legality mask,
 /// so we approximate legality by taking the K highest-prior actions. K=64 for chess.
@@ -154,7 +258,97 @@ impl MCTSTree {
 
     /// Run all simulations. Each simulation: select -> expand -> backpropagate.
     pub async fn run_simulations(&mut self, evaluator: &dyn Evaluator) {
-        for _ in 0..self.config.num_simulations {
+        // ---------------------------------------------------------------------------
+        // Trace setup (zero cost when HYZERO_MCTS_TRACE is unset or "0").
+        // ---------------------------------------------------------------------------
+        let do_trace = trace_enabled() && {
+            // First call: try to claim writer role.
+            if !is_writer() && try_claim_writer() {
+                WRITER_LOCAL.with(|w| *w.borrow_mut() = true);
+                open_trace_file();
+            }
+            is_writer()
+        };
+
+        // Determine the current move number (fetch-and-increment atomically).
+        // Only the writer task touches TRACE_MOVE_CTR, so no contention.
+        let move_num = if do_trace {
+            let m = TRACE_MOVE_CTR.fetch_add(1, Ordering::Relaxed);
+            if m >= TRACE_MOVE_LIMIT {
+                // Cap reached — stop writing for the rest of the game.
+                WRITER_LOCAL.with(|w| *w.borrow_mut() = false);
+                usize::MAX // sentinel; the block below is unreachable
+            } else {
+                m
+            }
+        } else {
+            usize::MAX
+        };
+
+        let do_trace = do_trace && move_num < TRACE_MOVE_LIMIT;
+
+        if do_trace {
+            let legal = self.root.legal_actions.len();
+            let c = self.config.exploration_constant;
+            let sims = self.config.num_simulations;
+            trace_write(&format!(
+                "[mcts_trace] move={move_num} root_setup legal={legal} c={c:.4} sims={sims}"
+            ));
+
+            // Log top-5 root priors.
+            let mut prior_idx: Vec<(usize, f32)> = self
+                .root
+                .priors
+                .iter()
+                .enumerate()
+                .map(|(i, &p)| (i, p))
+                .collect();
+            prior_idx.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            let top5: String = prior_idx
+                .iter()
+                .take(5)
+                .map(|(i, p)| format!("{}:{:.4}", i, p))
+                .collect::<Vec<_>>()
+                .join(" ");
+            trace_write(&format!(
+                "[mcts_trace] move={move_num} root_priors_top5 {top5}"
+            ));
+        }
+
+        for sim_i in 0..self.config.num_simulations {
+            // Log per-sim PUCT scores at root before selecting.
+            if do_trace {
+                let parent_visits = self.root.visit_count;
+                let c = self.config.exploration_constant;
+                let scores: String = self
+                    .root
+                    .children
+                    .iter()
+                    .enumerate()
+                    .map(|(i, child_opt)| {
+                        let (q, cv) = match child_opt {
+                            Some(ch) => {
+                                let q = if ch.visit_count > 0 {
+                                    ch.total_value / ch.visit_count as f32
+                                } else {
+                                    0.0
+                                };
+                                (q, ch.visit_count)
+                            }
+                            None => (0.0, 0),
+                        };
+                        let prior = self.root.priors[i];
+                        let expl = c * prior * (parent_visits as f32).sqrt() / (1.0 + cv as f32);
+                        let score = q + expl;
+                        format!("{}:q={:.4},p={:.4},N={},expl={:.4},puct={:.4}", i, q, prior, cv, expl, score)
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                trace_write(&format!(
+                    "[mcts_trace] move={move_num} sim={sim_i} root_scores {scores}"
+                ));
+            }
+
             // Collect the path of (child index) taken during selection
             let mut path: Vec<usize> = Vec::new();
 
@@ -210,8 +404,38 @@ impl MCTSTree {
                 }
             };
 
+            if do_trace {
+                let path_str: String = path
+                    .iter()
+                    .map(|i| i.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                trace_write(&format!(
+                    "[mcts_trace] move={move_num} sim={sim_i} path={path_str} leaf_value={value:.4}"
+                ));
+            }
+
             // Backpropagate: walk back up the path, updating visit counts and values
             self.backpropagate(&path, value);
+        }
+
+        // Log final visit distribution at the root.
+        if do_trace {
+            let visit_str: String = self
+                .root
+                .children
+                .iter()
+                .enumerate()
+                .map(|(i, c)| {
+                    let v = c.as_ref().map_or(0, |n| n.visit_count);
+                    format!("{}:{}", i, v)
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            trace_write(&format!(
+                "[mcts_trace] move={move_num} final_visit_dist {visit_str}"
+            ));
+            trace_flush();
         }
     }
 
