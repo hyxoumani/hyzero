@@ -177,10 +177,14 @@ class Trainer:
         self.policy_loss_weight = _parse_loss_weight_env("HYZERO_POLICY_LOSS_WEIGHT")
         self.value_loss_weight = _parse_loss_weight_env("HYZERO_VALUE_LOSS_WEIGHT")
         self.reward_loss_weight = _parse_loss_weight_env("HYZERO_REWARD_LOSS_WEIGHT")
+        self.policy_entropy_weight = _parse_loss_weight_env(
+            "HYZERO_POLICY_ENTROPY_WEIGHT", default=0.0
+        )
         print(
             f"[trainer] loss weights: policy={self.policy_loss_weight:.2f}"
             f" value={self.value_loss_weight:.2f}"
             f" reward={self.reward_loss_weight:.2f}"
+            f" entropy={self.policy_entropy_weight:.4f}"
         )
 
     def train_batch(self, batch: dict) -> dict:
@@ -318,6 +322,11 @@ class Trainer:
     ) -> torch.Tensor:
         """Cross-entropy between logits and a target probability distribution.
 
+        Optionally adds an entropy bonus −β·H(π) to penalize over-sharpening of the
+        output distribution, controlled by HYZERO_POLICY_ENTROPY_WEIGHT (default 0.0,
+        off). Equivalent to β·KL(π || Uniform) regularization up to an additive
+        constant. Applies at every unroll step (root + K dynamics steps).
+
         Args:
             logits:      [B, num_actions]
             targets:     [B, num_actions]  (soft probability distribution summing to 1)
@@ -335,7 +344,18 @@ class Trainer:
         # Since targets are always 0.0 at illegal positions, 0.0 * 0.0 = 0.0 is correct.
         # This avoids 0.0 * (-inf) = NaN in IEEE 754 arithmetic.
         log_probs = log_probs.nan_to_num(nan=0.0, neginf=0.0)
-        return -torch.sum(targets * log_probs, dim=-1).mean()
+        ce_loss = -torch.sum(targets * log_probs, dim=-1).mean()
+
+        if self.policy_entropy_weight > 0.0:
+            # Entropy bonus: penalize over-sharp output distributions.
+            # −β·H(π) = β·Σ π·log π  (equivalent to β·KL(π || Uniform) + const).
+            # Illegal moves contribute 0: probs=0 from -inf logits, log_probs=0 from
+            # nan_to_num → 0·0=0 (no NaN, no illegal-move pressure).
+            probs = F.softmax(logits, dim=-1)
+            neg_entropy = torch.sum(probs * log_probs, dim=-1).mean()
+            return ce_loss + self.policy_entropy_weight * neg_entropy
+
+        return ce_loss
 
     def get_weights(self) -> bytes:
         """Serialize network weights to bytes for inference server transfer.
