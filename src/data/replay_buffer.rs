@@ -51,7 +51,7 @@ impl ReplayBuffer {
     /// ~0 for draws) within every batch, preventing the "dead value head" collapse where
     /// V→constant because the training distribution is dominated by near-zero draw targets.
     ///
-    /// The decisive fraction is read from `HYZERO_DECISIVE_SAMPLE_FRAC` (default 0.5,
+    /// The decisive fraction is read from `HYZERO_DECISIVE_SAMPLE_FRAC` (default 0.25,
     /// clamped to [0.0, 1.0]). When no decisive trajectories exist (early training),
     /// falls back to uniform sampling across all trajectories.
     ///
@@ -66,12 +66,12 @@ impl ReplayBuffer {
 
         let min_len = unroll_k + 1;
 
-        // Read decisive fraction from env (default 0.5).
+        // Read decisive fraction from env (default 0.25).
         let decisive_frac = std::env::var("HYZERO_DECISIVE_SAMPLE_FRAC")
             .ok()
             .and_then(|v| v.parse::<f32>().ok())
             .map(|v| v.clamp(0.0, 1.0))
-            .unwrap_or(0.5);
+            .unwrap_or(0.25);
 
         // Partition eligible trajectories into decisive (checkmate) and all pools.
         let decisive_indices: Vec<usize> = self
