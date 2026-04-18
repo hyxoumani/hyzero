@@ -64,7 +64,13 @@ fn reward_blend_gamma() -> f32 {
 ///   - `steps[0]`: initial observation and root MCTS stats
 ///   - `steps[1..=K]`: subsequent unroll steps
 ///
-/// The action that led from step k to step k+1 is stored in `steps[k+1].action`.
+/// The action taken AT step k (transitioning s_k → s_{k+1}) is stored in `steps[k].action`
+/// — this is the convention used in `game_task::play_game`, which pushes each StepRecord
+/// with `action: selected_action` BEFORE applying the move.
+///
+/// MuZero dynamics unroll: `g(hidden_k, actions[k])` must feed the action that TRANSITIONS
+/// s_k → s_{k+1}, so `actions[bi, k] = encode_action_spatial(steps[k].action)` — NOT
+/// `steps[k+1].action` (which is the action at s_{k+1}, unrelated to the s_k → s_{k+1} step).
 pub fn assemble_batch_arrays(samples: &[TrainingSample], unroll_k: usize) -> BatchArrays {
     let b = samples.len();
     let kp1 = unroll_k + 1; // K+1
@@ -113,9 +119,10 @@ pub fn assemble_batch_arrays(samples: &[TrainingSample], unroll_k: usize) -> Bat
             }
         }
 
-        // actions[bi, k] = encode_action_spatial(steps[k+1].action) for k in 0..K
+        // actions[bi, k] = encode_action_spatial(steps[k].action) for k in 0..K
+        // (action taken AT step k, transitioning s_k → s_{k+1}). See doc-comment above.
         for k in 0..unroll_k {
-            let raw_action_idx = steps[k + 1].action;
+            let raw_action_idx = steps[k].action;
             let encoded = encode_action_spatial(raw_action_idx);
             let encoded = if apply_flip {
                 flip_action_planes(&encoded)
@@ -614,6 +621,96 @@ mod tests {
         );
         assert_eq!(arrays.batch_size, b);
         assert_eq!(arrays.unroll_k, k);
+    }
+
+
+    #[test]
+    fn test_dynamics_action_uses_step_k_not_step_kplus1() {
+        // REGRESSION TEST (2026-04-18): off-by-one bug in assemble_batch_arrays previously
+        // stored steps[k+1].action at actions[bi, k], feeding the dynamics network the
+        // action AT s_{k+1} instead of the action that TRANSITIONS s_k → s_{k+1}.
+        //
+        // StepRecord convention (see src/selfplay/game_task.rs: push is BEFORE apply_move):
+        //   steps[t].observation = obs(s_t)
+        //   steps[t].action      = a_t (action taken AT s_t, producing s_{t+1})
+        //
+        // MuZero unroll:
+        //   hidden_0 = h(obs_0), and for k in 0..K we compute
+        //   (hidden_{k+1}, reward) = g(hidden_k, actions[k])
+        // So actions[k] must be a_k = steps[k].action.
+
+        use crate::data::encoding::encode_action_spatial;
+
+        // Two steps, with *different* source squares to make the off-by-one visible:
+        //   steps[0].action: from_sq=0 (rank 0, file 0), to_sq=1  (action index 0*64+1 = 1)
+        //   steps[1].action: from_sq=7 (rank 0, file 7), to_sq=15 (action index 7*64+15 = 463)
+        let action_at_s0: u16 = 0 * 64 + 1;
+        let action_at_s1: u16 = 7 * 64 + 15;
+
+        let step_at_s0 = StepRecord {
+            observation: BoardObservation::default(),
+            action: action_at_s0,
+            visit_distribution: vec![1.0],
+            root_value: 0.0,
+            reward: 0.0,
+            legal_moves: vec![action_at_s0],
+            white_to_move: true,
+        };
+        let step_at_s1 = StepRecord {
+            observation: BoardObservation::default(),
+            action: action_at_s1,
+            visit_distribution: vec![1.0],
+            root_value: 0.0,
+            reward: 0.0,
+            legal_moves: vec![action_at_s1],
+            white_to_move: false, // opposite colour — still insensitive to apply_flip
+        };
+
+        // unroll_k = 1, so we have one dynamics step (actions[0]) and two StepRecords.
+        let k = 1usize;
+        let sample = TrainingSample {
+            steps: vec![step_at_s0, step_at_s1],
+            game_outcome: 0.0,
+            is_draw: false,
+        };
+
+        // Run many trials to cover both apply_flip paths (50/50 random) — the invariant
+        // (actions[0] corresponds to steps[0].action, possibly flipped) must hold in both.
+        use crate::data::encoding::flip_action_planes;
+        let encoded_a0 = encode_action_spatial(action_at_s0);
+        let encoded_a0_flipped = flip_action_planes(&encoded_a0);
+        let encoded_a1 = encode_action_spatial(action_at_s1);
+        let encoded_a1_flipped = flip_action_planes(&encoded_a1);
+
+        let mut hits_a0 = 0usize;
+        let mut hits_a1 = 0usize;
+        let trials = 100usize;
+        for _ in 0..trials {
+            let arrays = assemble_batch_arrays(&[sample.clone()], k);
+            let act_stride = 3 * 64;
+            let act0 = &arrays.actions[..act_stride];
+
+            let matches_a0 = act0 == encoded_a0.as_slice() || act0 == encoded_a0_flipped.as_slice();
+            let matches_a1 = act0 == encoded_a1.as_slice() || act0 == encoded_a1_flipped.as_slice();
+
+            if matches_a0 {
+                hits_a0 += 1;
+            }
+            if matches_a1 {
+                hits_a1 += 1;
+            }
+        }
+
+        assert_eq!(
+            hits_a0, trials,
+            "actions[0] must always encode steps[0].action (a_0), possibly flipped. Hits a_0={}, a_1={}",
+            hits_a0, hits_a1
+        );
+        assert_eq!(
+            hits_a1, 0,
+            "actions[0] must NEVER encode steps[1].action (a_1). Hits a_1={} indicates off-by-one bug.",
+            hits_a1
+        );
     }
 
     #[test]
