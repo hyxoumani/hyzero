@@ -845,6 +845,25 @@ mod tests {
     }
 
     #[test]
+    fn test_encode_board_initial_position_symmetry() {
+        let board = make_board();
+        let obs_white = encode_board(&board, Color::White, &[]);
+        let obs_black = encode_board(&board, Color::Black, &[]);
+        let diffs: Vec<(usize, f32, f32)> = (0..102*64)
+            .filter(|&i| (obs_white.planes[i] - obs_black.planes[i]).abs() > 1e-6)
+            .map(|i| (i, obs_white.planes[i], obs_black.planes[i]))
+            .collect();
+        if !diffs.is_empty() {
+            println!("Found {} differences (first 10):", diffs.len());
+            for (i, w, b) in diffs.iter().take(10) {
+                let plane = i / 64; let sq = i % 64;
+                println!("  plane={} sq={} white={} black={}", plane, sq, w, b);
+            }
+        }
+        assert!(diffs.is_empty(), "encode_board for initial position should be identical for both colors");
+    }
+
+    #[test]
     fn test_flip_obs_planes_castling_swap() {
         // Set my kingside (plane 96) and opp queenside (plane 99)
         let mut obs = vec![0.0f32; 102 * 64];
