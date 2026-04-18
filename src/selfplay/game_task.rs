@@ -426,6 +426,19 @@ pub async fn play_game(
         last.reward = game_outcome;
     }
 
+    // Lightweight per-game outcome trace (gated by HYZERO_MCTS_TRACE) — one line
+    // per game, streamed to stdout so experiments can compute decisive ratios
+    // without relying on the 1%-sampled PGN.
+    if mcts_summary_enabled() {
+        println!(
+            "[game_outcome] v={} len={} outcome={:.3} is_draw={}",
+            model_version,
+            turn_count,
+            game_outcome,
+            is_draw,
+        );
+    }
+
     // Sampled self-play PGN logging: 1% of games, for opening-diversity analysis.
     // Cheaply keyed on a single rng call; no impact on training dynamics.
     if rand::random::<f32>() < 0.01 {
