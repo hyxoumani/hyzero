@@ -99,4 +99,7 @@ pub struct GameTrajectory {
     pub steps: Vec<StepRecord>,
     pub game_outcome: f32,
     pub model_version: u64,
+    /// True if game ended non-decisively (stalemate, repetition, 50-move, cap, insufficient material).
+    /// False only for actual checkmate. Used by trainer to apply non-zero-sum draw penalty.
+    pub is_draw: bool,
 }

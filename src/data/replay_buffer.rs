@@ -12,6 +12,7 @@ use rand::Rng;
 pub struct TrainingSample {
     pub steps: Vec<StepRecord>,
     pub game_outcome: f32,
+    pub is_draw: bool,
 }
 
 /// Ring buffer of game trajectories with random sampling for training.
@@ -93,6 +94,7 @@ impl ReplayBuffer {
             samples.push(TrainingSample {
                 steps,
                 game_outcome: traj.game_outcome,
+                is_draw: traj.is_draw,
             });
         }
 
@@ -146,6 +148,7 @@ mod tests {
             steps: (0..num_steps).map(|_| make_step()).collect(),
             game_outcome: 1.0,
             model_version: 1,
+            is_draw: false,
         }
     }
 

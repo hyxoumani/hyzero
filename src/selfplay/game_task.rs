@@ -310,12 +310,13 @@ pub async fn play_game(
     // alone (without early termination on material imbalance) is a weaker incentive:
     // preserving material only pays off IF you survive to a real terminal, so passive
     // play still risks getting checkmated.
-    let game_outcome = match board.result() {
-        GameResult::Checkmate(Color::White) => 1.0,
-        GameResult::Checkmate(Color::Black) => -1.0,
+    let (game_outcome, is_draw) = match board.result() {
+        GameResult::Checkmate(Color::White) => (1.0f32, false),
+        GameResult::Checkmate(Color::Black) => (-1.0f32, false),
         _ => {
+            // All non-checkmate terminals: stalemate, repetition, 50-move, cap, insufficient material.
             let delta = compute_material_diff(&board);
-            (delta as f32 / 5.0).tanh()
+            ((delta as f32 / 5.0).tanh(), true)
         }
     };
 
@@ -346,6 +347,7 @@ pub async fn play_game(
         steps,
         game_outcome,
         model_version,
+        is_draw,
     }
 }
 
