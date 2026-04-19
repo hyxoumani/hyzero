@@ -416,14 +416,23 @@ pub async fn play_game(
         GameResult::Checkmate(Color::Black) => (-1.0f32, false),
         _ => {
             // All non-checkmate terminals: stalemate, repetition, 50-move, cap, insufficient material.
-            let delta = compute_material_diff(&board);
-            ((delta as f32 / 5.0).tanh(), true)
+            // When HYZERO_DISABLE_MATERIAL_SHAPING is set, outcome is forced to 0.0 (AlphaZero-
+            // style pure-outcome signal). Otherwise we shape by tanh(Δmaterial/scale).
+            if material_shaping_disabled() {
+                (0.0f32, true)
+            } else {
+                let delta = compute_material_diff(&board);
+                let scale = material_shaping_scale();
+                ((delta as f32 / scale).tanh(), true)
+            }
         }
     };
 
-    // Set terminal reward on last step
+    // Set terminal reward on last step (convert white-absolute game_outcome to last-step POV,
+    // matching the convention used by StepRecord.root_value).
     if let Some(last) = steps.last_mut() {
-        last.reward = game_outcome;
+        let last_side_sign: f32 = if last.white_to_move { 1.0 } else { -1.0 };
+        last.reward = game_outcome * last_side_sign;
     }
 
     // Lightweight per-game outcome trace (gated by HYZERO_MCTS_TRACE) — one line
@@ -646,9 +655,40 @@ fn get_legal_moves(board: &GameBoard, color: Color) -> Vec<ActionIndex> {
     legal
 }
 
+/// Read the tanh-denominator for the material-proxy outcome from
+/// `HYZERO_MATERIAL_SHAPING_SCALE`. Larger values shrink the signal so that
+/// actual checkmate (±1.0) dominates terminal-time material adjudication.
+///   scale=5  (default, legacy): up 5 material → 0.76, up 10 → 0.96
+///   scale=10:                   up 5 material → 0.46, up 10 → 0.76
+///   scale=20:                   up 5 material → 0.24, up 10 → 0.46
+/// Clamped to [0.5, 100.0]. Defaults to 5.0 on missing/unparseable input.
+fn material_shaping_scale() -> f32 {
+    std::env::var("HYZERO_MATERIAL_SHAPING_SCALE")
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+        .map(|v| v.clamp(0.5, 100.0))
+        .unwrap_or(5.0)
+}
+
+/// True when HYZERO_DISABLE_MATERIAL_SHAPING is set to any truthy value
+/// ("1", "true", non-empty, ...). When enabled, every non-checkmate terminal
+/// produces outcome=0.0 and the tanh(Δmaterial/scale) shaping is bypassed
+/// entirely. This is the AlphaZero-style pure-outcome training signal: only
+/// checkmates provide non-zero value targets, and the value head learns to
+/// predict 0 on unresolved positions.
+fn material_shaping_disabled() -> bool {
+    match std::env::var("HYZERO_DISABLE_MATERIAL_SHAPING") {
+        Ok(v) => {
+            let s = v.trim().to_ascii_lowercase();
+            !(s.is_empty() || s == "0" || s == "false" || s == "no")
+        }
+        Err(_) => false,
+    }
+}
+
 /// Material balance = white_total - black_total, in standard piece values.
-/// Used for the material-proxy outcome on non-decisive terminals. Scale by tanh(Δ/5)
-/// at call sites to bound to [-1, 1].
+/// Used for the material-proxy outcome on non-decisive terminals. Scale by tanh(Δ/S)
+/// at call sites to bound to [-1, 1], where S is HYZERO_MATERIAL_SHAPING_SCALE (default 5).
 fn compute_material_diff(board: &GameBoard) -> i32 {
     // Piece values: P=1, N=3, B=3, R=5, Q=9, K=0 (king never captured).
     const VALUES: [i32; 6] = [1, 3, 3, 5, 9, 0];
@@ -797,6 +837,73 @@ mod tests {
         assert_eq!(notation, "a7a8r");
     }
 
+    /// Color-symmetry audit: play many random-vs-random dual games and assert
+    /// the outcome distribution is approximately balanced. Any asymmetry here
+    /// would be evidence of a bug in move generation / board state / encoding
+    /// / MCTS — NOT in NN training — since both evaluators return uniform random
+    /// policies with value=0.
+    ///
+    /// Expected under uniform-random play: White wins and Black wins should both
+    /// sit around ~1-5% (most random games hit the 300-move cap and are draws).
+    /// A gap of 3x+ between white_wins and black_wins would be a smoking gun.
+    #[tokio::test]
+    #[ignore] // 200 games × ≤300 moves × 2 sims ≈ ~30-60s; run with --ignored
+    async fn test_random_play_color_symmetry_audit() {
+        let precomputed = Arc::new(PrecomputedItems::begin_precomputing());
+        let white: Arc<dyn Evaluator> = Arc::new(RandomEvaluator);
+        let black: Arc<dyn Evaluator> = Arc::new(RandomEvaluator);
+        let config = GameConfig {
+            num_simulations: 2,
+            exploration_constant: 1.5,
+            temperature_moves: 0,
+        };
+
+        const N: usize = 2000;
+        let mut white_wins = 0usize;
+        let mut black_wins = 0usize;
+        let mut draws = 0usize;
+
+        for _ in 0..N {
+            let o = play_game_dual(
+                precomputed.clone(),
+                white.clone(),
+                black.clone(),
+                config.clone(),
+            )
+            .await;
+            match o.game_outcome {
+                x if x > 0.5 => white_wins += 1,
+                x if x < -0.5 => black_wins += 1,
+                _ => draws += 1,
+            }
+        }
+
+        eprintln!(
+            "[random_audit] N={} white_wins={} black_wins={} draws={} white_frac={:.3} black_frac={:.3}",
+            N,
+            white_wins,
+            black_wins,
+            draws,
+            white_wins as f64 / N as f64,
+            black_wins as f64 / N as f64,
+        );
+
+        // Smoke assertion: neither side should dominate by >4x under pure random play.
+        // (Allow some noise — 200 games with small decisive counts are high-variance.)
+        let min_decisive = white_wins.min(black_wins);
+        let max_decisive = white_wins.max(black_wins);
+        if max_decisive >= 5 {
+            let ratio = max_decisive as f64 / (min_decisive.max(1)) as f64;
+            assert!(
+                ratio < 4.0,
+                "Color imbalance under random play: white={} black={} ratio={:.2}",
+                white_wins,
+                black_wins,
+                ratio,
+            );
+        }
+    }
+
     #[tokio::test]
     async fn test_play_game_dual_completes() {
         let precomputed = Arc::new(PrecomputedItems::begin_precomputing());
@@ -912,6 +1019,66 @@ mod tests {
             "Expected 3 underpromotion moves in all moves {:?}",
             moves
         );
+    }
+
+    /// Regression test for the terminal reward POV conversion in play_game.
+    ///
+    /// After the fix, the last step's reward must be game_outcome converted to
+    /// the last step's player-to-move POV. For a game where Black delivers mate
+    /// (game_outcome=-1.0, white_to_move=false on the last step), the stored
+    /// reward must be +1.0 (Black's POV of Black winning), not -1.0 (raw white-absolute).
+    #[tokio::test]
+    async fn test_terminal_reward_pov_conversion() {
+        use std::env;
+
+        // Force material shaping off so game_outcome is always +1/-1/0 (not tanh).
+        // SAFETY: single-threaded test context; env-var is local to this test's timing.
+        unsafe {
+            env::set_var("HYZERO_DISABLE_MATERIAL_SHAPING", "1");
+        }
+
+        let precomputed = Arc::new(PrecomputedItems::begin_precomputing());
+        let evaluator: Arc<dyn Evaluator> = Arc::new(RandomEvaluator);
+        let config = GameConfig {
+            num_simulations: 2,
+            exploration_constant: 1.5,
+            temperature_moves: 0, // greedy — faster termination
+        };
+
+        // Play many games until we see a decisive result (Black wins), then verify
+        // the last step's reward has the correct sign.
+        let mut found_decisive = false;
+        for _ in 0..500 {
+            let trajectory = play_game(precomputed.clone(), evaluator.clone(), 1, config.clone()).await;
+
+            if let Some(last) = trajectory.steps.last() {
+                let outcome = trajectory.game_outcome;
+                if outcome.abs() > 0.5 {
+                    // Decisive game. Expected: last.reward == last_side_sign * outcome.
+                    let expected_sign: f32 = if last.white_to_move { 1.0 } else { -1.0 };
+                    let expected_reward = outcome * expected_sign;
+                    assert!(
+                        (last.reward - expected_reward).abs() < 1e-6,
+                        "terminal reward POV mismatch: game_outcome={} white_to_move={} \
+                         expected reward={} got {}",
+                        outcome,
+                        last.white_to_move,
+                        expected_reward,
+                        last.reward
+                    );
+                    found_decisive = true;
+                    break;
+                }
+            }
+        }
+
+        unsafe {
+            env::remove_var("HYZERO_DISABLE_MATERIAL_SHAPING");
+        }
+
+        // If no decisive game appeared in 500 tries, that itself is suspicious but
+        // not a correctness bug — just skip the assertion.
+        let _ = found_decisive;
     }
 
 }

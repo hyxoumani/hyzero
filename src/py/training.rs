@@ -34,6 +34,22 @@ pub struct BatchArrays {
     pub unroll_k: usize,
 }
 
+/// Return whether color augmentation (obs/action/target flipping) is disabled via
+/// `HYZERO_DISABLE_COLOR_AUG`. Any non-empty value that is not "0" / "false" (case-
+/// insensitive) disables the augmentation. Default: enabled (returns false).
+///
+/// Intended for isolation experiments: if disabling augmentation removes the
+/// observed color asymmetry, the flip branch is the culprit.
+fn color_aug_disabled() -> bool {
+    match std::env::var("HYZERO_DISABLE_COLOR_AUG") {
+        Ok(v) => {
+            let s = v.trim().to_ascii_lowercase();
+            !(s.is_empty() || s == "0" || s == "false" || s == "no")
+        }
+        Err(_) => false,
+    }
+}
+
 /// Return the outcome blend coefficient β from the `HYZERO_VALUE_OUTCOME_BETA` env var.
 ///
 /// Reads the env var once per call; callers should cache the result across samples in
@@ -105,7 +121,8 @@ pub fn assemble_batch_arrays(samples: &[TrainingSample], unroll_k: usize) -> Bat
         // Color augmentation: randomly flip board perspective for 50% of samples.
         // The POV flip is applied to both observation and training targets; see the
         // per-step block below for the value/outcome sign convention.
-        let apply_flip: bool = rand::random();
+        // Gated by HYZERO_DISABLE_COLOR_AUG — set to 1 to force apply_flip=false.
+        let apply_flip: bool = if color_aug_disabled() { false } else { rand::random() };
 
         // observations[bi, k] = steps[k].observation.planes (optionally color-flipped)
         // for k in 0..=unroll_k. All K+1 steps are stored for consistency loss.
@@ -1044,11 +1061,12 @@ mod tests {
         }
     }
 
-    /// Serialize tests that mutate HYZERO_REWARD_OUTCOME_GAMMA to prevent data races.
+    /// Serialize tests that mutate env vars read during batch assembly.
     ///
     /// Rust tests run in parallel by default; env-var mutations are process-global.
-    /// Holding this lock for the duration of any test that reads or writes
-    /// HYZERO_REWARD_OUTCOME_GAMMA prevents races between the two reward-blend tests.
+    /// Any test that reads or writes HYZERO_REWARD_OUTCOME_GAMMA,
+    /// HYZERO_VALUE_OUTCOME_BETA, or HYZERO_DISABLE_COLOR_AUG MUST hold this lock
+    /// for its full duration to prevent races with other env-mutating tests.
     fn reward_gamma_env_lock() -> &'static std::sync::Mutex<()> {
         static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
         LOCK.get_or_init(|| std::sync::Mutex::new(()))
@@ -1062,6 +1080,7 @@ mod tests {
     fn test_reward_target_blend_default() {
         let _guard = reward_gamma_env_lock().lock().unwrap();
         std::env::remove_var("HYZERO_REWARD_OUTCOME_GAMMA");
+        std::env::remove_var("HYZERO_DISABLE_COLOR_AUG");
 
         let k = 4usize;
 
@@ -1118,6 +1137,7 @@ mod tests {
     #[test]
     fn test_reward_target_blend_with_outcome() {
         let _guard = reward_gamma_env_lock().lock().unwrap();
+        std::env::remove_var("HYZERO_DISABLE_COLOR_AUG");
         // SAFETY: protected by reward_gamma_env_lock(); no concurrent env-var access.
         unsafe {
             std::env::set_var("HYZERO_REWARD_OUTCOME_GAMMA", "0.5");
@@ -1208,6 +1228,89 @@ mod tests {
         );
     }
 
+    /// Regression test for the terminal reward POV convention.
+    ///
+    /// game_outcome is white-absolute (-1.0 = Black wins). The terminal step has
+    /// white_to_move=false and reward=+1.0 (Black's POV of Black winning = +1.0),
+    /// matching the fixed convention in game_task.rs. With γ=0.0 and aug disabled,
+    /// assemble_batch_arrays must pass through +1.0 unchanged (not invert to -1.0).
+    #[test]
+    fn test_terminal_reward_in_step_pov_not_white_absolute() {
+        let _guard = reward_gamma_env_lock().lock().unwrap();
+        std::env::remove_var("HYZERO_REWARD_OUTCOME_GAMMA");
+        // SAFETY: protected by reward_gamma_env_lock(); no concurrent env-var access.
+        unsafe {
+            std::env::set_var("HYZERO_DISABLE_COLOR_AUG", "1");
+        }
+
+        let k = 3usize;
+
+        // 4-step trajectory: Black delivers mate at step 3.
+        // steps[3].white_to_move=false, reward=+1.0 (Black's POV of Black winning = +1.0).
+        // game_outcome=-1.0 (white-absolute: Black wins).
+        let steps = vec![
+            StepRecord {
+                observation: BoardObservation::default(),
+                action: 0,
+                visit_distribution: vec![1.0],
+                root_value: 0.0,
+                reward: 0.0,
+                legal_moves: vec![0],
+                white_to_move: true,  // step 0: White to move
+            },
+            StepRecord {
+                observation: BoardObservation::default(),
+                action: 0,
+                visit_distribution: vec![1.0],
+                root_value: 0.0,
+                reward: 0.0,
+                legal_moves: vec![0],
+                white_to_move: false, // step 1: Black to move
+            },
+            StepRecord {
+                observation: BoardObservation::default(),
+                action: 0,
+                visit_distribution: vec![1.0],
+                root_value: 0.0,
+                reward: 0.0,
+                legal_moves: vec![0],
+                white_to_move: true,  // step 2: White to move
+            },
+            StepRecord {
+                observation: BoardObservation::default(),
+                action: 0,
+                visit_distribution: vec![1.0],
+                root_value: 0.0,
+                reward: 1.0,          // +1.0 from Black's POV (Black wins = +1.0 in step POV)
+                legal_moves: vec![0],
+                white_to_move: false, // step 3: Black to move (delivered mate)
+            },
+        ];
+
+        let sample = TrainingSample {
+            steps,
+            game_outcome: -1.0, // white-absolute: Black wins
+            is_draw: false,
+        };
+
+        // With γ=0.0 and aug disabled, target_rewards[k] = flip_sign * step.reward.
+        // flip_sign=1.0 (aug disabled). So target_rewards[3] must equal +1.0.
+        // Before the game_task.rs fix, last.reward would be stored as game_outcome=-1.0,
+        // and target_rewards[3] would be -1.0 (wrong sign).
+        let arrays = assemble_batch_arrays(&[sample], k);
+        assert!(
+            (arrays.target_rewards[3] - 1.0).abs() < 1e-6,
+            "target_rewards[3] should be +1.0 (Black's POV of Black winning), got {}",
+            arrays.target_rewards[3]
+        );
+        // Intermediate steps should have reward 0.0 (pass-through)
+        assert!((arrays.target_rewards[0]).abs() < 1e-6, "step 0 reward should be 0.0");
+        assert!((arrays.target_rewards[1]).abs() < 1e-6, "step 1 reward should be 0.0");
+        assert!((arrays.target_rewards[2]).abs() < 1e-6, "step 2 reward should be 0.0");
+
+        std::env::remove_var("HYZERO_DISABLE_COLOR_AUG");
+    }
+
     /// Regression test for the apply_flip value-target POV bug.
     ///
     /// When color augmentation flips the observation, both the stored root_value
@@ -1226,8 +1329,11 @@ mod tests {
     /// implied by which slot was populated.
     #[test]
     fn test_value_target_sign_under_flip_matches_observation_pov() {
+        let _guard = reward_gamma_env_lock().lock().unwrap();
         std::env::remove_var("HYZERO_VALUE_OUTCOME_BETA");
         std::env::remove_var("HYZERO_REWARD_OUTCOME_GAMMA");
+        // Test requires both flip branches to fire; ensure aug is not disabled.
+        std::env::remove_var("HYZERO_DISABLE_COLOR_AUG");
 
         // Distinct root_value so we can see sign flip in the target.
         let root_value: f32 = 0.7;
