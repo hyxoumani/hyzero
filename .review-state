@@ -1,0 +1,18 @@
+reviewed_head: 30419020ba87a1dc397d3fd60744ef4e75d61e38
+reviewed_at: 2026-04-19
+reviewer: claude-opus-4-7
+commits_reviewed:
+  - bb39db6  # encoding: current-player perspective
+  - d8aa3c1  # eval: log PGN moves
+  - 9c57ece  # selfplay: material proxy for draws
+  - 0f35653  # config: hidden_channels 64→128
+  - c6cd3f1  # selfplay: resume from checkpoint
+  - 0a07591  # data: color augmentation
+  - 1846b78  # selfplay: material-at-cap + adjudication
+  - 447bce8  # mcts: deterministic backup test
+  - 6efe57d  # mcts: top-K=64 children + correct backup signs
+  - 294e63e  # trainer: reward soft-blend γ
+  - a64e547  # trainer: cosine LR schedule
+  - 17dce57  # trainer: tunable loss weights
+  - 2a273d4  # metric: promotions count vs version tag
+  - d419f08  # champion: cross-run loading of best.pt
