@@ -15,7 +15,8 @@ use crate::data::{
 /// Flat arrays assembled from a batch of `TrainingSample` for Python training.
 ///
 /// Array shapes:
-///   observations:    [B, 103, 8, 8]  stored flat as B * NUM_OBS_PLANES * 64 (f32)
+///   observations:    [B, K+1, 102, 8, 8]  stored flat as B * (K+1) * NUM_OBS_PLANES * 64 (f32)
+///                    All K+1 steps are included for EfficientZero consistency loss.
 ///   actions:         [B, K, 3, 8, 8] stored flat as B * K * 192 (f32)
 ///   target_policies: [B, K+1, 4672]  stored flat as B * (K+1) * NUM_ACTIONS (f32)
 ///   target_values:   [B, K+1]        stored flat as B * (K+1) (f32)
@@ -31,6 +32,22 @@ pub struct BatchArrays {
     pub legal_masks: Vec<bool>,
     pub batch_size: usize,
     pub unroll_k: usize,
+}
+
+/// Return whether color augmentation (obs/action/target flipping) is disabled via
+/// `HYZERO_DISABLE_COLOR_AUG`. Any non-empty value that is not "0" / "false" (case-
+/// insensitive) disables the augmentation. Default: enabled (returns false).
+///
+/// Intended for isolation experiments: if disabling augmentation removes the
+/// observed color asymmetry, the flip branch is the culprit.
+fn color_aug_disabled() -> bool {
+    match std::env::var("HYZERO_DISABLE_COLOR_AUG") {
+        Ok(v) => {
+            let s = v.trim().to_ascii_lowercase();
+            !(s.is_empty() || s == "0" || s == "false" || s == "no")
+        }
+        Err(_) => false,
+    }
 }
 
 /// Return the outcome blend coefficient β from the `HYZERO_VALUE_OUTCOME_BETA` env var.
@@ -63,12 +80,18 @@ fn reward_blend_gamma() -> f32 {
 ///   - `steps[0]`: initial observation and root MCTS stats
 ///   - `steps[1..=K]`: subsequent unroll steps
 ///
-/// The action that led from step k to step k+1 is stored in `steps[k+1].action`.
+/// The action taken AT step k (transitioning s_k → s_{k+1}) is stored in `steps[k].action`
+/// — this is the convention used in `game_task::play_game`, which pushes each StepRecord
+/// with `action: selected_action` BEFORE applying the move.
+///
+/// MuZero dynamics unroll: `g(hidden_k, actions[k])` must feed the action that TRANSITIONS
+/// s_k → s_{k+1}, so `actions[bi, k] = encode_action_spatial(steps[k].action)` — NOT
+/// `steps[k+1].action` (which is the action at s_{k+1}, unrelated to the s_k → s_{k+1} step).
 pub fn assemble_batch_arrays(samples: &[TrainingSample], unroll_k: usize) -> BatchArrays {
     let b = samples.len();
     let kp1 = unroll_k + 1; // K+1
 
-    let obs_stride = NUM_OBS_PLANES * 64; // 103 * 64 = 6592
+    let obs_stride = NUM_OBS_PLANES * 64; // 102 * 64 = 6528
     let act_stride = 3 * 64;             // 192
     let pol_stride = NUM_ACTIONS;         // 4672
 
@@ -76,7 +99,9 @@ pub fn assemble_batch_arrays(samples: &[TrainingSample], unroll_k: usize) -> Bat
     let beta = outcome_blend_beta();
     let gamma = reward_blend_gamma();
 
-    let mut observations = vec![0.0f32; b * obs_stride];
+    // observations now includes all K+1 steps for EfficientZero consistency loss.
+    // Shape: [B, K+1, NUM_OBS_PLANES, 8, 8] stored flat as B * (K+1) * obs_stride.
+    let mut observations = vec![0.0f32; b * kp1 * obs_stride];
     let mut actions = vec![0.0f32; b * unroll_k * act_stride];
     let mut target_policies = vec![0.0f32; b * kp1 * pol_stride];
     let mut target_values = vec![0.0f32; b * kp1];
@@ -94,22 +119,28 @@ pub fn assemble_batch_arrays(samples: &[TrainingSample], unroll_k: usize) -> Bat
         );
 
         // Color augmentation: randomly flip board perspective for 50% of samples.
-        let apply_flip: bool = rand::random();
-        let effective_outcome = if apply_flip { -sample.game_outcome } else { sample.game_outcome };
+        // The POV flip is applied to both observation and training targets; see the
+        // per-step block below for the value/outcome sign convention.
+        // Gated by HYZERO_DISABLE_COLOR_AUG — set to 1 to force apply_flip=false.
+        let apply_flip: bool = if color_aug_disabled() { false } else { rand::random() };
 
-        // observations[bi] = steps[0].observation.planes (optionally color-flipped)
-        let obs_base = bi * obs_stride;
-        if apply_flip {
-            let flipped = flip_obs_planes(&steps[0].observation.planes[..obs_stride]);
-            observations[obs_base..obs_base + obs_stride].copy_from_slice(&flipped);
-        } else {
-            observations[obs_base..obs_base + obs_stride]
-                .copy_from_slice(&steps[0].observation.planes[..obs_stride]);
+        // observations[bi, k] = steps[k].observation.planes (optionally color-flipped)
+        // for k in 0..=unroll_k. All K+1 steps are stored for consistency loss.
+        for (k, step_k) in steps.iter().enumerate().take(unroll_k + 1) {
+            let obs_base = (bi * kp1 + k) * obs_stride;
+            if apply_flip {
+                let flipped = flip_obs_planes(&step_k.observation.planes[..obs_stride]);
+                observations[obs_base..obs_base + obs_stride].copy_from_slice(&flipped);
+            } else {
+                observations[obs_base..obs_base + obs_stride]
+                    .copy_from_slice(&step_k.observation.planes[..obs_stride]);
+            }
         }
 
-        // actions[bi, k] = encode_action_spatial(steps[k+1].action) for k in 0..K
+        // actions[bi, k] = encode_action_spatial(steps[k].action) for k in 0..K
+        // (action taken AT step k, transitioning s_k → s_{k+1}). See doc-comment above.
         for k in 0..unroll_k {
-            let raw_action_idx = steps[k + 1].action;
+            let raw_action_idx = steps[k].action;
             let encoded = encode_action_spatial(raw_action_idx);
             let encoded = if apply_flip {
                 flip_action_planes(&encoded)
@@ -120,14 +151,19 @@ pub fn assemble_batch_arrays(samples: &[TrainingSample], unroll_k: usize) -> Bat
             actions[act_base..act_base + act_stride].copy_from_slice(&encoded);
         }
 
-        // Determine root side-to-move from observation plane 101 (1.0 = White).
-        // steps[0] is the root position of this training sample.
-        // When flipped, plane 101 was already inverted by flip_obs_planes, so we
-        // read the same cell from the (possibly-flipped) observations buffer.
-        // Computed once per sample; only ply_flip is per-k.
-        let root_white_to_move_val = observations[obs_base + 101 * 64];
-        let root_white_to_move = root_white_to_move_val > 0.5;
-        let root_side_sign: f32 = if root_white_to_move { 1.0 } else { -1.0 };
+        // Color-augmentation POV convention.
+        //
+        // Under apply_flip, `flip_obs_planes` mirrors the board and swaps my/opp slots,
+        // so the network sees the position from the OPPOSITE player's POV. Both the
+        // stored `step.root_value` (originally in step-k-side POV) and any outcome
+        // derived from `game_outcome` must therefore be NEGATED to match the flipped
+        // observation's POV. The ORIGINAL `steps[0].white_to_move` drives the sign —
+        // not a "flipped white_to_move" — because the outcome is computed from the
+        // pre-flip trajectory's POV and then negated once globally.
+        //
+        // Regression test: `test_value_target_sign_under_flip_matches_observation_pov`.
+        let flip_sign: f32 = if apply_flip { -1.0 } else { 1.0 };
+        let original_root_side_sign: f32 = if steps[0].white_to_move { 1.0 } else { -1.0 };
 
         // target_policies, target_values, target_rewards for k in 0..=K
         for k in 0..kp1 {
@@ -153,19 +189,22 @@ pub fn assemble_batch_arrays(samples: &[TrainingSample], unroll_k: usize) -> Bat
             // Entries for actions not in legal_moves stay 0.0 from initialization
 
             // At step k, side alternates each ply. Convert game_outcome (White-absolute)
-            // to the perspective of whoever is to move at step k.
+            // to the perspective of whoever is to move at step k, then negate under flip
+            // so the POV matches the flipped observation.
             let ply_flip: f32 = if k % 2 == 0 { 1.0 } else { -1.0 };
             let outcome_in_step_perspective =
-                effective_outcome * root_side_sign * ply_flip;
+                flip_sign * sample.game_outcome * original_root_side_sign * ply_flip;
 
-            // Soft blend: 90% MCTS Q (preserves learned signal), 10% outcome
-            // (injects outcome-aligned gradient to break self-referential bootstrap).
+            // step.root_value is in the ORIGINAL step-k-side POV; flip_sign negates it
+            // when the observation is flipped.
+            let root_value_target = flip_sign * step.root_value;
             target_values[bi * kp1 + k] =
-                (1.0 - beta) * step.root_value + beta * outcome_in_step_perspective;
-            // Reward soft blend: γ=0.0 by default (no-op). Setting HYZERO_REWARD_OUTCOME_GAMMA
-            // injects outcome-aligned gradient into the reward head to prevent trivial-zero collapse.
+                (1.0 - beta) * root_value_target + beta * outcome_in_step_perspective;
+            // step.reward is only non-zero on the trajectory's last step; apply the same
+            // POV flip so the reward head sees a consistent sign convention.
+            let reward_target = flip_sign * step.reward;
             target_rewards[bi * kp1 + k] =
-                (1.0 - gamma) * step.reward + gamma * outcome_in_step_perspective;
+                (1.0 - gamma) * reward_target + gamma * outcome_in_step_perspective;
         }
 
         // legal_masks[bi]: derive from steps[0].legal_moves (root position only)
@@ -201,13 +240,15 @@ pub struct TrainResult {
     pub policy_loss: f64,
     pub value_loss: f64,
     pub reward_loss: f64,
+    pub consistency_loss: f64,
 }
 
 /// Call `trainer.train_batch(batch_dict)` through the GIL and return all loss components.
 ///
-/// Converts flat Rust `Vec<f32>` arrays into shaped numpy arrays (`[B, 103, 8, 8]` obs,
-/// `[B, K+1, 4672]` policies), builds the Python dict, calls `train_batch`, and extracts
-/// all four loss values.
+/// Converts flat Rust `Vec<f32>` arrays into shaped numpy arrays:
+///   observations: `[B, K+1, 102, 8, 8]` — all K+1 steps for EfficientZero consistency loss
+///   policies: `[B, K+1, 4672]`
+/// Builds the Python dict, calls `train_batch`, and extracts all five loss values.
 pub fn train_batch_python(
     py: Python<'_>,
     trainer: &Py<PyAny>,
@@ -221,7 +262,7 @@ pub fn train_batch_python(
 
     // Build shaped numpy arrays
     let obs_arr = arrays.observations.into_pyarray(py);
-    let obs_np = obs_arr.reshape([b, NUM_OBS_PLANES, 8, 8])?;
+    let obs_np = obs_arr.reshape([b, kp1, NUM_OBS_PLANES, 8, 8])?;
 
     let act_arr = arrays.actions.into_pyarray(py);
     let actions_np = act_arr.reshape([b, k, 3, 8, 8])?;
@@ -256,6 +297,7 @@ pub fn train_batch_python(
         policy_loss: bound.get_item("policy_loss")?.extract()?,
         value_loss: bound.get_item("value_loss")?.extract()?,
         reward_loss: bound.get_item("reward_loss")?.extract()?,
+        consistency_loss: bound.get_item("consistency_loss")?.extract()?,
     })
 }
 
@@ -461,12 +503,13 @@ impl PyTrainingThread {
                             }
 
                             println!(
-                                "[py_training] step {}: total={:.4} policy={:.4} value={:.4} reward={:.4} (v{})",
+                                "[py_training] step {}: total={:.4} policy={:.4} value={:.4} reward={:.4} consistency={:.4} (v{})",
                                 self.total_train_steps,
                                 result.total_loss,
                                 result.policy_loss,
                                 result.value_loss,
                                 result.reward_loss,
+                                result.consistency_loss,
                                 self.model_version,
                             );
                         }
@@ -548,6 +591,7 @@ mod tests {
             root_value: 0.5,
             reward: 0.1,
             legal_moves: vec![42],
+            white_to_move: true,
         }
     }
 
@@ -557,6 +601,7 @@ mod tests {
                 .map(|_| make_step_with_dist(vec![1.0]))
                 .collect(),
             game_outcome: 1.0,
+            is_draw: false,
         }
     }
 
@@ -572,9 +617,9 @@ mod tests {
 
         assert_eq!(
             arrays.observations.len(),
-            b * NUM_OBS_PLANES * 64,
-            "observations length should be B * NUM_OBS_PLANES * 64 = {}",
-            b * NUM_OBS_PLANES * 64
+            b * kp1 * NUM_OBS_PLANES * 64,
+            "observations length should be B * (K+1) * NUM_OBS_PLANES * 64 = {}",
+            b * kp1 * NUM_OBS_PLANES * 64
         );
         assert_eq!(
             arrays.actions.len(),
@@ -604,6 +649,96 @@ mod tests {
         assert_eq!(arrays.unroll_k, k);
     }
 
+
+    #[test]
+    fn test_dynamics_action_uses_step_k_not_step_kplus1() {
+        // REGRESSION TEST (2026-04-18): off-by-one bug in assemble_batch_arrays previously
+        // stored steps[k+1].action at actions[bi, k], feeding the dynamics network the
+        // action AT s_{k+1} instead of the action that TRANSITIONS s_k → s_{k+1}.
+        //
+        // StepRecord convention (see src/selfplay/game_task.rs: push is BEFORE apply_move):
+        //   steps[t].observation = obs(s_t)
+        //   steps[t].action      = a_t (action taken AT s_t, producing s_{t+1})
+        //
+        // MuZero unroll:
+        //   hidden_0 = h(obs_0), and for k in 0..K we compute
+        //   (hidden_{k+1}, reward) = g(hidden_k, actions[k])
+        // So actions[k] must be a_k = steps[k].action.
+
+        use crate::data::encoding::encode_action_spatial;
+
+        // Two steps, with *different* source squares to make the off-by-one visible:
+        //   steps[0].action: from_sq=0 (rank 0, file 0), to_sq=1  (action index 0*64+1 = 1)
+        //   steps[1].action: from_sq=7 (rank 0, file 7), to_sq=15 (action index 7*64+15 = 463)
+        let action_at_s0: u16 = 0 * 64 + 1;
+        let action_at_s1: u16 = 7 * 64 + 15;
+
+        let step_at_s0 = StepRecord {
+            observation: BoardObservation::default(),
+            action: action_at_s0,
+            visit_distribution: vec![1.0],
+            root_value: 0.0,
+            reward: 0.0,
+            legal_moves: vec![action_at_s0],
+            white_to_move: true,
+        };
+        let step_at_s1 = StepRecord {
+            observation: BoardObservation::default(),
+            action: action_at_s1,
+            visit_distribution: vec![1.0],
+            root_value: 0.0,
+            reward: 0.0,
+            legal_moves: vec![action_at_s1],
+            white_to_move: false, // opposite colour — still insensitive to apply_flip
+        };
+
+        // unroll_k = 1, so we have one dynamics step (actions[0]) and two StepRecords.
+        let k = 1usize;
+        let sample = TrainingSample {
+            steps: vec![step_at_s0, step_at_s1],
+            game_outcome: 0.0,
+            is_draw: false,
+        };
+
+        // Run many trials to cover both apply_flip paths (50/50 random) — the invariant
+        // (actions[0] corresponds to steps[0].action, possibly flipped) must hold in both.
+        use crate::data::encoding::flip_action_planes;
+        let encoded_a0 = encode_action_spatial(action_at_s0);
+        let encoded_a0_flipped = flip_action_planes(&encoded_a0);
+        let encoded_a1 = encode_action_spatial(action_at_s1);
+        let encoded_a1_flipped = flip_action_planes(&encoded_a1);
+
+        let mut hits_a0 = 0usize;
+        let mut hits_a1 = 0usize;
+        let trials = 100usize;
+        for _ in 0..trials {
+            let arrays = assemble_batch_arrays(&[sample.clone()], k);
+            let act_stride = 3 * 64;
+            let act0 = &arrays.actions[..act_stride];
+
+            let matches_a0 = act0 == encoded_a0.as_slice() || act0 == encoded_a0_flipped.as_slice();
+            let matches_a1 = act0 == encoded_a1.as_slice() || act0 == encoded_a1_flipped.as_slice();
+
+            if matches_a0 {
+                hits_a0 += 1;
+            }
+            if matches_a1 {
+                hits_a1 += 1;
+            }
+        }
+
+        assert_eq!(
+            hits_a0, trials,
+            "actions[0] must always encode steps[0].action (a_0), possibly flipped. Hits a_0={}, a_1={}",
+            hits_a0, hits_a1
+        );
+        assert_eq!(
+            hits_a1, 0,
+            "actions[0] must NEVER encode steps[1].action (a_1). Hits a_1={} indicates off-by-one bug.",
+            hits_a1
+        );
+    }
+
     #[test]
     fn test_batch_assembly_maps_visit_dist_to_action_indices() {
         use crate::data::encoding::flip_action;
@@ -623,11 +758,13 @@ mod tests {
             root_value: 0.5,
             reward: 0.1,
             legal_moves: legal_moves.clone(),
+            white_to_move: true,
         };
 
         let sample = TrainingSample {
             steps: (0..kp1).map(|_| step.clone()).collect(),
             game_outcome: 1.0,
+            is_draw: false,
         };
 
         let arrays = assemble_batch_arrays(&[sample], k);
@@ -787,26 +924,19 @@ mod tests {
         drop(traj_tx);
     }
 
-    /// Build a minimal StepRecord with all-zero planes except plane 101 (side-to-move).
+    /// Build a minimal StepRecord with the given side-to-move and root value.
     ///
-    /// `white_to_move` sets plane 101 to 1.0 (White) or 0.0 (Black).
+    /// `white_to_move` is stored directly on the record (plane 101 removed in Phase 3b).
     /// `root_value` is the MCTS Q-estimate for this step.
     fn make_step_with_side(white_to_move: bool, root_value: f32) -> StepRecord {
-        let mut planes = vec![0.0f32; NUM_OBS_PLANES * 64];
-        if white_to_move {
-            // Set all 64 squares of plane 101 to 1.0
-            let base = 101 * 64;
-            for sq in 0..64 {
-                planes[base + sq] = 1.0;
-            }
-        }
         StepRecord {
-            observation: BoardObservation { planes },
+            observation: BoardObservation::default(),
             action: 0,
             visit_distribution: vec![1.0],
             root_value,
             reward: 0.0,
             legal_moves: vec![0],
+            white_to_move,
         }
     }
 
@@ -831,36 +961,27 @@ mod tests {
                 root_step.clone(),   // k=2 White to move
                 other_step.clone(),  // k=3 Black to move
             ],
-            game_outcome: 1.0, // White wins
+            game_outcome: 1.0, // White wins (checkmate)
+            is_draw: false,
         };
 
-        let arrays = assemble_batch_arrays(&[sample], k);
-
-        // β=0.1; root_value=0.0; game_outcome=1.0; root_side_sign=+1
-        // k=0: 0.9*0.0 + 0.1*(1.0 * +1 * +1) = +0.1
-        // k=1: 0.9*0.0 + 0.1*(1.0 * +1 * -1) = -0.1
-        // k=2: 0.9*0.0 + 0.1*(1.0 * +1 * +1) = +0.1
-        // k=3: 0.9*0.0 + 0.1*(1.0 * +1 * -1) = -0.1
-        assert!(
-            (arrays.target_values[0] - 0.1).abs() < 1e-6,
-            "k=0 expected +0.1, got {}",
-            arrays.target_values[0]
-        );
-        assert!(
-            (arrays.target_values[1] - (-0.1)).abs() < 1e-6,
-            "k=1 expected -0.1, got {}",
-            arrays.target_values[1]
-        );
-        assert!(
-            (arrays.target_values[2] - 0.1).abs() < 1e-6,
-            "k=2 expected +0.1, got {}",
-            arrays.target_values[2]
-        );
-        assert!(
-            (arrays.target_values[3] - (-0.1)).abs() < 1e-6,
-            "k=3 expected -0.1, got {}",
-            arrays.target_values[3]
-        );
+        // β=0.1; root_value=0.0; game_outcome=1.0; root_side_sign=+1.
+        // Unflipped expected targets [k=0..=3]: [+0.1, -0.1, +0.1, -0.1].
+        // Under color augmentation (apply_flip), all signs flip uniformly.
+        // Check invariant over many trials: shape matches either unflipped or flipped.
+        let expected_unflipped = [0.1f32, -0.1, 0.1, -0.1];
+        for _ in 0..64 {
+            let arrays = assemble_batch_arrays(&[sample.clone()], k);
+            let flip_sign = if arrays.target_values[0] > 0.0 { 1.0 } else { -1.0 };
+            for (k_idx, &exp) in expected_unflipped.iter().enumerate() {
+                let want = flip_sign * exp;
+                let got = arrays.target_values[k_idx];
+                assert!(
+                    (got - want).abs() < 1e-6,
+                    "k={k_idx} expected {want}, got {got} (flip_sign={flip_sign})",
+                );
+            }
+        }
     }
 
     /// Same as above but with root Black to move and Black winning.
@@ -882,39 +1003,30 @@ mod tests {
                 root_step.clone(),   // k=2 Black to move
                 other_step.clone(),  // k=3 White to move
             ],
-            game_outcome: -1.0, // Black wins
+            game_outcome: -1.0, // Black wins (checkmate)
+            is_draw: false,
         };
 
-        let arrays = assemble_batch_arrays(&[sample], k);
-
-        // β=0.1; root_value=0.0; game_outcome=-1.0; root_side_sign=-1
-        // k=0: 0.9*0.0 + 0.1*((-1.0)*(-1)*(+1)) = +0.1  (Black wins → positive for Black)
-        // k=1: 0.9*0.0 + 0.1*((-1.0)*(-1)*(-1)) = -0.1  (White's perspective, White lost)
-        // k=2: 0.9*0.0 + 0.1*((-1.0)*(-1)*(+1)) = +0.1
-        // k=3: 0.9*0.0 + 0.1*((-1.0)*(-1)*(-1)) = -0.1
-        assert!(
-            (arrays.target_values[0] - 0.1).abs() < 1e-6,
-            "k=0 expected +0.1, got {}",
-            arrays.target_values[0]
-        );
-        assert!(
-            (arrays.target_values[1] - (-0.1)).abs() < 1e-6,
-            "k=1 expected -0.1, got {}",
-            arrays.target_values[1]
-        );
-        assert!(
-            (arrays.target_values[2] - 0.1).abs() < 1e-6,
-            "k=2 expected +0.1, got {}",
-            arrays.target_values[2]
-        );
-        assert!(
-            (arrays.target_values[3] - (-0.1)).abs() < 1e-6,
-            "k=3 expected -0.1, got {}",
-            arrays.target_values[3]
-        );
+        // β=0.1; root_value=0.0; game_outcome=-1.0; root_side_sign=-1.
+        // Unflipped expected [k=0..=3]: [+0.1, -0.1, +0.1, -0.1] (Black POV at k=0).
+        // Under color augmentation all signs flip uniformly.
+        let expected_unflipped = [0.1f32, -0.1, 0.1, -0.1];
+        for _ in 0..64 {
+            let arrays = assemble_batch_arrays(&[sample.clone()], k);
+            let flip_sign = if arrays.target_values[0] > 0.0 { 1.0 } else { -1.0 };
+            for (k_idx, &exp) in expected_unflipped.iter().enumerate() {
+                let want = flip_sign * exp;
+                let got = arrays.target_values[k_idx];
+                assert!(
+                    (got - want).abs() < 1e-6,
+                    "k={k_idx} expected {want}, got {got} (flip_sign={flip_sign})",
+                );
+            }
+        }
     }
 
     /// Confirm that the root_value signal is preserved with weight 0.9 when outcome is 0 (draw).
+    /// No draw penalty is applied — draws just produce outcome_in_step_perspective = 0.
     #[test]
     fn test_value_target_outcome_blend_root_value_preserved() {
         std::env::remove_var("HYZERO_VALUE_OUTCOME_BETA");
@@ -922,32 +1034,39 @@ mod tests {
         let k = 3usize;
         let kp1 = k + 1;
 
-        // root_value=0.5 for all steps; game_outcome=0.0 (draw) → outcome term is 0
+        // root_value=0.5 for all steps; game_outcome=0.0 (draw)
         let step = make_step_with_side(true, 0.5);
 
         let sample = TrainingSample {
             steps: (0..kp1).map(|_| step.clone()).collect(),
             game_outcome: 0.0,
+            is_draw: true,
         };
 
-        let arrays = assemble_batch_arrays(&[sample], k);
-
-        // β=0.1; root_value=0.5; outcome_in_step_perspective=0.0
-        // target = 0.9*0.5 + 0.1*0.0 = 0.45 for all k
-        for k_idx in 0..kp1 {
-            assert!(
-                (arrays.target_values[k_idx] - 0.45).abs() < 1e-6,
-                "k={k_idx} expected 0.45, got {}",
-                arrays.target_values[k_idx]
-            );
+        // β=0.1; root_value=0.5; game_outcome=0.0 (draw); outcome term = 0.
+        // Unflipped target = 0.9 * 0.5 = 0.45 for all k.
+        // With color augmentation, root_value is negated along with outcome; since
+        // outcome is zero, net effect is the whole target vector flips sign uniformly.
+        for _ in 0..64 {
+            let arrays = assemble_batch_arrays(&[sample.clone()], k);
+            let flip_sign = if arrays.target_values[0] > 0.0 { 1.0 } else { -1.0 };
+            let want = flip_sign * 0.45;
+            for k_idx in 0..kp1 {
+                assert!(
+                    (arrays.target_values[k_idx] - want).abs() < 1e-5,
+                    "k={k_idx} expected {want}, got {}",
+                    arrays.target_values[k_idx]
+                );
+            }
         }
     }
 
-    /// Serialize tests that mutate HYZERO_REWARD_OUTCOME_GAMMA to prevent data races.
+    /// Serialize tests that mutate env vars read during batch assembly.
     ///
     /// Rust tests run in parallel by default; env-var mutations are process-global.
-    /// Holding this lock for the duration of any test that reads or writes
-    /// HYZERO_REWARD_OUTCOME_GAMMA prevents races between the two reward-blend tests.
+    /// Any test that reads or writes HYZERO_REWARD_OUTCOME_GAMMA,
+    /// HYZERO_VALUE_OUTCOME_BETA, or HYZERO_DISABLE_COLOR_AUG MUST hold this lock
+    /// for its full duration to prevent races with other env-mutating tests.
     fn reward_gamma_env_lock() -> &'static std::sync::Mutex<()> {
         static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
         LOCK.get_or_init(|| std::sync::Mutex::new(()))
@@ -961,6 +1080,7 @@ mod tests {
     fn test_reward_target_blend_default() {
         let _guard = reward_gamma_env_lock().lock().unwrap();
         std::env::remove_var("HYZERO_REWARD_OUTCOME_GAMMA");
+        std::env::remove_var("HYZERO_DISABLE_COLOR_AUG");
 
         let k = 4usize;
 
@@ -978,18 +1098,34 @@ mod tests {
 
         let sample = TrainingSample {
             steps,
-            game_outcome: 1.0, // White wins, but γ=0 so outcome shouldn't matter
+            game_outcome: 1.0, // White wins (checkmate), but γ=0 so outcome shouldn't matter
+            is_draw: false,
         };
 
-        let arrays = assemble_batch_arrays(&[sample], k);
-
-        // With γ=0.0, target_rewards[k] = step.reward for all k.
-        for (k_idx, &expected) in rewards.iter().enumerate() {
-            assert!(
-                (arrays.target_rewards[k_idx] - expected).abs() < 1e-6,
-                "k={k_idx} expected reward {expected}, got {}",
-                arrays.target_rewards[k_idx]
-            );
+        // With γ=0.0, target_rewards[k] = step.reward for all k (unflipped), or
+        // -step.reward under color augmentation (apply_flip negates step.reward's POV).
+        // We detect the branch from the sign of target_rewards[0] vs rewards[0].
+        for _ in 0..64 {
+            let arrays = assemble_batch_arrays(&[sample.clone()], k);
+            // First non-zero slot determines flip_sign.
+            let flip_sign = {
+                let mut probe = 1.0f32;
+                for (i, &r) in rewards.iter().enumerate() {
+                    if r.abs() > 1e-6 {
+                        probe = if arrays.target_rewards[i].signum() == r.signum() { 1.0 } else { -1.0 };
+                        break;
+                    }
+                }
+                probe
+            };
+            for (k_idx, &expected) in rewards.iter().enumerate() {
+                let want = flip_sign * expected;
+                assert!(
+                    (arrays.target_rewards[k_idx] - want).abs() < 1e-6,
+                    "k={k_idx} expected {want}, got {} (flip_sign={flip_sign})",
+                    arrays.target_rewards[k_idx]
+                );
+            }
         }
     }
 
@@ -1001,6 +1137,7 @@ mod tests {
     #[test]
     fn test_reward_target_blend_with_outcome() {
         let _guard = reward_gamma_env_lock().lock().unwrap();
+        std::env::remove_var("HYZERO_DISABLE_COLOR_AUG");
         // SAFETY: protected by reward_gamma_env_lock(); no concurrent env-var access.
         unsafe {
             std::env::set_var("HYZERO_REWARD_OUTCOME_GAMMA", "0.5");
@@ -1019,23 +1156,25 @@ mod tests {
                 root_step.clone(),   // k=2 White to move
                 other_step.clone(),  // k=3 Black to move
             ],
-            game_outcome: 1.0, // White wins
+            game_outcome: 1.0, // White wins (checkmate)
+            is_draw: false,
         };
 
-        let arrays = assemble_batch_arrays(&[sample], k);
-
-        // γ=0.5; step.reward=0.0; game_outcome=1.0; root_side_sign=+1
-        // k=0: 0.5*0.0 + 0.5*(1.0 * +1 * +1) = +0.5
-        // k=1: 0.5*0.0 + 0.5*(1.0 * +1 * -1) = -0.5
-        // k=2: 0.5*0.0 + 0.5*(1.0 * +1 * +1) = +0.5
-        // k=3: 0.5*0.0 + 0.5*(1.0 * +1 * -1) = -0.5
-        let expected = [0.5f32, -0.5, 0.5, -0.5];
-        for (k_idx, &exp) in expected.iter().enumerate() {
-            assert!(
-                (arrays.target_rewards[k_idx] - exp).abs() < 1e-6,
-                "k={k_idx} expected {exp}, got {}",
-                arrays.target_rewards[k_idx]
-            );
+        // γ=0.5; step.reward=0.0; game_outcome=1.0; root_side_sign=+1.
+        // Unflipped expected [k=0..=3]: [+0.5, -0.5, +0.5, -0.5].
+        // Color augmentation negates all entries uniformly.
+        let expected_unflipped = [0.5f32, -0.5, 0.5, -0.5];
+        for _ in 0..64 {
+            let arrays = assemble_batch_arrays(&[sample.clone()], k);
+            let flip_sign = if arrays.target_rewards[0] > 0.0 { 1.0 } else { -1.0 };
+            for (k_idx, &exp) in expected_unflipped.iter().enumerate() {
+                let want = flip_sign * exp;
+                assert!(
+                    (arrays.target_rewards[k_idx] - want).abs() < 1e-6,
+                    "k={k_idx} expected {want}, got {} (flip_sign={flip_sign})",
+                    arrays.target_rewards[k_idx]
+                );
+            }
         }
 
         std::env::remove_var("HYZERO_REWARD_OUTCOME_GAMMA");
@@ -1087,5 +1226,198 @@ mod tests {
             "reward_loss should be finite, got {}",
             result.reward_loss
         );
+    }
+
+    /// Regression test for the terminal reward POV convention.
+    ///
+    /// game_outcome is white-absolute (-1.0 = Black wins). The terminal step has
+    /// white_to_move=false and reward=+1.0 (Black's POV of Black winning = +1.0),
+    /// matching the fixed convention in game_task.rs. With γ=0.0 and aug disabled,
+    /// assemble_batch_arrays must pass through +1.0 unchanged (not invert to -1.0).
+    #[test]
+    fn test_terminal_reward_in_step_pov_not_white_absolute() {
+        let _guard = reward_gamma_env_lock().lock().unwrap();
+        std::env::remove_var("HYZERO_REWARD_OUTCOME_GAMMA");
+        // SAFETY: protected by reward_gamma_env_lock(); no concurrent env-var access.
+        unsafe {
+            std::env::set_var("HYZERO_DISABLE_COLOR_AUG", "1");
+        }
+
+        let k = 3usize;
+
+        // 4-step trajectory: Black delivers mate at step 3.
+        // steps[3].white_to_move=false, reward=+1.0 (Black's POV of Black winning = +1.0).
+        // game_outcome=-1.0 (white-absolute: Black wins).
+        let steps = vec![
+            StepRecord {
+                observation: BoardObservation::default(),
+                action: 0,
+                visit_distribution: vec![1.0],
+                root_value: 0.0,
+                reward: 0.0,
+                legal_moves: vec![0],
+                white_to_move: true,  // step 0: White to move
+            },
+            StepRecord {
+                observation: BoardObservation::default(),
+                action: 0,
+                visit_distribution: vec![1.0],
+                root_value: 0.0,
+                reward: 0.0,
+                legal_moves: vec![0],
+                white_to_move: false, // step 1: Black to move
+            },
+            StepRecord {
+                observation: BoardObservation::default(),
+                action: 0,
+                visit_distribution: vec![1.0],
+                root_value: 0.0,
+                reward: 0.0,
+                legal_moves: vec![0],
+                white_to_move: true,  // step 2: White to move
+            },
+            StepRecord {
+                observation: BoardObservation::default(),
+                action: 0,
+                visit_distribution: vec![1.0],
+                root_value: 0.0,
+                reward: 1.0,          // +1.0 from Black's POV (Black wins = +1.0 in step POV)
+                legal_moves: vec![0],
+                white_to_move: false, // step 3: Black to move (delivered mate)
+            },
+        ];
+
+        let sample = TrainingSample {
+            steps,
+            game_outcome: -1.0, // white-absolute: Black wins
+            is_draw: false,
+        };
+
+        // With γ=0.0 and aug disabled, target_rewards[k] = flip_sign * step.reward.
+        // flip_sign=1.0 (aug disabled). So target_rewards[3] must equal +1.0.
+        // Before the game_task.rs fix, last.reward would be stored as game_outcome=-1.0,
+        // and target_rewards[3] would be -1.0 (wrong sign).
+        let arrays = assemble_batch_arrays(&[sample], k);
+        assert!(
+            (arrays.target_rewards[3] - 1.0).abs() < 1e-6,
+            "target_rewards[3] should be +1.0 (Black's POV of Black winning), got {}",
+            arrays.target_rewards[3]
+        );
+        // Intermediate steps should have reward 0.0 (pass-through)
+        assert!((arrays.target_rewards[0]).abs() < 1e-6, "step 0 reward should be 0.0");
+        assert!((arrays.target_rewards[1]).abs() < 1e-6, "step 1 reward should be 0.0");
+        assert!((arrays.target_rewards[2]).abs() < 1e-6, "step 2 reward should be 0.0");
+
+        std::env::remove_var("HYZERO_DISABLE_COLOR_AUG");
+    }
+
+    /// Regression test for the apply_flip value-target POV bug.
+    ///
+    /// When color augmentation flips the observation, both the stored root_value
+    /// and the outcome-derived target must be NEGATED so the training target
+    /// matches the POV of the flipped observation. Before the fix, the outcome
+    /// target was invariant under flip (the two sign-flips in effective_outcome
+    /// and root_side_sign cancelled), which made 50% of samples carry wrong-sign
+    /// value targets — driving value loss to collapse toward zero.
+    ///
+    /// We detect whether a given sample was flipped by inspecting the policy slot
+    /// that got populated: we construct a root with a SINGLE legal action = 1
+    /// (from_sq=0 → to_sq=1). Under no flip, slot 1 is populated. Under flip,
+    /// flip_action(1) = flip_sq(0)*64 + flip_sq(1) = 56*64 + 57 = 3641 is populated.
+    ///
+    /// Then we verify that the value target has the correct sign for the POV
+    /// implied by which slot was populated.
+    #[test]
+    fn test_value_target_sign_under_flip_matches_observation_pov() {
+        let _guard = reward_gamma_env_lock().lock().unwrap();
+        std::env::remove_var("HYZERO_VALUE_OUTCOME_BETA");
+        std::env::remove_var("HYZERO_REWARD_OUTCOME_GAMMA");
+        // Test requires both flip branches to fire; ensure aug is not disabled.
+        std::env::remove_var("HYZERO_DISABLE_COLOR_AUG");
+
+        // Distinct root_value so we can see sign flip in the target.
+        let root_value: f32 = 0.7;
+        let game_outcome: f32 = 1.0; // White wins
+
+        // Root is White to move at step 0; step 1 (unused by this test) is Black to move.
+        let mut root_step = make_step_with_side(true, root_value);
+        root_step.action = 1; // from_sq=0 → to_sq=1
+        root_step.legal_moves = vec![1];
+        root_step.visit_distribution = vec![1.0];
+        let mut next_step = make_step_with_side(false, root_value);
+        next_step.action = 1;
+        next_step.legal_moves = vec![1];
+        next_step.visit_distribution = vec![1.0];
+
+        // β defaults to 0.1, so target_values[0] = 0.9*root_value + 0.1*outcome_in_step_perspective.
+        // For K=1 we only need 2 steps.
+        let k = 1usize;
+
+        // Policy slot indices: unflipped = 1; flipped = 3641.
+        let flipped_slot = super::flip_action(1);
+        assert_eq!(flipped_slot, 3641, "flip_action(1) expected 3641");
+
+        // Run many trials to cover both flip branches.
+        let trials = 200;
+        let mut saw_unflipped = 0;
+        let mut saw_flipped = 0;
+        for _ in 0..trials {
+            let sample = TrainingSample {
+                steps: vec![root_step.clone(), next_step.clone()],
+                game_outcome,
+                is_draw: false,
+            };
+            let arrays = assemble_batch_arrays(&[sample], k);
+
+            let pol_base = 0; // bi=0, k=0
+            let unflipped_populated = arrays.target_policies[pol_base + 1] > 0.5;
+            let flipped_populated = arrays.target_policies[pol_base + flipped_slot] > 0.5;
+            assert!(
+                unflipped_populated ^ flipped_populated,
+                "exactly one policy slot should be populated"
+            );
+
+            // Expected value target at step 0 (White to move):
+            //   unflipped: 0.9 * 0.7 + 0.1 * (+1) = 0.73
+            //   flipped:   0.9 * (-0.7) + 0.1 * (-1) = -0.73  (POV reversed)
+            let got = arrays.target_values[0];
+            if unflipped_populated {
+                saw_unflipped += 1;
+                assert!(
+                    (got - 0.73).abs() < 1e-5,
+                    "unflipped expected 0.73, got {got}"
+                );
+            } else {
+                saw_flipped += 1;
+                assert!(
+                    (got - (-0.73)).abs() < 1e-5,
+                    "flipped expected -0.73, got {got}"
+                );
+            }
+
+            // Step k=1 (other player's turn in unflipped POV).
+            // unflipped (step 1 = Black to move): 0.9*0.7 + 0.1*(1*+1*-1) = 0.63 - 0.1 = 0.53
+            //   Wait: root_value is the SAME 0.7 on step 1 (both steps built with root_value=0.7).
+            //   From step 1's side POV, root_value=0.7 (stored as-is).
+            //   outcome in step 1 POV: game_outcome * root_side_sign * ply_flip
+            //     = +1 * +1 (root white) * -1 = -1
+            //   target = 0.9*0.7 + 0.1*(-1) = 0.63 - 0.1 = 0.53
+            // flipped: 0.9*(-0.7) + 0.1*(+1) = -0.53
+            let got1 = arrays.target_values[1];
+            if unflipped_populated {
+                assert!(
+                    (got1 - 0.53).abs() < 1e-5,
+                    "unflipped step-1 expected 0.53, got {got1}"
+                );
+            } else {
+                assert!(
+                    (got1 - (-0.53)).abs() < 1e-5,
+                    "flipped step-1 expected -0.53, got {got1}"
+                );
+            }
+        }
+        // Both branches should be exercised (≈100 each over 200 trials).
+        assert!(saw_unflipped > 50, "unflipped trials too rare: {saw_unflipped}");
+        assert!(saw_flipped > 50, "flipped trials too rare: {saw_flipped}");
     }
 }

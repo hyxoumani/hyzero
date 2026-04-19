@@ -107,6 +107,7 @@ defaults. Run-to-run variance is roughly ±3 points; expect 11–14.5 on repeats
 | `HYZERO_ADJ_THRESHOLD` / `HYZERO_ADJ_PLIES` | `6` / `10` | Material-adjudication gate |
 | `HYZERO_VALUE_LOSS_WEIGHT` | `1.0` | **Keep at 1.0** — amplification destabilises the closed loop |
 | `HYZERO_LR_SCHEDULE` | `none` | Set to `cosine` to enable annealing |
+| `HYZERO_DECISIVE_SAMPLE_FRAC` | `0.5` | Fraction of training batch sampled from decisive-outcome trajectories (checkmates). Falls back to uniform when no decisive trajectories exist. Attacks the "dead value head" problem by forcing per-batch target variance. |
 
 ## Lint and Format
 

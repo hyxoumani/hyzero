@@ -124,7 +124,6 @@ impl EvaluationTask {
         black_label: &str,
         outcome: &DualGameOutcome,
     ) {
-        use std::io::Write;
         let result_str = if outcome.game_outcome > 0.5 {
             "1-0"
         } else if outcome.game_outcome < -0.5 {
@@ -132,44 +131,14 @@ impl EvaluationTask {
         } else {
             "1/2-1/2"
         };
-
-        let pgn_path = "logs/eval_games.pgn";
-        let _ = std::fs::create_dir_all("logs");
-
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(pgn_path)
-            .unwrap_or_else(|e| panic!("Failed to open {pgn_path}: {e}"));
-
-        writeln!(file, "[Event \"Eval Cycle {cycle} Game {game_num}\"]").ok();
-        writeln!(file, "[White \"{white_label}\"]").ok();
-        writeln!(file, "[Black \"{black_label}\"]").ok();
-        writeln!(file, "[Result \"{result_str}\"]").ok();
-        writeln!(file).ok();
-
-        // Write moves in PGN format: 1. e2e4 e7e5 2. d2d4 ...
-        let moves = &outcome.moves;
-        let mut pgn_line = String::new();
-        for (i, m) in moves.iter().enumerate() {
-            if i % 2 == 0 {
-                pgn_line.push_str(&format!("{}. ", i / 2 + 1));
-            }
-            pgn_line.push_str(m);
-            pgn_line.push(' ');
-            // Line wrap at ~80 chars
-            if pgn_line.len() > 75 {
-                writeln!(file, "{}", pgn_line.trim()).ok();
-                pgn_line.clear();
-            }
-        }
-        if !pgn_line.is_empty() {
-            pgn_line.push_str(result_str);
-            writeln!(file, "{}", pgn_line.trim()).ok();
-        } else {
-            writeln!(file, "{result_str}").ok();
-        }
-        writeln!(file).ok(); // Blank line between games
+        crate::selfplay::pgn::write_pgn_game(
+            "logs/eval_games.pgn",
+            &format!("Eval Cycle {cycle} Game {game_num}"),
+            white_label,
+            black_label,
+            result_str,
+            &outcome.moves,
+        );
     }
 
     /// Run the evaluation ladder loop.

@@ -12,14 +12,17 @@ from hyzero.config import DEFAULT_CONFIG
 from hyzero.training import Trainer
 from hyzero.training.trainer import _parse_loss_weight_env, _parse_lr_schedule_env
 
-INPUT_PLANES = DEFAULT_CONFIG["input_planes"]   # 103
+INPUT_PLANES = DEFAULT_CONFIG["input_planes"]   # 102
 NUM_ACTIONS = DEFAULT_CONFIG["num_actions"]     # 4672
 
 
 def make_random_batch(batch_size: int = 4, k_steps: int = 3) -> dict:
-    """Create a random batch compatible with Trainer.train_batch."""
+    """Create a random batch compatible with Trainer.train_batch.
+
+    observations shape: [B, K+1, 102, 8, 8] — all K+1 steps for consistency loss.
+    """
     return {
-        "observations": np.random.randn(batch_size, INPUT_PLANES, 8, 8).astype(np.float32),
+        "observations": np.random.randn(batch_size, k_steps + 1, INPUT_PLANES, 8, 8).astype(np.float32),
         "actions": np.random.randn(batch_size, k_steps, 3, 8, 8).astype(np.float32),
         "target_policies": np.full(
             (batch_size, k_steps + 1, NUM_ACTIONS), 1.0 / NUM_ACTIONS, dtype=np.float32
@@ -39,10 +42,10 @@ def test_train_batch_returns_losses() -> None:
     batch = make_random_batch(batch_size=4, k_steps=3)
     result = trainer.train_batch(batch)
 
-    required_keys = {"total_loss", "policy_loss", "value_loss", "reward_loss", "model_version", "lr"}
+    required_keys = {"total_loss", "policy_loss", "value_loss", "reward_loss", "consistency_loss", "model_version", "lr"}
     assert required_keys.issubset(set(result.keys())), f"Missing keys: {required_keys - set(result.keys())}"
 
-    for key in ("total_loss", "policy_loss", "value_loss", "reward_loss"):
+    for key in ("total_loss", "policy_loss", "value_loss", "reward_loss", "consistency_loss"):
         assert isinstance(result[key], float), f"{key} must be a float, got {type(result[key])}"
         assert math.isfinite(result[key]), f"{key} is not finite: {result[key]}"
 
@@ -115,7 +118,7 @@ def test_kstep_unroll() -> None:
     batch = make_random_batch(batch_size=4, k_steps=5)
     result = trainer.train_batch(batch)
 
-    for key in ("total_loss", "policy_loss", "value_loss", "reward_loss"):
+    for key in ("total_loss", "policy_loss", "value_loss", "reward_loss", "consistency_loss"):
         assert math.isfinite(result[key]), f"{key} is not finite with K=5: {result[key]}"
 
 
@@ -217,3 +220,31 @@ def test_lr_schedule_invalid_value(
 
     captured = capsys.readouterr()
     assert "WARNING" in captured.err
+
+
+# --- Consistency loss tests ---
+
+
+def test_train_batch_with_consistency_loss(monkeypatch: pytest.MonkeyPatch) -> None:
+    """HYZERO_CONSISTENCY_LOSS_WEIGHT=0.5 enables consistency loss: must be finite and >= 0."""
+    monkeypatch.setenv("HYZERO_CONSISTENCY_LOSS_WEIGHT", "0.5")
+
+    trainer = Trainer(device="cpu")
+    batch = make_random_batch(batch_size=4, k_steps=2)
+    result = trainer.train_batch(batch)
+
+    assert "consistency_loss" in result
+    assert isinstance(result["consistency_loss"], float)
+    assert math.isfinite(result["consistency_loss"])
+    assert result["consistency_loss"] >= 0.0
+
+
+def test_train_batch_consistency_loss_zero_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """HYZERO_CONSISTENCY_LOSS_WEIGHT=0.0 disables consistency loss: must be exactly 0.0."""
+    monkeypatch.setenv("HYZERO_CONSISTENCY_LOSS_WEIGHT", "0.0")
+
+    trainer = Trainer(device="cpu")
+    batch = make_random_batch(batch_size=4, k_steps=2)
+    result = trainer.train_batch(batch)
+
+    assert result["consistency_loss"] == 0.0
