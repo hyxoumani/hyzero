@@ -550,13 +550,28 @@ impl MCTSTree {
             .collect();
 
         if temperature <= f32::EPSILON {
-            // Deterministic: pick highest visit count
-            let best_idx = visits
+            // Deterministic branch: find max visit count, then break ties uniformly
+            // at random. `max_by` would pick the first-encountered max, creating a
+            // lowest-`legal_actions`-index bias whenever there are tied-max visit
+            // counts (common under uniform priors + value=0). This bias — combined
+            // with the color-asymmetric `legal_actions` ordering from
+            // `get_legal_moves` (which iterates absolute sq 0..63) — systematically
+            // favored one color's move types in self-play.
+            let max_visits = visits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+            let tied: Vec<usize> = visits
                 .iter()
                 .enumerate()
-                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+                .filter(|(_, &v)| (v - max_visits).abs() < f32::EPSILON)
                 .map(|(i, _)| i)
-                .unwrap_or(0);
+                .collect();
+            let best_idx = if tied.len() == 1 {
+                tied[0]
+            } else if tied.is_empty() {
+                0
+            } else {
+                use rand::Rng;
+                tied[rand::rng().random_range(0..tied.len())]
+            };
             self.root.legal_actions[best_idx]
         } else {
             // Temperature-based sampling

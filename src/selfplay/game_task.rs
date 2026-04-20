@@ -181,7 +181,7 @@ pub async fn play_game_dual(
         let raw_legal = get_legal_moves(&board, side_to_move);
 
         // Flip legal actions to current-player perspective for Black.
-        let legal_actions: Vec<ActionIndex> = if side_to_move == Color::Black {
+        let mut legal_actions: Vec<ActionIndex> = if side_to_move == Color::Black {
             raw_legal
                 .iter()
                 .map(|&a| flip_action(a as usize) as ActionIndex)
@@ -189,6 +189,16 @@ pub async fn play_game_dual(
         } else {
             raw_legal
         };
+        // Canonicalize ordering so both colors present identical legal_actions at
+        // equivalent POV positions. `get_legal_moves` iterates absolute squares
+        // 0..63, producing color-asymmetric ordering: white's knights on sq 1, 6
+        // come before pawns on sq 8-15; black's pawns on sq 48-55 come before
+        // knights on sq 57, 62. After `flip_action` converts the VALUES to POV
+        // coords, POSITIONS remain in absolute-iteration order, so legal_actions[0]
+        // is a Knight move for white but a Pawn move for black. MCTS's index-level
+        // selection then biases the colors' move-type selection asymmetrically.
+        // Sorting by action-index restores POV-symmetry.
+        legal_actions.sort_unstable();
 
         if legal_actions.is_empty() {
             break;
@@ -303,7 +313,7 @@ pub async fn play_game(
         let raw_legal = get_legal_moves(&board, side_to_move);
 
         // Flip legal actions to current-player perspective for Black.
-        let legal_actions: Vec<ActionIndex> = if side_to_move == Color::Black {
+        let mut legal_actions: Vec<ActionIndex> = if side_to_move == Color::Black {
             raw_legal
                 .iter()
                 .map(|&a| flip_action(a as usize) as ActionIndex)
@@ -311,6 +321,16 @@ pub async fn play_game(
         } else {
             raw_legal
         };
+        // Canonicalize ordering so both colors present identical legal_actions at
+        // equivalent POV positions. `get_legal_moves` iterates absolute squares
+        // 0..63, producing color-asymmetric ordering: white's knights on sq 1, 6
+        // come before pawns on sq 8-15; black's pawns on sq 48-55 come before
+        // knights on sq 57, 62. After `flip_action` converts the VALUES to POV
+        // coords, POSITIONS remain in absolute-iteration order, so legal_actions[0]
+        // is a Knight move for white but a Pawn move for black. MCTS's index-level
+        // selection then biases the colors' move-type selection asymmetrically.
+        // Sorting by action-index restores POV-symmetry.
+        legal_actions.sort_unstable();
 
         if legal_actions.is_empty() {
             break;
@@ -707,6 +727,43 @@ mod tests {
     use crate::data::{BoardObservation, HiddenState, Policy, NUM_ACTIONS};
     use crate::mcts::evaluator::Evaluator;
     use async_trait::async_trait;
+
+    /// Regression: legal_actions ordering after POV-flip must be color-symmetric.
+    ///
+    /// Before the fix, `get_legal_moves` iterated sq 0..63 producing
+    /// white's knights first (from sq 1, 6) and black's pawns first (from sq 48..55),
+    /// and `flip_action` only rewrote VALUES, not positions. After sorting by
+    /// action-index post-flip, both colors see identical legal_actions at
+    /// equivalent POV positions. Validated to cure ~76% black dominance in
+    /// random-evaluator self-play.
+    #[tokio::test]
+    async fn test_legal_actions_ordering_is_color_symmetric_after_sort() {
+        let precomputed = Arc::new(PrecomputedItems::begin_precomputing());
+        let p1 = Player::init_player(true);
+        let p2 = Player::init_player(false);
+        let board = GameBoard::init_game_board(precomputed, p1, p2);
+
+        // White's legal_actions are already in white-POV (= absolute) coords.
+        let mut legal_w: Vec<ActionIndex> = get_legal_moves(&board, Color::White);
+        legal_w.sort_unstable();
+
+        // Black's legal_actions are in absolute coords too, but need flipping to
+        // POV coords and sorting to match what MCTS receives.
+        let raw_b = get_legal_moves(&board, Color::Black);
+        let mut legal_b_pov: Vec<ActionIndex> = raw_b
+            .iter()
+            .map(|&a| flip_action(a as usize) as ActionIndex)
+            .collect();
+        legal_b_pov.sort_unstable();
+
+        assert_eq!(
+            legal_w, legal_b_pov,
+            "legal_actions must be identical between colors at the starting \
+             position after POV-flip-then-sort — otherwise MCTS selection \
+             becomes color-biased"
+        );
+        assert_eq!(legal_w.len(), 20, "starting position has 20 legal moves");
+    }
 
     struct RandomEvaluator;
 
