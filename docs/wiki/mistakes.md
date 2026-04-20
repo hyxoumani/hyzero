@@ -569,3 +569,43 @@ Mistakes escalate from manual avoidance to automation:
 3. **Hook** (pre-commit/pre-edit) — blocked automatically by tooling
 
 Error types: **context** (wrong/stale info), **breakage** (reintroduced bug), **security** (secrets/injection), **quality** (incomplete logic/validation).
+
+## 2026-04-19: Color Asymmetry from legal_actions Ordering + Argmax Tie-Break
+
+**Date**: 2026-04-19
+**Agent**: Orchestrator + Researcher (April 13 session)
+**Domain**: MCTS and board encoding (action selection)
+**Error Type**: Semantic divergence — code was deterministic but data representation asymmetric
+
+**What happened**: All self-play training runs showed persistent 71–100% Black dominance (7/7 replicate fresh-start runs), with random-evaluator games at ~70% Black wins. Despite identical network weights and symmetric game rules, the color bias was systemic. Investigation traced the bug through a diagnostic chain: Dirichlet sampler (verified uniform), MCTS FP precision (negligible), move generation (symmetric), and finally to the action-selection code path where two separate bugs combined to produce the asymmetry.
+
+**Bug 1 — Argmax Tie-Break to First-Max** (`src/mcts/tree.rs`):
+When temperature ≤ ε (deterministic selection), `select_action()` called `max_by` to find the move with the highest MCTS visit count. Ties are common early in training (uniform priors, value ≈ 0, low visit counts). The `max_by` iterator picks the **first encountered** maximum (lowest-index action), deterministically biasing selection. At the starting position with random evaluator, this was the only decision point, and Bug 1 alone didn't explain the color asymmetry — both colors would tie-break identically. But combined with Bug 2 (see below), the two bugs interacted to create the dominant bias.
+
+Fix: Collect all indices with visit count = max, then pick uniformly at random.
+
+**Bug 2 — Color-Asymmetric legal_actions Ordering** (`src/selfplay/game_task.rs`):
+`get_legal_moves()` iterates absolute squares (0..64) and collects pieces in that order. White's pieces are at squares 0–15 (knights at 1, 6 come before pawns at 8–15), so White's legal_actions has moves in the order: [Knight moves, pawn moves, castling, ...]. Black's pieces are at squares 48–63 (pawns at 48–55 come before knights at 57, 62), so Black's legal_actions has moves in the order: [pawn moves, knight moves, castling, ...].
+
+After POV-flipping the action coordinates via `flip_action()`, the VALUES are correct (the moves themselves are symmetric), but the POSITIONS in the list remain in absolute-iteration order. So at the starting position, `legal_actions[0]` for White is a knight move, but `legal_actions[0]` for Black is a pawn move.
+
+Combined with Bug 1 (tie-break to index 0), this caused:
+- White: select `legal_actions[0]` = Nc3 (knight)
+- Black: select `legal_actions[0]` = a6 (pawn)
+
+These aren't POV mirrors of each other. Combined with any MCTS concentration (e.g., Dirichlet noise alpha=0.03, the old bug), this strongly biased one color toward knight development and the other toward kingside edge-pawn pushes. Over hundreds of games, these asymmetric move choices accumulated into self-reinforcing policy patterns, producing the 83% color domination.
+
+Fix: After POV-flipping, sort `legal_actions.sort_unstable()` in both `play_game()` and `play_game_dual()`. Now both colors present identical sorted lists at equivalent positions.
+
+**Root Cause**: The board encoding was converted to current-player perspective (commit bb39db6), which requires all consumers of `legal_actions` to be POV-aware. However, the action selection code wasn't updated to sort, and the tie-breaking code wasn't updated to be random-tie-aware. An abstraction leak: POV-invariance of the observation planes wasn't extended to the action-list representation.
+
+**Validation**:
+- Random-evaluator at 40 sims (N=50 games): Pre-fix 6% W / 70% B / 24% D → Post-fix 40% W / 44% B / 16% D (within noise)
+- Regression test `test_legal_actions_ordering_is_color_symmetric_after_sort` added
+- All 130 existing tests pass
+- Fresh-start training run (post-fix) showed balanced eval results (vs 71–100% B pre-fix)
+
+**Escalation Tier**: Rule — encoded in `.claude/rules/mcts-pov-symmetry.md` to prevent future regressions. Key rule: "When adding code that consumes legal_actions or MCTS visit distributions, verify it works identically for both colors on mirror-equivalent positions. Sorting action lists is required for POV symmetry. Tie-breaking in deterministic selection MUST be random over ties."
+
+---
+

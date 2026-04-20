@@ -57,34 +57,7 @@ Actions are 4096-dimensional: 64 from-squares × 64 to-squares = 4096 (promotion
 - If color = White, action unchanged
 - If color = Black, both from-square and to-square are rotated 180° (from_sq → 63−from_sq, to_sq → 63−to_sq)
 
-## action_to_notation Bug Fix (Commit bb39db6)
+**Action Ordering and POV Symmetry (Commit 41f6681)**: `get_legal_moves()` returns actions in absolute-square iteration order, NOT in POV-symmetric order. This means the same move (e.g., Nc3 for White, Nc6 for Black) will appear at different indices in `legal_actions`. To present an action list with identical index geometry to both colors on mirror-equivalent positions, callers must sort: `legal_actions.sort_unstable()` after the POV-flip step. MCTS simulations and inference depend on consistent action indexing; if you modify action selection code, verify it works symmetrically on both colors using `test_legal_actions_ordering_is_color_symmetric_after_sort()`.
 
-Previously, `action_to_notation()` would append 'q' (queen promotion suffix) to all back-rank moves, not just pawn promotions.
+## action_to_notation Bug Fix
 
-**Fixed logic**:
-```
-if to_rank == 7 && is_pawn(piece):
-    append promotion suffix  # e.g., "e8=q"
-else:
-    move without suffix  # e.g., "Ke1-g1" for castling
-```
-
-This broke detection of castling moves and other back-rank moves that aren't promotions.
-
-## Impact on Training
-
-The current-player-perspective convention ensures:
-- **Symmetric value targets**: A winning position is +1 regardless of whose turn it is
-- **Symmetric policy targets**: Good moves are represented the same way to both players
-- **Network symmetry**: Learned patterns generalize across both sides
-
-**Before (absolute White-centric encoding)**: 85–90% Black-win bias in evaluation. Network learned asymmetric value estimates because all observations encoded the board the same way regardless of side-to-move.
-
-**After (current-player perspective)**: Black-win bias persists at ~50% even with fresh random games. This is likely a **game dynamics artifact** — the adjudication mechanism still creates a training signal that favors one side under certain threshold conditions. See "Passivity Trap" in mistakes.md for the deeper issue.
-
-## Related
-
-- [MCTS & Self-Play](mcts-selfplay.md) — action flipping, MCTS simulation with actions
-- [Neural Networks](neural-networks.md) — observation shapes, inference API
-- `src/data/encoding.rs` — Rust implementation (rotate_board, flip_action, etc.)
-- `src/selfplay/game_task.rs` — action flipping at MCTS boundary

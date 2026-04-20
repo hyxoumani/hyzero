@@ -14,6 +14,7 @@ session findings, reviewer feedback, experiments, and architectural decisions.
 
 ## Learning Pipeline
 - [MCTS & Self-Play](mcts-selfplay.md) — tree search, coordinator, checkpoints, evaluation task
+- [MCTS Action Selection](selection-mechanics.md) — tie-breaking, POV symmetry bugs (2026-04-19 fixes)
 - [Neural Networks](neural-networks.md) — MuZero h/g/f networks, tensor shapes, training plan
 
 ## Integration
