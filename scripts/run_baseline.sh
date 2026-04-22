@@ -12,6 +12,11 @@ GAMES_PER_SIDE=${HYZERO_GAMES_PER_SIDE:-4}
 PROMOTION_THRESHOLD=${HYZERO_PROMOTION_THRESHOLD:-0.55}
 CHAMPION_SCORE_WEIGHT=${HYZERO_CHAMPION_SCORE_WEIGHT:-2.0}
 DEVICE=${HYZERO_DEVICE:-cuda}
+# Supervision data sources (validated 2026-04-21/22). All optional; unset to disable.
+STARTS_FILE=${HYZERO_STARTS_FILE:-data/starting_positions.txt}
+TB_PATH=${HYZERO_TABLEBASE_PATH:-data/syzygy}
+TB_CACHE=${HYZERO_TABLEBASE_CACHE_PATH:-data/syzygy/cache_trajectories.pkl}
+TB_FRAC=${HYZERO_TABLEBASE_FRAC:-0.45}
 BASELINE_FILE="logs/baseline_score.json"
 LOG_DIR="logs"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
@@ -25,6 +30,18 @@ echo "Device: ${DEVICE}"
 echo "Sims: selfplay=${SIMS}, eval=${EVAL_SIMS}"
 echo "Concurrency: ${GAMES} total slots (${GAMES}-1 selfplay + 1 eval), batch_size=${BATCH_SIZE}"
 echo "Eval: ${GAMES_PER_SIDE} games/side, threshold=${PROMOTION_THRESHOLD}, weight=${CHAMPION_SCORE_WEIGHT}"
+
+# Warn (don't fail) on missing supervision files — training falls back to pure self-play.
+if [ -n "$STARTS_FILE" ] && [ ! -f "$STARTS_FILE" ]; then
+    echo "  WARN: HYZERO_STARTS_FILE=$STARTS_FILE missing — diverse starts disabled"
+    STARTS_FILE=""
+fi
+if [ -n "$TB_CACHE" ] && [ ! -f "$TB_CACHE" ]; then
+    echo "  WARN: HYZERO_TABLEBASE_CACHE_PATH=$TB_CACHE missing — TB supervision disabled"
+    TB_PATH=""
+    TB_CACHE=""
+fi
+echo "Supervision: starts=$([ -n "$STARTS_FILE" ] && echo "$STARTS_FILE" || echo "off"), tb_frac=$([ -n "$TB_CACHE" ] && echo "$TB_FRAC ($TB_CACHE)" || echo "off")"
 echo "Log: ${LOG_FILE}"
 
 # ── Build ──────────────────────────────────────────────────────
@@ -51,6 +68,10 @@ HYZERO_BATCH_SIZE=$BATCH_SIZE \
 HYZERO_GAMES_PER_SIDE=$GAMES_PER_SIDE \
 HYZERO_PROMOTION_THRESHOLD=$PROMOTION_THRESHOLD \
 HYZERO_CHAMPION_SCORE_WEIGHT=$CHAMPION_SCORE_WEIGHT \
+HYZERO_STARTS_FILE=$STARTS_FILE \
+HYZERO_TABLEBASE_PATH=$TB_PATH \
+HYZERO_TABLEBASE_CACHE_PATH=$TB_CACHE \
+HYZERO_TABLEBASE_FRAC=$TB_FRAC \
 target/release/selfplay > "$LOG_FILE" 2>&1 &
 PID=$!
 sleep "$DURATION"
@@ -201,7 +222,10 @@ cat > "$BASELINE_FILE" << EOF
         "concurrent_games": $GAMES,
         "batch_size": $BATCH_SIZE,
         "simulations": $SIMS,
-        "device": "$DEVICE"
+        "device": "$DEVICE",
+        "starts_file": "$STARTS_FILE",
+        "tablebase_cache": "$TB_CACHE",
+        "tablebase_frac": $TB_FRAC
     },
     "log_file": "$LOG_FILE"
 }
