@@ -6,6 +6,10 @@
 
 **Evidence**: 11-experiment β sweep (2026-04-15) — all configs with lower loss (2.4–2.7 vs 3.4 baseline) regressed in promotions and score. β=0.3 winner had *higher* loss (3.40) but *longer games* (151.6 moves), more exploration, better value estimates, and *actual wins*.
 
+**Underlying mechanism** (2026-04-21 diagnostic): The actual failure mode is **distributional collapse**. The value head loses signal on out-of-distribution positions (evaluation checkmates from other model versions). MCTS with Q≈0 reduces to pure prior sampling, policy learns to avoid losses from bad move selection (generating no wins). Self-play becomes an attractor loop: weak value → poor MCTS → bad training data → weak policy → no promotions → games stay in narrow distribution → value head further collapses. See "Dead Value & Reward Heads — Historical Context" and [Neural Networks](neural-networks.md) "Failure Mode 4: Distributional Overfitting" for diagnosis and solutions.
+
+**Breaking the loop via external supervision (2026-04-21)**: The closed-loop paradox CAN be broken by out-of-loop supervision. Syzygy tablebase injection at 45% fraction (with masked padded-step loss + biased reinit) produced measurable recovery: kqk_value from −0.012 to +0.85, first promotion achieved, score improved 6.05 → 8.16, 2 actual checkmates detected in self-play. This demonstrates that distributional collapse is recoverable with external ground-truth labels. See [Neural Networks](neural-networks.md) "Failure Mode 4: Recovery" and `docs/wiki/mistakes.md` (2026-04-21 entry) for full evidence.
+
 **Key Decision**: Validate by promotions (real wins), not training loss. See `docs/wiki/mistakes.md` (2026-04-15 entry) for full table and analysis.
 
 ## Selection Mechanics (Tie-breaking & POV Symmetry)
@@ -45,15 +49,13 @@ Spawns N persistent long-lived tokio game loop tasks (no semaphore gating). Each
 
 ### Game Termination Paths
 
-Three mechanisms end a game (checked in order in `play_game()` loop):
+Two mechanisms end a game (checked in order in `play_game()` loop):
 
 1. **Terminal state** (`GameResult::Checkmate`, `GameResult::Stalemate`): Write true game outcome (±1 or 0).
 
-2. **Adjudication** (NEW in commit 1846b78): If `|Δmaterial| ≥ HYZERO_ADJ_THRESHOLD` (default 6) sustained for `HYZERO_ADJ_PLIES` (default 10) consecutive plies, declare winner by material dominance. Write `outcome = sign(Δmaterial)`. Counter resets if material diff drops below threshold (e.g., capture narrows gap). Env vars allow threshold tuning for smoke tests without rebuild.
+2. **Material-at-cap** (commit 1846b78): Game hits 300-move limit without reaching terminal. Instead of synthetic `outcome = 0`, write `outcome = tanh(Δmaterial / scale)`, where Δmaterial = white_material − black_material (piece values: P=1, N=3, B=3, R=5, Q=9). Scale defaults to 5.0 but is tunable via `HYZERO_MATERIAL_SHAPING_SCALE`. Set `HYZERO_DISABLE_MATERIAL_SHAPING=1` to revert to pure `outcome = 0` (AlphaZero-style). Preserves White-absolute sign; trainer applies ply-flip at batch assembly time (`src/py/training.rs:136`). This breaks the zero-target bootstrap loop that killed the value head.
 
-3. **Material-at-cap** (NEW in commit 1846b78): Game hits 300-move limit without terminal or adjudication. Instead of synthetic `outcome = 0`, write `outcome = tanh(Δmaterial / 5.0)`, where Δmaterial = white_material − black_material (piece values: P=1, N=3, B=3, R=5, Q=9). Preserves White-absolute sign; trainer applies ply-flip at batch assembly time (`src/py/training.rs:136`). This breaks the zero-target bootstrap loop that killed the value head.
-
-**Effect on average game length**: With default adjudication at 6 points (roughly ±2 pawns from equal), random play adjudicates at ~40 moves. Stronger play lasts longer (more balanced positions). As value head learns material, adjudication rate naturally decreases and games converge to true terminal outcomes.
+**Adjudication removed**: Early commit 1846b78 included adjudication (early-termination by material threshold), but this created a passivity trap (see "Passivity Trap" section below). Removed in subsequent analysis. Games now play to checkmate, stalemate, or 300-move cap only.
 
 ### Root Noise for Exploration
 
@@ -64,6 +66,24 @@ Dirichlet noise added to root policy before move selection. Implemented via Mars
 **Game-specific constants**: AlphaZero paper specifies α={0.3, 0.15, 0.03} for {chess, shogi, Go}. Using the wrong value (e.g., 0.03 for chess) over-concentrates noise on 1-2 random moves, starving exploration of the state space (see 2026-04-14 mistakes log: Dirichlet alpha bug).
 
 **WARNING**: Slow in debug mode; use `--release` builds for end-to-end testing.
+
+### Conditional β and Value-Head Re-initialization (2026-04-20)
+
+**Problem**: With outcome-blended targets `(1−β) × root_value + β × outcome`, untrained networks produce targets with magnitude ≤ β (e.g., ±0.3 at β=0.3). This caps value-head signal and enables material-shuffle exploitation.
+
+**Solution**: Two env flags control value-head training signal intensity:
+- **HYZERO_CONDITIONAL_BETA**: If set, decisive-outcome games use β=1.0 (full outcome signal), drawn games use configured β. Allows trained value head to see ±1 on decisives while managing signal sparsity on draws.
+- **HYZERO_REINIT_VALUE_HEAD**: If set, reinitialize value-head weights when mode switches (e.g., at checkpoint), escaping collapsed attractor states. Use with conditional β to escape sparse-signal collapse.
+
+**Tested configuration** (2026-04-20, found insufficient to prevent distributional collapse):
+```bash
+HYZERO_MATERIAL_SHAPING_SCALE=20  # Weak shaping: tanh(Δ/20) ≈ ±0.3 at huge gaps
+HYZERO_CONDITIONAL_BETA=1        # Enable conditional β
+HYZERO_REINIT_VALUE_HEAD=1       # Reinit on version boundaries
+bash scripts/run_baseline.sh 1800
+```
+
+Hypothesis was: weak shaping + conditional β gives drawn games continuous weak signal while decisives see full ±1, reducing shuffle-exploit payoff below decisive threshold (0.5). Sparse-signal decay addressed by reinit at checkpoint boundaries. However, this does not prevent the underlying distributional-collapse problem: the value head still overfit to self-play and loses generalization to out-of-distribution positions (see 2026-04-21 findings). **Next approach**: Syzygy tablebase supervision to inject external WDL labels, breaking in-distribution overfitting loop.
 
 ## Checkpoint Management
 

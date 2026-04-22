@@ -1,20 +1,20 @@
 {
-    "score": 6.1040,
-    "timestamp": "20260420_045808",
-    "git_commit": "41f6681",
-    "duration_s": 28800,
+    "score": 9.0332,
+    "timestamp": "20260422_034453",
+    "git_commit": "012e6b2",
+    "duration_s": 3600,
     "metrics": {
-        "games_completed": 1888,
-        "training_steps": 30200,
-        "first_loss": 8.5708,
-        "last_loss": 1.8591,
-        "last_policy_loss": 1.8250,
-        "avg_game_length": 62.1,
-        "last_win_rate": 0.438,
-        "eval_cycles": 63,
-        "promotions": 0,
-        "max_champion_version": 0,
-        "checkpoints": 604,
+        "games_completed": 219,
+        "training_steps": 3471,
+        "first_loss": 8.6978,
+        "last_loss": 2.8353,
+        "last_policy_loss": 2.7908,
+        "avg_game_length": 72.6,
+        "last_win_rate": 0.5,
+        "eval_cycles": 18,
+        "promotions": 2,
+        "max_champion_version": 132,
+        "checkpoints": 69,
         "errors": 0
     },
     "config": {
@@ -25,5 +25,5 @@
         "concurrent_games": 5,
         "simulations": 40
     },
-    "log_file": "logs/baseline_20260420_045808.log"
+    "log_file": "logs/baseline_20260422_034453.log"
 }

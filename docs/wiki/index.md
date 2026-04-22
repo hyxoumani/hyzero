@@ -16,6 +16,7 @@ session findings, reviewer feedback, experiments, and architectural decisions.
 - [MCTS & Self-Play](mcts-selfplay.md) — tree search, coordinator, checkpoints, evaluation task
 - [MCTS Action Selection](selection-mechanics.md) — tie-breaking, POV symmetry bugs (2026-04-19 fixes)
 - [Neural Networks](neural-networks.md) — MuZero h/g/f networks, tensor shapes, training plan
+- [Syzygy Tablebase Supervision](../plans/tablebase-supervision/plan.md) — break distributional collapse with external WDL labels (2026-04-21 initiative)
 
 ## Integration
 - [Rust-Python Integration](rust-python-integration.md) — FFI boundary, data flow, PyO3 status

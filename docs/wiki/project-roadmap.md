@@ -16,15 +16,25 @@ Current state and next steps for hyzero.
 
 **Current state**: 89 Rust tests (82 pass, 7 ignored), zero clippy warnings. Pipeline validated with 30-min baseline run (112 games, 444 gradient steps, loss 8.55→3.23).
 
-## Baseline
+## Baseline (Current)
 
-- **Score**: 14.51 (β=0.3, reproducibility run, commit 63afdbe, 2026-04-15)
-- **Prior run**: 11.63 (β=0.3 initial, commit 294e63e, 2026-04-15 autoresearch winner)
-- **Variance**: ±3 points observed; two runs at identical config yielded 11.63 and 14.51. Beyond noise floor of ±1.5 for single runs.
+- **Score with TB supervision**: 8.16 (Syzygy 45%, masked loss, biased reinit, 2h run 2026-04-21, **first promotion achieved**)
+- **Score without TB**: 14.51 (β=0.3, reproducibility run, commit 63afdbe, 2026-04-15)
+- **Note**: TB score (8.16) is from a single run; comparison to 14.51 is indirect (different initial conditions, TB config not in original β=0.3 baseline). TB run achieved first promotion and broke distributional collapse, demonstrating recovery mechanism. Score difference likely partly due to TB overhead in early training + fresh-start ladder vs running champion.
+- **Variance**: ±3 points observed without TB; two β=0.3 runs yielded 11.63 and 14.51. Beyond noise floor of ±1.5 for single runs.
 - **Formula**: `(8.55 - policy_loss) + (promotions * HYZERO_CHAMPION_SCORE_WEIGHT) - (avg_game_length / 100)`
 - **Run command**: `bash scripts/run_baseline.sh 1800` (delete checkpoints first for fair comparison: `rm -f checkpoints/best*.pt`)
+- **TB config** (2026-04-21, recommended for next phase):
+  ```bash
+  HYZERO_TABLEBASE_PATH=data/syzygy
+  HYZERO_TABLEBASE_CACHE_PATH=data/syzygy/cache_balanced.pkl
+  HYZERO_TABLEBASE_FRAC=0.45
+  HYZERO_REINIT_VALUE_HEAD=1
+  HYZERO_REINIT_VALUE_BIAS=0.3
+  bash scripts/run_baseline.sh 1800
+  ```
 - **Stored at**: `logs/baseline_score.json`
-- **Outcome blend (β)**: 0.3 — hard-won from 11-experiment sweep. Deviations regress (β>0.3 destabilizes, β<0.3 underperforms).
+- **Outcome blend (β)**: 0.3 — hard-won from 11-experiment sweep. Deviations regress (β>0.3 destabilizes, β<0.3 underperforms). TB runs maintain β=0.3.
 - **Previous baseline**: 6.78 (commit d407281, 2026-04-14 — Dirichlet alpha fix before autoresearch)
 - **Metric note**: Formula changed on 2026-04-15. Old formula used `decisive_ratio` (self-play metric, flawed). New formula uses `promotions` (discrete promotion events from eval ladder). Metric extraction must count `grep -c "\[eval\] promoted"` not version tags.
 
@@ -62,6 +72,7 @@ Detailed roadmap with file lists and rationale: [`docs/plans/next-steps/roadmap.
 | games_per_side=6 | More games per training step | 6.78 | 5.48 | −1.30 | Policy loss 2.41 but 0 promotions (fast-training paradox) |
 | β=0.4 | Higher outcome blend | 6.78 | 6.80 | +0.02 | Policy loss 2.63 but destabilized (1 promotion) |
 | β=0.5 | Even higher outcome blend | 6.78 | 8.07 | +1.29 | Policy loss 2.45 but modest improvement |
+| TB-supervision | Syzygy 3-4-5-man + masked-loss + biased-reinit (45% fraction) | 6.05 | **8.16** | **+2.11** | **First promotion achieved**, distributional collapse broken |
 
 ## Metric Evolution
 

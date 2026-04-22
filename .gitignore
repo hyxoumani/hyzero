@@ -17,3 +17,7 @@ checkpoints/
 
 # Agent worktrees — ephemeral, per-session
 .claude/worktrees/
+
+# Tablebase files and position cache — downloaded at runtime, not committed
+# Only ignores the top-level data/ directory (Syzygy files + cache.pkl).
+/data/

@@ -8,6 +8,7 @@ use crate::data::{
 };
 use crate::data::encoding::flip_action;
 use crate::game::board::GameResult;
+use crate::game::fen::board_from_fen;
 use crate::game::{GameBoard, Move, Player};
 use crate::mcts::evaluator::Evaluator;
 use crate::mcts::tree::{MCTSConfig, MCTSTree};
@@ -108,6 +109,97 @@ fn trace_summary(
     }
 }
 
+// ─── Diverse self-play starting positions ───────────────────────────────────
+//
+// Lazy-loaded list of FEN starting positions, populated once per process from
+// the file referenced by the HYZERO_STARTS_FILE env var. When unset or empty,
+// games start from the standard initial position (existing behavior).
+
+/// Return the module-global list of starting FENs loaded from the file
+/// pointed to by HYZERO_STARTS_FILE. Loaded once per process and cached.
+/// An empty list means "no diverse starts; always start from initial position."
+fn starting_positions() -> &'static Vec<String> {
+    static STARTS: OnceLock<Vec<String>> = OnceLock::new();
+    STARTS.get_or_init(|| {
+        let Ok(path) = std::env::var("HYZERO_STARTS_FILE") else {
+            return Vec::new();
+        };
+        match std::fs::read_to_string(&path) {
+            Ok(contents) => {
+                let fens: Vec<String> = contents
+                    .lines()
+                    .map(|l| l.trim())
+                    .filter(|l| !l.is_empty())
+                    .map(|l| l.to_string())
+                    .collect();
+                eprintln!(
+                    "[selfplay] loaded {} starting positions from {}",
+                    fens.len(),
+                    path
+                );
+                fens
+            }
+            Err(e) => {
+                eprintln!(
+                    "[selfplay] WARN: failed to load HYZERO_STARTS_FILE={}: {}",
+                    path, e
+                );
+                Vec::new()
+            }
+        }
+    })
+}
+
+/// Pick a random starting FEN from the configured list, or `None` if no
+/// diverse-starts file is configured or it is empty.
+fn pick_starting_position() -> Option<&'static str> {
+    let starts = starting_positions();
+    if starts.is_empty() {
+        return None;
+    }
+    use rand::Rng;
+    let mut rng = rand::rng();
+    let idx = rng.random_range(0..starts.len());
+    Some(starts[idx].as_str())
+}
+
+/// Initialize the self-play board either from a sampled diverse-start FEN
+/// (when HYZERO_STARTS_FILE is configured) or from the standard initial
+/// position. Returns `(board, side_to_move)`.
+///
+/// If a sampled FEN fails to parse, logs a warning and falls back to the
+/// default initial position so self-play never aborts on a bad FEN.
+fn init_self_play_board(
+    precomputed: Arc<PrecomputedItems>,
+) -> (GameBoard, Color) {
+    if let Some(fen) = pick_starting_position() {
+        match board_from_fen(fen, precomputed.clone()) {
+            Ok((board, side_to_move, _fullmove)) => {
+                // Skip positions that are already terminal (rare but possible
+                // for FENs pulled from mid-game random play).
+                if board.result() == GameResult::Ongoing {
+                    return (board, side_to_move);
+                }
+                eprintln!(
+                    "[selfplay] WARN: sampled start FEN is already terminal; \
+                     falling back to standard start"
+                );
+            }
+            Err(e) => {
+                eprintln!(
+                    "[selfplay] WARN: failed to parse start FEN {:?}: {}; \
+                     falling back to standard start",
+                    fen, e
+                );
+            }
+        }
+    }
+    let player1 = Player::init_player(true);
+    let player2 = Player::init_player(false);
+    let board = GameBoard::init_game_board(precomputed, player1, player2);
+    (board, Color::White)
+}
+
 /// Configuration for a self-play game.
 #[derive(Debug, Clone)]
 pub struct GameConfig {
@@ -150,12 +242,9 @@ pub async fn play_game_dual(
     black_evaluator: Arc<dyn Evaluator>,
     config: GameConfig,
 ) -> DualGameOutcome {
-    let player1 = Player::init_player(true);
-    let player2 = Player::init_player(false);
-    let mut board = GameBoard::init_game_board(precomputed.clone(), player1, player2);
+    let (mut board, mut side_to_move) = init_self_play_board(precomputed.clone());
 
     let mut turn_count: usize = 0;
-    let mut side_to_move = Color::White;
     let mut history: VecDeque<BoardSnapshot> = VecDeque::with_capacity(7);
     let mut moves: Vec<String> = Vec::new();
 
@@ -279,13 +368,10 @@ pub async fn play_game(
     model_version: u64,
     config: GameConfig,
 ) -> GameTrajectory {
-    let player1 = Player::init_player(true);
-    let player2 = Player::init_player(false);
-    let mut board = GameBoard::init_game_board(precomputed.clone(), player1, player2);
+    let (mut board, mut side_to_move) = init_self_play_board(precomputed.clone());
 
     let mut steps: Vec<StepRecord> = Vec::new();
     let mut turn_count: usize = 0;
-    let mut side_to_move = Color::White;
     // History buffer for encode_board: stores up to 7 past snapshots (oldest first).
     let mut history: VecDeque<BoardSnapshot> = VecDeque::with_capacity(7);
 

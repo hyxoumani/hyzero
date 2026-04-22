@@ -561,6 +561,125 @@ This is not a bug in code — it's a **metric misalignment**. The metric "policy
 
 ---
 
+## 2026-04-21: Reward Head Aggregate-Math vs OOD Probe Discrepancy
+
+**Date**: 2026-04-21
+**Agent**: Orchestrator session (draws converging, games shuffling)
+**Domain**: Neural network diagnostics (reward head training validation)
+**Error Type**: Context — aggregate training metrics masked distributional-overfitting failure
+
+**What happened**: Training logs showed reward head predictions alive during batch construction (aggregate `[reward_stats]` lines in baseline logs revealed mathematically-derived predictions ≈±0.99 at late training). However, a probe of the same checkpoint (best_v1489.pt, model_version=15050) on 90 positions from eval_games.pgn (9 terminal + 81 near-terminal) showed reward head outputs in [−0.008, +0.004] for ALL transitions, including actual mating moves. Both `.train()` and `.eval()` modes showed identical behavior; BN running-stats divergence only ~12%, ruling out eval-mode artifact.
+
+**Root Cause**: The reward head overfit to the self-play distribution it was trained on. Aggregate batch stats looked alive because batches come from in-distribution self-play terminals (positions this specific model generated). Probes on real checkmates from other model versions (v5 vs v0, v32 vs v600) showed the head was actually unable to generalize to out-of-distribution terminals.
+
+This is the first concrete evidence of **distributional collapse**: the network converged to a narrow functional range that fits training batches but fails on held-out positions.
+
+**Diagnostic technique** (reusable): Closed-form derivation of batch-aggregate predictions. Given batch statistics (target_std, target_mean, pred_mean, pred_var, MSE), derive the signed magnitude of predictions: `m = S · (1 + B·(pred_var + pred_mean² − MSE)) / 2` where S = sign(target_mean). Test on early, middle, and late slices. Compare with probe on out-of-distribution positions.
+
+**Escalation Tier**: Gotcha — encoded in this entry and in neural-networks.md under "Distributional Overfitting" with diagnostic procedure.
+
+---
+
+## 2026-04-21: Value Head Dead on Canonical Positions Since Step 650 (Unnoticed)
+
+**Date**: 2026-04-21
+**Agent**: Orchestrator session (log-history review)
+**Domain**: Neural network training validation
+**Error Type**: Context — metric was visible in logs but never examined
+
+**What happened**: The trainer's own canonical-position probe (lines 686–699 in `python/hyzero/training/trainer.py`: `[start_value]`, `[kqk_value]`, `[kvk_queenless_value]`) has been logging value-head collapse since the first checkpoint after bootstrap (step 650 onward). Example trajectory for kqk_value (KQ vs K, White to move, trivially won by White):
+
+| Step | kqk_value |
+|------|-----------|
+| 600 | −0.529 |
+| 650 | −0.020 |
+| 5,550 | +0.147 |
+| 10,550 | −0.003 |
+| 15,550 | −0.012 |
+| 25,550 | −0.008 |
+
+The value head learned 0 cannot distinguish a trivial mate from a balanced starting position. More critically: this probe runs in `train()` mode (trainer never calls `.eval()` around canonical probes), so this is NOT an eval-mode artifact. The network genuinely failed to learn.
+
+**Root Cause**: Logs were being generated and printed correctly, but nobody was watching them. The probe is a critical early-warning signal. If a value head shows [start_value], [kqk_value], [kvk_queenless_value] staying in [−0.1, +0.1] for >1000 steps without improvement, training is broken.
+
+**Prevention rule**: Any training summary script must report canonical-position probes. Alert if `|kqk_value| < 0.3` and step > 1000 (or adaptive threshold).
+
+**Escalation Tier**: Rule candidate — "Include canonical-probe values in metric summaries; raise alert if value head shows no discrimination on trivial positions for extended periods."
+
+---
+
+## 2026-04-21: BN Eval-Mode Divergence Hypothesis Refuted
+
+**Date**: 2026-04-21
+**Agent**: Orchestrator session (diagnostic chain)
+**Domain**: Infrastructure (batch normalization behavior)
+**Error Type**: Context — incorrect hypothesis from incomplete diagnosis
+
+**What happened**: Earlier suspicion was that the inference server's `.eval()` mode (see `python/hyzero/inference/server.py:137-139`) was causing BN to use stale running-stats while MCTS ran on dead heads, but the training process saw them alive (BN using batch stats). Ran a diagnostic: probed the same checkpoint in both `.train()` and `.eval()` modes on 90 positions. Results were near-identical. Running-stats gap vs batch-stats was < 12%.
+
+**Resolution**: BN eval-mode divergence is NOT the culprit. The heads are genuinely collapsed even in train mode. Inference server is not being sabotaged by batch norm. The real issue is distributional collapse (see entry above).
+
+**Escalation Tier**: Gotcha — documented as a refutation to avoid future false suspicions on BN.
+
+---
+
+## 2026-04-21: Syzygy Tablebase Supervision — Major Outcome (Distributional Collapse Broken)
+
+**Date**: 2026-04-21
+**Agent**: Orchestrator + Researcher + Implementer (full session)
+**Domain**: Training data pipeline (external supervision + value-head recovery)
+**Error Type**: Outcome (hypothesis validation, not a mistake)
+
+**What happened**: Decision to inject Syzygy tablebase supervision (3-4-5-man, WDL+DTZ labels) at 45% fraction with masked padded-step loss and biased value-head reinit (+0.3). Five experimental runs with iterative refinement led to a major breakthrough: first promotion achieved, distributional collapse broken, score improved from 6.05 → 8.16 in a single 2-hour run.
+
+**Iteration Arc**:
+
+1. **Run 1** (unbiased reinit, unbalanced cache, TB_FRAC=0.1): Stochastic outcome. Post-reinit kqk_value = +0.88 (random positive seed), sustained +0.85. First-move diversity recovered to ~8 different openings. Killed at step 21800 by safety gate (suspected excessive TB signal).
+
+2. **Run 2** (balanced cache, unbiased reinit): Negative outcome. Post-reinit kqk_value = −0.51 (random negative seed). Feedback loop: negative reinit → negative self-play targets → further collapse. Killed at step ~15700.
+
+3. **Run 3** (biased reinit +0.3, TB_FRAC=0.2, balanced cache): Partial success. kqk_value peaked +0.54, but killed by gate #2 at step ~18000 with peak reached around +0.28. Showed mechanism works but TB signal still diluting.
+
+4. **Run 4** (infrastructure bug): Loss-masking commit wasn't on main branch. Reverted to exact baseline failure mode. Confirmed infrastructure must be merged to main before launching.
+
+5. **Run 4b** (bug fixed, TB_FRAC=0.3): Clean improvement. kqk_value peak +0.54, no gate fired, but training stalled (killed for other reasons around step 18000).
+
+6. **Run 5** (TB_FRAC=0.45 + masking + biased reinit, PID 1206967): **BREAKTHROUGH**
+   - kqk_value: peak +0.85 (sustained for ~3000 steps)
+   - **First promotion**: v15283 beat v15051 (win_rate=0.562) in eval ladder
+   - **2 actual checkmates**: Appeared in self-play at steps 16650 and 21800 (reward head finally signaling)
+   - **Score: 8.1572** (vs pre-TB baseline 6.0468; vs β=0.3 absolute baseline 14.51)
+   - **White first-move distribution**: 77% Na3 → spread to ~8 different openings (qualitative improvement from narrow shuffle patterns)
+   - **43% decisive self-play rate** on recent games (vs ~1% pre-TB)
+
+**Root Cause of Success**: Mixed TB at 45% fraction with:
+- **Masked padded-step loss**: K=5-step TB pseudo-trajectories have targets at step 0 only (±1 for WDL). Masking loss at padded steps 1–4 (target=0) prevented dilution of the ±1 signal.
+- **Biased reinit +0.3**: After kaiming_normal_ reset, set value_head output-layer bias to +0.3, deterministically biasing initial responses toward positive (toward actual mate outcomes from TB). Eliminates 50% stochasticity.
+- **Balanced TB cache**: Equilibrate +1/-1 samples to prevent drift toward either attractor.
+- **High TB fraction (0.45)**: 45% of batch samples from TB means at every gradient step, approximately 45% of positions receive ground-truth supervision. At this proportion, even sparse checkmate arrivals in self-play (1% of steps) receive reinforcement.
+
+**Remaining Failure Mode**: kqk_value oscillates — peaks at +0.85 → drops to −0.34 → back up. Root cause identified: replay buffer dilution. As self-play games accumulate, the effective TB signal proportion shrinks (TB circular buffer stays fixed, replay buffer grows, hence TB fraction = size(TB_buffer) / (size(TB_buffer) + size(selfplay_buffer)) → 0 as training time increases).
+
+**Fix for next session**: Dedicated circular buffer for TB (fixed pool, refreshed from Syzygy cache periodically) instead of mixing at batch-assembly time. This maintains constant 45% proportion throughout the run.
+
+**Evidence from log** (`logs/baseline_20260421_181216.log`, PID 1206967):
+```
+[start_value]   [kqk_value]   [kvk_queenless_value]   [cm_count]
+0.123           +0.85         +0.72                    2 (at step ~20k)
+```
+
+No safety-gate kills. Training completed full 2-hour window. Score 8.1572 extracted from final JSON.
+
+**Escalation Tier**: Gotcha → documented in neural-networks.md (new subsection under "Value-Head Failure Modes") and in mcts-selfplay.md (new section "Recovery: External Supervision"). Rules for future TB iterations:
+- L1: Reinit of collapsed head is stochastic; screen initial outputs or bias-correct at init (now: bias +0.3)
+- L2: Padded-step loss dilutes sparse TB signal; mask loss at padded steps
+- L4: Infrastructure commits must be on main before launching experiments
+- L5: Maintain constant TB proportion via dedicated circular buffer, not batch-time mixing
+
+**Next Steps**: (1) Implement dedicated TB circular buffer to sustain kqk_value throughout run. (2) Launch longer run (4h) from v15283 champion to explore first promotion momentum. (3) Add opening-book supervision to extend the diverse-first-move pattern beyond the 43% decisive ceiling.
+
+---
+
 ## Escalation Tiers
 
 Mistakes escalate from manual avoidance to automation:
@@ -597,6 +716,57 @@ These aren't POV mirrors of each other. Combined with any MCTS concentration (e.
 
 Fix: After POV-flipping, sort `legal_actions.sort_unstable()` in both `play_game()` and `play_game_dual()`. Now both colors present identical sorted lists at equivalent positions.
 
+---
+
+## 2026-04-20: Underpromotion Action Spatial Encoding — Color-Blind Under Augmentation
+
+**Date**: 2026-04-20
+**Agent**: Autoresearch session (training diagnostics)
+**Domain**: Board representation (action encoding under color augmentation)
+**Error Type**: Quality — asymmetric behavior under transformation
+
+**What happened**: When `encode_action_spatial(action, white_to_move)` was called with action ≥ 4096 (underpromotion), the function returned rank-specific spatial planes indexed from White's perspective (promotion from rank 6→7). Under color augmentation, flipping the board and calling `encode_action_spatial(flipped_action, white_to_move=False)` returned planes indexed from Black's perspective (promotion from rank 1→0). This violated the representation invariant: `encode(flip(a), flipped_color) ≠ flip_planes(encode(a, original_color))` for all 576 underpromotion actions.
+
+**Root Cause**: Underpromotion indices are color-agnostic at the action ID level (action IDs 4096–4671 are position-specific), but the spatial encoding maps rank indices (6→7, 1→0) using White-centric logic. The function didn't account for color when converting underpromotion action IDs to spatial planes. Non-underpromotion moves (0–4095) were unaffected because they don't involve rank-specific logic.
+
+**Fix** (commit cc58506): Added `encode_action_spatial_for_color(action, white_to_move)` which takes the color context into account. Under color flip, both the action ID and the color parameter flip, now satisfying: `encode_for_color(flip(a), False) == flip_planes(encode_for_color(a, True))`. Added regression test `test_encode_action_spatial_under_color_flip` covering all 576 underpromo cases.
+
+**Escalation Tier**: Gotcha → encoded in [Board Encoding](board-encoding.md) under "Representation Consistency Invariants" with the invariant class and test reference. Rule candidate: "Any representation transform must satisfy flip invariants; add regression test at encoding refactor time."
+
+---
+
+## 2026-04-20: Value-Head Target Attenuation Under Outcome Blending with Sparse Outcome
+
+**Date**: 2026-04-20
+**Agent**: Autoresearch session (canonical-position probing)
+**Domain**: Neural network training (value target magnitude)
+**Error Type**: Context — overlooked consequence of formula when outcome is sparse
+
+**What happened**: With `HYZERO_DISABLE_MATERIAL_SHAPING=0` disabled (no material proxy) and `HYZERO_VALUE_OUTCOME_BETA=0.3`, the value target formula `(1-β) × root_value + β × outcome` produces max magnitude ±0.3 on decisive games (since outcome is ±1 but root_value is untrained ≈0 early in training). Probing canonical positions on best.pt and model_v000069.pt showed all value outputs in [−0.009, +0.035] — a collapsed ±0.035 range across mate-in-1, KQ-vs-K, K-vs-KQ, and starting position. The value head correctly learned its training-data distribution but had zero discriminative power.
+
+**Root Cause**: Value target magnitude is directly set by β when root_value ≈ 0. With β=0.3 and no shaping, the target signal has a ceiling of ±0.3, not ±1. The value head is trained correctly to fit these targets but has no room to express decisiveness across the [−1, 1] output range.
+
+**Fix**: Use conditional β (decisive games use β=1.0, drawn games use β=0.3) to allow full ±1 signal on decisive outcomes, or enable weak material shaping to give drawn games non-zero targets, increasing signal diversity. Commit 18ce8d9 added the conditional-β mechanism. See `HYZERO_CONDITIONAL_BETA` env flag in [MCTS & Self-Play](mcts-selfplay.md).
+
+**Escalation Tier**: Gotcha → encoded in [Neural Networks](neural-networks.md) under "Value-Head Failure Modes" (Mode 2: Shaping OFF + β>0) with diagnosis (per-checkmate-arrival probe) and prevention (conditional β). Rule candidate: "When changing value target formula, verify target magnitudes on canonical positions and confirm they use the full [−1, 1] output range."
+
+---
+
+## 2026-04-20: Sparse-Signal Collapse Under Conditional β Without Gradient Recovery
+
+**Date**: 2026-04-20
+**Agent**: Autoresearch session (training log inspection)
+**Domain**: Neural network training (multi-head feedback under sparse signal)
+**Error Type**: Design insight — mechanism works but signal rate insufficient
+
+**What happened**: Run #4 enabled both conditional β (decisive→β=1.0) and value-head reinitialization, expecting the combination to escape the collapsed-attractor problem. Empirical trace showed value-head outputs jumped +0.35 at checkmate-arrival events, confirming the mechanism responds to decisive signal. However, within 500 training steps, outputs decayed back to ~0. Root cause: only ~5 checkmates appear per 14,452 training steps (~0.035% of samples). The ±1 signal is overwhelmed by 99.5% of drawn-game samples with target=0.
+
+**Root Cause**: Sparse-outcome regime. Conditional β ensures the signal is loud when present (±1), but presence is too rare. The value head correctly learns "checkmate looks like 1.0" but then trains on 500 subsequent drawn-game samples with target=0, and the network quickly converges to the attractor solution 0 (MSE-optimal under 99.5% zeros). The mechanism (conditional β + reinit) works; the application doesn't have enough signal to sustain.
+
+**Fix** (not yet validated): Add weak material shaping (e.g., `HYZERO_MATERIAL_SHAPING_SCALE=20`) so drawn games receive `0.7 × root_value + 0.3 × tanh(Δ/20)`, providing non-zero targets in [−0.3, +0.3] range. This keeps drawn-game training signal non-zero while staying below the 0.5 shuffle-exploit threshold. Decisive games still get ±1 under conditional β. Combined, the value head sees both frequent weak signal (drawn) and rare strong signal (decisive), enabling gradient recovery between decisive arrivals.
+
+**Escalation Tier**: Gotcha → encoded in [Neural Networks](neural-networks.md) under "Value-Head Failure Modes" (Mode 3: Conditional β + Reinit → Sparse-Signal Decay). Future rule (pending validation of the weak-shaping fix): "Under sparse-outcome regimes, ensure non-zero targets on the majority class to avoid sparse-signal collapse."
+
 **Root Cause**: The board encoding was converted to current-player perspective (commit bb39db6), which requires all consumers of `legal_actions` to be POV-aware. However, the action selection code wasn't updated to sort, and the tie-breaking code wasn't updated to be random-tie-aware. An abstraction leak: POV-invariance of the observation planes wasn't extended to the action-list representation.
 
 **Validation**:
@@ -606,6 +776,43 @@ Fix: After POV-flipping, sort `legal_actions.sort_unstable()` in both `play_game
 - Fresh-start training run (post-fix) showed balanced eval results (vs 71–100% B pre-fix)
 
 **Escalation Tier**: Rule — encoded in `.claude/rules/mcts-pov-symmetry.md` to prevent future regressions. Key rule: "When adding code that consumes legal_actions or MCTS visit distributions, verify it works identically for both colors on mirror-equivalent positions. Sorting action lists is required for POV symmetry. Tie-breaking in deterministic selection MUST be random over ties."
+
+---
+
+## 2026-04-21: TB + REINIT Stochastic — Negative Reinit Seed Produces Negative Attractor
+
+**Date**: 2026-04-21
+**Agent**: Implementer (4-hour validation run)
+**Domain**: Training dynamics (TB supervision + value-head reinit)
+**Error Type**: Design insight — stochastic reinit is sensitive to initial seed direction
+
+**What happened**: Two runs with identical config (TB_FRAC, cache, checkpoint):
+- Run 1 (short, 155748): Post-reinit kqk_value = +0.16 → climbed to +0.88 → settled +0.43. **Success**.
+- Run 2 (long, 163446): Post-reinit kqk_value = -0.08 → briefly reached +0.04 → spiraled to -0.51 at step 15700. **Killed**.
+
+**Root Cause**: `_reinit_value_head()` uses `kaiming_normal_` initialization (random). With ~50% probability, the random weights produce a negative initial response on KQK positions. When this happens:
+
+1. Post-reinit: value head predicts -0.08 for KQK (should be +1)
+2. Self-play: root_value ≈ -0.08 → value target = 0.7 × (-0.08) + 0 = -0.056
+3. Value head trains on slightly-negative self-play targets
+4. MCTS produces worse estimates → new games have more negative Q-values
+5. Feedback loop: value head → self-play targets → value head → ... → saturates at -1
+
+With a positive starting seed (+0.16), the reverse happens — TB +1 signal reinforces
+the positive direction, and start_value stabilizes near the TB cache mean.
+
+**Balanced Cache Interaction**: Balancing +1/-1 TB samples (to fix start_value drift)
+removed the slight positive bias that helped Run 1 sustain positive kqk values. With
+perfectly balanced TB, the average TB signal is 0 — so TB pushes toward 0, not +1.
+Combined with slightly-negative self-play targets, the balanced cache slightly worsens
+the negative attractor problem.
+
+**Fix Options**:
+1. **Screen reinit**: After reinit, check kqk_value. If < 0, reinit again. Repeat up to 5x.
+2. **Biased output init**: Set `value_head[-1].bias = +0.1` after kaiming_normal_ reinit. Guarantees kqk starts positive.
+3. **Accept stochasticity**: Run multiple short 5-min runs, pick the one where kqk went positive, then switch to long run.
+
+**Escalation Tier**: Gotcha → documented in agent-memory/orchestrator/tablebase_4h_validation.md with full trajectory data.
 
 ---
 

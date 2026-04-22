@@ -10,7 +10,7 @@ import torch
 
 from hyzero.config import DEFAULT_CONFIG
 from hyzero.training import Trainer
-from hyzero.training.trainer import _parse_loss_weight_env, _parse_lr_schedule_env
+from hyzero.training.trainer import _parse_loss_weight_env, _parse_lr_schedule_env, _reinit_value_head
 
 INPUT_PLANES = DEFAULT_CONFIG["input_planes"]   # 102
 NUM_ACTIONS = DEFAULT_CONFIG["num_actions"]     # 4672
@@ -248,3 +248,60 @@ def test_train_batch_consistency_loss_zero_when_disabled(monkeypatch: pytest.Mon
     result = trainer.train_batch(batch)
 
     assert result["consistency_loss"] == 0.0
+
+
+# --- Biased value-head reinit tests ---
+
+
+def test_reinit_value_head_bias_offset(monkeypatch: pytest.MonkeyPatch) -> None:
+    """HYZERO_REINIT_VALUE_BIAS=0.3 shifts initial value output to positive half-plane.
+
+    After reinit with bias_offset=+0.3, a forward pass on a random hidden state
+    should yield mean output > 0.1 (expected ~tanh(0.3) ≈ 0.29).  This verifies
+    the final Linear bias is initialised to the constant rather than zero,
+    guaranteeing the value head starts in the positive attractor for TB supervision.
+    """
+    monkeypatch.setenv("HYZERO_REINIT_VALUE_BIAS", "0.3")
+
+    torch.manual_seed(0)
+    trainer = Trainer(device="cpu")
+
+    _reinit_value_head(trainer.f)
+
+    # Forward pass on random hidden states using the default hidden_channels.
+    hidden_channels = trainer.config["hidden_channels"]
+    dummy_hidden = torch.randn(16, hidden_channels, 8, 8)
+    with torch.no_grad():
+        _, value = trainer.f(dummy_hidden)  # [16, 1]
+
+    mean_output = value.mean().item()
+    assert mean_output > 0.1, (
+        f"Expected mean value output > 0.1 after bias_offset=+0.3 reinit, got {mean_output:.4f}"
+    )
+
+
+def test_reinit_value_head_no_bias_offset(monkeypatch: pytest.MonkeyPatch) -> None:
+    """HYZERO_REINIT_VALUE_BIAS unset (default 0.0) keeps zero-bias initialisation.
+
+    After reinit without a bias offset, the mean output over many random inputs
+    should be close to zero (Kaiming normal weights → zero-mean distribution).
+    We allow a generous tolerance of ±0.3 to account for random-seed variance.
+    """
+    monkeypatch.delenv("HYZERO_REINIT_VALUE_BIAS", raising=False)
+
+    torch.manual_seed(1)
+    trainer = Trainer(device="cpu")
+
+    _reinit_value_head(trainer.f)
+
+    hidden_channels = trainer.config["hidden_channels"]
+    dummy_hidden = torch.randn(64, hidden_channels, 8, 8)
+    with torch.no_grad():
+        _, value = trainer.f(dummy_hidden)  # [64, 1]
+
+    mean_output = value.mean().item()
+    # With zero bias and symmetric kaiming init the distribution is approximately
+    # zero-centred; tanh squashes further toward zero.  Allow ±0.3 tolerance.
+    assert abs(mean_output) < 0.3, (
+        f"Expected mean value output near 0 without bias offset, got {mean_output:.4f}"
+    )

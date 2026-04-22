@@ -1,9 +1,0 @@
-timestamp=20260411_204112
-duration_s=90
-games_completed=1
-training_steps=0
-first_loss=N/A
-last_loss=N/A
-avg_game_steps=140
-errors=0
-checkpoints=0

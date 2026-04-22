@@ -1,26 +1,26 @@
 # Neural Networks (MuZero)
 
-Three networks on 8×8 boards, C=64 channels:
+Three networks on 8×8 boards, C=128 channels:
 
 | Network | Input | Output | Role |
 |---------|-------|--------|------|
-| **h** | [B, 19, 8, 8] | [B, 64, 8, 8] | Encode observation → hidden state |
-| **g** | [B, 67, 8, 8] | [B, 64, 8, 8] + [B] | Dynamics: next hidden + reward |
-| **f** | [B, 64, 8, 8] | [B, 4096] + [B] | Policy logits + value |
+| **h** | [B, 102, 8, 8] | [B, 128, 8, 8] | Encode observation → hidden state |
+| **g** | [B, 131, 8, 8] | [B, 128, 8, 8] + [B] | Dynamics: next hidden + reward |
+| **f** | [B, 128, 8, 8] | [B, 4096] + [B] | Policy logits + value |
 
-Observation planes (19): encoded from current-player perspective (AlphaZero convention, commit bb39db6). Planes 0–5 = current player's pieces, 6–11 = opponent, rank-mirrored for Black to move. Includes 4 castling rights, en passant, side-to-move, halfmove clock. See [Board Encoding](board-encoding.md) for details.
+Observation planes (102): 12 piece planes (current-player perspective, current + 7 history slices) + 6 auxiliary planes (castling, en passant, side-to-move, halfmove clock). Encoded from current-player perspective (AlphaZero convention, commit bb39db6). Planes 0–5 = current player's pieces, 6–11 = opponent, rank-mirrored for Black to move. See [Board Encoding](board-encoding.md) for details.
 
 ## Network Shapes
 
 ```
-h:  Conv2d(19→64, k=3, p=1) → BN → ReLU → 4×ResBlock → [B, 64, 8, 8]
+h:  Conv2d(102→128, k=3, p=1) → BN → ReLU → 4×ResBlock → [B, 128, 8, 8]
 
-g:  Conv2d(67→64, k=3, p=1) → BN → ReLU → 4×ResBlock
-      state path:  [B, 64, 8, 8]
-      reward path: Conv2d(64→1, k=1) → Flatten → Linear(64,1) → Tanh → [B]
+g:  Conv2d(131→128, k=3, p=1) → BN → ReLU → 4×ResBlock
+      state path:  [B, 128, 8, 8]
+      reward path: Conv2d(128→1, k=1) → Flatten → Linear(64,1) → Tanh → [B]
 
-f:  policy: Conv2d(64→2, k=1) → BN → ReLU → Flatten[B,128] → Linear(128,4096) → [B, 4096]
-    value:  Conv2d(64→1, k=1) → BN → ReLU → Flatten[B,64] → Linear(64,64) → ReLU → Linear(64,1) → Tanh → [B]
+f:  policy: Conv2d(128→2, k=1) → BN → ReLU → Flatten[B,128] → Linear(128,4096) → [B, 4096]
+    value:  Conv2d(128→1, k=1) → BN → ReLU → Flatten[B,64] → Linear(64,64) → ReLU → Linear(64,1) → Tanh → [B]
 
 ResBlock: Conv(C,C,3,p=1) → BN → ReLU → Conv(C,C,3,p=1) → BN + skip → [B, C, H, W]
 ```
@@ -28,11 +28,11 @@ ResBlock: Conv(C,C,3,p=1) → BN → ReLU → Conv(C,C,3,p=1) → BN + skip → 
 ## Inference Batch Methods (Python → Rust)
 
 ```
-root_setup_batch(observations [B,19,8,8])
-  → hidden [B,64,8,8], policies [B,4096] (softmax), values [B]
+root_setup_batch(observations [B,102,8,8])
+  → hidden [B,128,8,8], policies [B,4096] (softmax), values [B]
 
-expand_leaf_batch(hidden [B,64,8,8], actions [B,3,8,8])
-  → next_hidden [B,64,8,8], rewards [B], policies [B,4096] (softmax), values [B]
+expand_leaf_batch(hidden [B,128,8,8], actions [B,3,8,8])
+  → next_hidden [B,128,8,8], rewards [B], policies [B,4096] (softmax), values [B]
 ```
 
 All arrays: `float32` numpy. Policies are post-softmax. Values tanh-bounded [-1, 1].
@@ -138,10 +138,44 @@ Loss weights (HYZERO_{POLICY,VALUE,REWARD}_LOSS_WEIGHT) default to 1.0 and shoul
 
 **To increase value signal**: Prefer tuning the outcome blend coefficient β instead. For example, use β=0.5 (soft 50/50 outcome–Q-estimate target) rather than increasing the loss weight. This scales the target without amplifying gradient instability in the closed-loop system.
 
+## Value-Head Failure Modes & Diagnosis
+
+Four failure modes have been identified under β-blended outcome targets (2026-04-20, Mode 4 added 2026-04-21):
+
+**Failure Mode 1: Material-Shaping Exploitation + β>0 → Shuffle Exploit**
+Under `HYZERO_DISABLE_MATERIAL_SHAPING=0` with default `HYZERO_MATERIAL_SHAPING_SCALE=5`, non-checkmate outcome is `tanh(Δmaterial/5)`. A +3 material gap yields `tanh(0.6) ≈ 0.54`, above the 0.5 decisive threshold. Network learns to grab material then force repetition (e.g., rook shuffle a1↔b1). Seen in 2026-04-20 run #1 (v1099). **Prevention**: Use weak shaping (SCALE=20 or higher) to keep material-only outcomes below decisive threshold (~0.3 max), or disable shaping entirely and use conditional β.
+
+**Failure Mode 2: Shaping OFF + β>0 → Signal Attenuation**
+Without material shaping, non-checkmate outcomes are 0. Value target formula: `(1-β) × root_value + β × 0`. With untrained network, max target magnitude on decisive games is `β × 1 ≈ ±0.3` (at β=0.3). Value head learns a ±0.3 range, showing zero discrimination across mate-in-1, KQ-vs-K, and starting position. **Prevention**: Use conditional β (decisive games → β=1.0) or weak shaping to give drawn games non-zero targets.
+
+**Failure Mode 3: Conditional β + Reinit → Sparse-Signal Decay**
+Fixes enable value-head response at checkmate arrival (+0.35 measured), but decay back to 0 within 500 training steps. Root cause: 99.5% of batch samples are drawn games (target=0); only ~5 checkmates per 14k steps. The mechanism works; the signal rate doesn't. **Prevention**: Use weak shaping (SCALE=20) so drawn games receive `0.7 × root_value + 0.3 × tanh(Δ/20)` — continuous weak signal keeping drawn targets in [−0.3, +0.3] range, well below shuffle-exploit threshold.
+
+**Failure Mode 4: Distributional Overfitting (2026-04-21)**
+Value head (and reward head) fit training-distribution targets in aggregate but collapse to ~0 on out-of-distribution positions. Discovered via closed-form derivation from batch-aggregate stats: reward predictions appeared ±0.99 at checkmate arrival in training logs, but a probe on 90 held-out positions from eval_games.pgn showed [−0.008, +0.004] for all transitions, including actual mates. The network overfit to in-distribution self-play terminals and lost generalization to other model versions' checkpoint positions. **Diagnostic technique**: Per-checkmate-arrival canonical-position probe in train mode. If value head shows zero discrimination on KQ-vs-K or mate-in-1 positions while aggregate batch stats look alive, the network is distributionally collapsed. **Prevention**: External supervision (tablebase WDL labels, PGN corpus) to break the in-distribution overfitting loop.
+
+**Recovery: External Supervision (2026-04-21)**
+
+When the value head has collapsed to a narrow distribution (kqk_value ≈ 0 for 15k+ steps, 2026-04-21 evidence), self-play alone cannot restore it because the training distribution has drifted to shuffle patterns that don't contain decisive outcomes. Recovery requires injecting external ground-truth labels.
+
+Validated approach: Syzygy tablebase supervision (3-4-5-man, WDL+DTZ labels) mixed into training batches at 45% fraction with masked padded-step loss (targets only at step 0, zero-out loss at steps 1–K), biased value-head reinit (+0.3 output bias), and balanced TB cache (equal +1/−1 samples). Evidence from 2-hour run (PID 1206967, 2026-04-21):
+- kqk_value: sustained +0.85 (vs −0.012 baseline)
+- **First promotion in eval ladder**: v15283 beat v15051 (win_rate=0.562)
+- **2 actual checkmates detected**: Appeared in self-play (reward head responding)
+- **Score 8.1572** (vs 6.05 pre-TB baseline, +2.11 delta; vs 14.51 absolute β=0.3 baseline)
+- **White first-move diversity**: 77% concentrated → spread across ~8 openings
+- **43% decisive self-play** (vs ~1% pre-TB)
+
+Root cause of success: (1) Masked loss at padded steps prevents dilution of the ±1 TB signal across K-step pseudo-trajectories. (2) Biased reinit eliminates 50% stochasticity in initial response direction. (3) 45% TB fraction means every gradient step has ~45% ground-truth supervision. (4) Balanced cache prevents drift toward either attractor.
+
+Remaining issue: kqk_value oscillates (peaks at +0.85 → drops to −0.34 → recovers). Root cause: replay buffer dilution. As self-play games accumulate, effective TB signal shrinks (TB buffer fixed, self-play buffer grows, dilution ∝ time). **Fix for next session**: Dedicated TB circular buffer (refreshed periodically from Syzygy cache) to maintain constant 45% proportion throughout training.
+
+**Diagnostic technique**: Per-checkmate-arrival value probe. Parse training logs for `[cm_count]` lines; find step K where total_cm increments. Inspect `[start_value]` / `[kqk_value]` / `[kvk_queenless_value]` at K−100, K, K+100, K+500 to visualize value-head response amplitude and decay rate. If probe values stay in [−0.1, +0.1] range despite checkmate arrival, distributional collapse is active.
+
 ## Key Gotchas
 
 1. **Policy**: Network outputs logits. Inference server applies softmax; training uses raw logits + CE.
-2. **Value**: Tanh [-1, 1]. Currently predicts MCTS root_value (bootstrapped Q-estimates) + soft outcome blend (β=0.3 by default).
+2. **Value**: Tanh [-1, 1]. Currently predicts MCTS root_value (bootstrapped Q-estimates) + soft outcome blend (β=0.3 by default). **Critical**: Monitor canonical-position probes ([start_value], [kqk_value], [kvk_queenless_value] in logs). If these stay in [−0.1, +0.1] for >1000 steps, value head is dead. This indicates distributional collapse (overfitting to self-play).
 3. **Reward**: Per-step (immediate), not cumulative. Real rewards come from trajectory — terminal reward only.
 4. **Action encoding**: 4096 = 64×64, queen-default promotion. Underpromotion (4672) unimplemented. Actions are in current-player space; flipped to absolute board space at MCTS boundary (commit bb39db6). See [Board Encoding](board-encoding.md).
 5. **Value not negated per ply** in backup — intentional (same sign across turns), verify during training.
@@ -151,6 +185,7 @@ Loss weights (HYZERO_{POLICY,VALUE,REWARD}_LOSS_WEIGHT) default to 1.0 and shoul
 9. **Loss weights at 1.0**: Keep `HYZERO_{POLICY,VALUE,REWARD}_LOSS_WEIGHT` at default 1.0. Amplifying (e.g., value_weight=5.0) destabilizes the multi-head feedback loop and regresses play despite better training loss.
 10. **Reward head dead from class imbalance**: ~99% of reward targets are 0.0 (only terminal steps). MSE-optimal solution is 0.
 11. **Value head outcome target conversion**: Game outcome is White-absolute (+1 White win, -1 Black win). When used as value target, must apply ply-flip to convert to the perspective of whoever is to move: `target = outcome * side_sign * (1.0 if ply_even else -1.0)`. Done automatically at `src/py/training.rs:136` during batch assembly.
+12. **Underpromotion action spatial encoding is color-aware** (commit cc58506): Underpromo indices are color-agnostic at the action ID level, but `encode_action_spatial(action, white_to_move)` returns color-specific spatial planes. Under color augmentation, `encode_action_spatial(flip_action(a), flipped_color) == flip_action_planes(encode_action_spatial(a, original_color))` must hold. Regression test added; fix: use `encode_action_spatial_for_color(action, white_to_move)` when color matters.
 
 ## Related
 

@@ -478,32 +478,65 @@ impl MCTSTree {
 
     /// Backpropagate `value` up the tree along `path`.
     ///
+    /// Canonical MuZero backup: walk leaf → root accumulating `G = r + γ·(−G_child)`
+    /// with γ = 1 for 2-player zero-sum (chess). The reward on each edge contributes
+    /// a sign-flipped term because the POV alternates per ply.
+    ///
     /// Sign convention (matching PUCT in puct.rs, which uses `child.q_value` directly):
     /// - Each node stores Q from its PARENT's perspective.
     /// - The root has no parent; it stores Q from its own player's perspective.
     /// - `value` is the leaf evaluation from the LEAF's player's perspective.
+    /// - `child.reward` is the reward received when transitioning INTO that child
+    ///   (from the mover's POV at the parent of that child).
     ///
-    /// For a two-player alternating game, the leaf's player matches the root's player
-    /// iff the path length D is even. Walking down: root and depth-1 share the same
-    /// POV (root's own player), and from depth 2 onwards the stored POV flips at each step.
+    /// For path of length D with leaf at depth D, leaf value `v`, and edge
+    /// rewards `r_1..r_D` (where `r_k` is the reward on the edge entering the
+    /// depth-k node), the return from each depth's POV is computed by the
+    /// backward recurrence:
+    ///     G_D     = v
+    ///     G_{k-1} = r_k − G_k
+    /// The stored-Q perspectives are:
+    ///     stored_0      = G_0          (root, own POV)
+    ///     stored_k ≥ 1  = G_{k-1}      (stored in parent's POV)
+    ///
+    /// When all edge rewards are zero this degenerates to the prior behavior:
+    /// value walks up with a sign flip per ply, so existing zero-reward tests
+    /// continue to pass bit-for-bit.
     fn backpropagate(&mut self, path: &[usize], value: f32) {
-        let d_path = path.len();
-        // Leaf → root: flip D times. Root's own-POV sign: +1 if D even, -1 if D odd.
-        let mut sign: f32 = if d_path.is_multiple_of(2) { 1.0 } else { -1.0 };
+        let d = path.len();
 
+        // Step 1: collect edge rewards along the path (r_1..r_D).
+        let mut rewards: Vec<f32> = Vec::with_capacity(d);
+        {
+            let mut node: &MCTSNode = &self.root;
+            for &idx in path {
+                let child = node.children[idx].as_ref().unwrap();
+                rewards.push(child.reward);
+                node = child;
+            }
+        }
+
+        // Step 2: compute G_k for k = 0..=D via reverse recurrence (γ = 1).
+        // g_values[k] = G_k from depth-k's POV.
+        let mut g_values: Vec<f32> = vec![0.0; d + 1];
+        g_values[d] = value;
+        for k in (0..d).rev() {
+            // G_k = r_{k+1} − G_{k+1}; rewards[k] is r_{k+1} (0-indexed).
+            g_values[k] = rewards[k] - g_values[k + 1];
+        }
+
+        // Step 3: update each node's stats with the correct POV-stored G.
+        // Root stores G_0 (own POV); depth-k node (k ≥ 1) stores G_{k-1} (parent's POV).
         self.root.visit_count += 1;
-        self.root.total_value += sign * value;
+        self.root.total_value += g_values[0];
 
         let mut node = &mut self.root;
         for (i, &idx) in path.iter().enumerate() {
-            // Depth-1 child stores Q from root's POV (same as root's own).
-            // Depth-d (d≥2) stores Q from depth-(d-1)'s POV, flipped each step.
-            if i >= 1 {
-                sign = -sign;
-            }
+            // Node at depth (i + 1) stores G_i (its parent's POV).
+            let stored = g_values[i];
             let child = node.children[idx].as_mut().unwrap();
             child.visit_count += 1;
-            child.total_value += sign * value;
+            child.total_value += stored;
             node = node.children[idx].as_mut().unwrap();
         }
     }
@@ -714,6 +747,107 @@ mod tests {
         );
     }
 
+    /// Statistical MCTS ordering invariance regression.
+    ///
+    /// Runs 100 independent MCTS searches with UNSORTED legal_actions and 100 with
+    /// SORTED legal_actions (both starting from the same set of action IDs at the root).
+    /// Computes mean visit distributions mapped by ACTION ID. The mean distributions
+    /// should agree within tolerance=0.05 per action, confirming that the visit
+    /// distribution is not sensitive to the presentation order of legal_actions.
+    ///
+    /// This is a statistical test; a single MCTS tree with Dirichlet noise is
+    /// non-deterministic so individual runs will differ, but means over 100 runs
+    /// should converge. A failure here indicates a structural ordering bias
+    /// (e.g., argmax tie-break always picking lowest-index child regardless of action ID).
+    #[tokio::test]
+    #[ignore = "statistical ordering invariance — 200 MCTS runs; run with --ignored"]
+    async fn test_mcts_visit_distribution_ordering_invariance() {
+        // Use a small set of action IDs that are NOT already in sorted order.
+        // Representing moves from the starting position (e2e4, d2d4, c2c4, g1f3, b1c3).
+        let e2e4: ActionIndex = 12 * 64 + 28; // 796
+        let d2d4: ActionIndex = 11 * 64 + 27; // 731
+        let c2c4: ActionIndex = 10 * 64 + 26; // 666
+        let g1f3: ActionIndex = 6 * 64 + 21;  // 405
+        let b1c3: ActionIndex = 1 * 64 + 18;  // 82
+
+        // Unsorted order: descending by action ID (796, 731, 666, 405, 82)
+        let unsorted: Vec<ActionIndex> = vec![e2e4, d2d4, c2c4, g1f3, b1c3];
+        // Sorted order: ascending (82, 405, 666, 731, 796)
+        let mut sorted = unsorted.clone();
+        sorted.sort_unstable();
+
+        let n_actions = unsorted.len();
+        let num_sims = 200u32;
+        let num_trials = 100usize;
+
+        // action-ID sorted reference order (same for both orderings — same set of IDs)
+        let sorted_ids: Vec<ActionIndex> = sorted.clone();
+
+        // Run `num_trials` MCTS searches with legal_actions in `legal` order.
+        // Returns mean visit distribution indexed by `sorted_ids` position.
+        macro_rules! run_trials {
+            ($legal:expr) => {{
+                let legal: &Vec<ActionIndex> = &$legal;
+                let mut acc: Vec<f64> = vec![0.0; n_actions];
+                for _ in 0..num_trials {
+                    let policy = vec![1.0 / NUM_ACTIONS as f32; NUM_ACTIONS];
+                    let config = MCTSConfig {
+                        num_simulations: num_sims,
+                        exploration_constant: 1.5,
+                        add_root_noise: true,
+                    };
+                    let mut tree =
+                        MCTSTree::new(HiddenState::new(64), &policy, 0.0, legal.clone(), config);
+                    tree.run_simulations(&MockEvaluator).await;
+                    let dist = tree.extract_visit_distribution();
+                    // Map child-slot → sorted_ids position → accumulator
+                    for (slot, &action) in legal.iter().enumerate() {
+                        if let Some(pos) = sorted_ids.iter().position(|&a| a == action) {
+                            acc[pos] += dist[slot] as f64;
+                        }
+                    }
+                }
+                acc.iter().map(|&s| (s / num_trials as f64) as f32).collect::<Vec<f32>>()
+            }};
+        }
+
+        let mean_unsorted = run_trials!(unsorted);
+        let mean_sorted = run_trials!(sorted);
+
+        let tolerance = 0.05f32;
+        let mut failures: Vec<(ActionIndex, f32, f32, f32)> = Vec::new();
+        let sorted_ids: Vec<ActionIndex> = {
+            let mut s = unsorted.clone();
+            s.sort_unstable();
+            s
+        };
+        for (i, (&action, (&mu_u, &mu_s))) in sorted_ids.iter()
+            .zip(mean_unsorted.iter().zip(mean_sorted.iter()))
+            .enumerate()
+        {
+            let _ = i;
+            let delta = (mu_u - mu_s).abs();
+            if delta > tolerance {
+                failures.push((action, mu_u, mu_s, delta));
+            }
+        }
+
+        assert!(
+            failures.is_empty(),
+            "MCTS visit distribution differs by >={} for {} action(s) between \
+             unsorted and sorted legal_actions (tolerance={}).\n\
+             Failures (action, mean_unsorted, mean_sorted, |delta|): {:?}\n\
+             Full unsorted means: {:?}\n\
+             Full sorted means:   {:?}",
+            tolerance,
+            failures.len(),
+            tolerance,
+            failures,
+            mean_unsorted,
+            mean_sorted,
+        );
+    }
+
     #[tokio::test]
     async fn test_backpropagate_alternates_signs() {
         // Test backpropagate directly on hand-built trees for path lengths 1, 2, 3.
@@ -862,5 +996,92 @@ mod tests {
                 d3.total_value,
             );
         }
+    }
+
+    #[tokio::test]
+    async fn test_backpropagate_includes_mating_reward() {
+        // Canonical MuZero backup: a mating reward on an edge must propagate
+        // into the root's Q value (sign-flipped per ply back to root POV).
+        //
+        // Setup: D=2 path root → depth-1 → depth-2 (leaf). The transition from
+        // depth-1 into depth-2 is a mating move, so that edge carries reward
+        // r_2 = +1 from depth-1's POV (depth-1 just mated its opponent). The
+        // leaf is the absorbing post-mate state with v_leaf = 0.
+        //
+        // Canonical recurrence (γ=1):
+        //   G_2 = 0            (leaf/absorbing POV)
+        //   G_1 = r_2 - G_2 = +1   (depth-1's POV: depth-1 won)
+        //   G_0 = r_1 - G_1 = -1   (root's POV: root's opponent won → root loses)
+        //
+        // Stored values:
+        //   root         += G_0 = -1
+        //   depth-1      += G_0 = -1   (stored in parent=root's POV)
+        //   depth-2 leaf += G_1 = +1   (stored in parent=depth-1's POV)
+        //
+        // Without the reward term (old backup), all contributions would be 0 and
+        // the mating signal would be invisible to MCTS selection.
+
+        let uniform_policy = vec![1.0 / NUM_ACTIONS as f32; NUM_ACTIONS];
+        let nil_config = MCTSConfig {
+            num_simulations: 0,
+            exploration_constant: 1.5,
+            add_root_noise: false,
+        };
+
+        let legal: Vec<ActionIndex> = (0..2).collect();
+        let mut tree = MCTSTree::new(
+            HiddenState::new(64),
+            &uniform_policy,
+            0.0,
+            legal,
+            nil_config,
+        );
+
+        // Install depth-1 child with zero reward on root → depth-1 edge.
+        let legal_d1: Vec<ActionIndex> = (0..2).collect();
+        let d1_node = MCTSNode::new(HiddenState::new(64), &uniform_policy, legal_d1, 0.0);
+        tree.root.children[0] = Some(Box::new(d1_node));
+
+        // Install depth-2 leaf with reward = +1 on the depth-1 → depth-2 edge
+        // (the mating transition).
+        let legal_d2: Vec<ActionIndex> = (0..2).collect();
+        let d2_node = MCTSNode::new(HiddenState::new(64), &uniform_policy, legal_d2, 1.0);
+        tree.root.children[0].as_mut().unwrap().children[0] = Some(Box::new(d2_node));
+
+        let root_tv_before = tree.root.total_value;
+
+        // Backpropagate with leaf value = 0 (absorbing post-mate state).
+        tree.backpropagate(&[0, 0], 0.0);
+
+        // Root delta must be -1 (root lost because its opponent delivered mate).
+        let root_delta = tree.root.total_value - root_tv_before;
+        assert!(
+            (root_delta - (-1.0)).abs() < 1e-6,
+            "root delta should be -1.0 (opponent mated root); got {}",
+            root_delta,
+        );
+
+        // Depth-1 stores Q from root's POV → -1 (depth-1 is root's opponent
+        // who just won, which is -1 from root's POV).
+        let d1 = tree.root.children[0].as_ref().unwrap();
+        assert!(
+            (d1.total_value - (-1.0)).abs() < 1e-6,
+            "depth-1 should be -1.0 (stored in root's POV); got {}",
+            d1.total_value,
+        );
+
+        // Depth-2 leaf stores Q from depth-1's POV → +1 (depth-1 mated its
+        // opponent; from depth-1's POV the return is +1).
+        let d2 = d1.children[0].as_ref().unwrap();
+        assert!(
+            (d2.total_value - 1.0).abs() < 1e-6,
+            "depth-2 leaf should be +1.0 (stored in depth-1's POV); got {}",
+            d2.total_value,
+        );
+
+        // Sanity: q_value at depth-1 reflects the mate. PUCT at root will see
+        // this -1 and push search toward the OTHER child (not losing to mate).
+        let d1_q = d1.q_value();
+        assert!(d1_q < 0.0, "d1.q_value should be negative; got {}", d1_q);
     }
 }

@@ -8,8 +8,8 @@ use pyo3::types::PyDict;
 use tokio::sync::{mpsc, watch};
 
 use crate::data::{
-    encode_action_spatial, flip_action, flip_action_planes, flip_obs_planes, GameTrajectory,
-    ReplayBuffer, TrainingSample, NUM_ACTIONS, NUM_OBS_PLANES,
+    encode_action_spatial_for_color, flip_action, flip_obs_planes, GameTrajectory, ReplayBuffer,
+    TrainingSample, NUM_ACTIONS, NUM_OBS_PLANES,
 };
 
 /// Flat arrays assembled from a batch of `TrainingSample` for Python training.
@@ -61,6 +61,19 @@ fn outcome_blend_beta() -> f32 {
         .and_then(|v| v.parse::<f32>().ok())
         .map(|v| v.clamp(0.0, 1.0))
         .unwrap_or(0.1)
+}
+
+/// True when HYZERO_CONDITIONAL_BETA is set to any truthy value.
+/// When enabled, decisive games (checkmates, is_draw==false) use β=1.0
+/// while drawn games use the configured beta. See [2026-04-20 bug-hunt].
+fn conditional_beta_enabled() -> bool {
+    match std::env::var("HYZERO_CONDITIONAL_BETA") {
+        Ok(v) => {
+            let s = v.trim().to_ascii_lowercase();
+            !(s.is_empty() || s == "0" || s == "false" || s == "no")
+        }
+        Err(_) => false,
+    }
 }
 
 /// Return the reward outcome blend coefficient γ from `HYZERO_REWARD_OUTCOME_GAMMA`.
@@ -137,16 +150,21 @@ pub fn assemble_batch_arrays(samples: &[TrainingSample], unroll_k: usize) -> Bat
             }
         }
 
-        // actions[bi, k] = encode_action_spatial(steps[k].action) for k in 0..K
+        // actions[bi, k] = encode_action_spatial_for_color(steps[k].action, pov) for k in 0..K
         // (action taken AT step k, transitioning s_k → s_{k+1}). See doc-comment above.
+        //
+        // Under color augmentation (apply_flip=true), the observation is flipped to the
+        // OPPOSITE player's POV, so the action spatial encoding must also use the flipped
+        // color. We pass `!step.white_to_move` when apply_flip is true so that
+        // underpromotion ranks match the POV the network will see.
         for k in 0..unroll_k {
-            let raw_action_idx = steps[k].action;
-            let encoded = encode_action_spatial(raw_action_idx);
-            let encoded = if apply_flip {
-                flip_action_planes(&encoded)
+            let step = &steps[k];
+            let pov_white = if apply_flip {
+                !step.white_to_move
             } else {
-                encoded
+                step.white_to_move
             };
+            let encoded = encode_action_spatial_for_color(step.action, pov_white);
             let act_base = (bi * unroll_k + k) * act_stride;
             actions[act_base..act_base + act_stride].copy_from_slice(&encoded);
         }
@@ -198,8 +216,19 @@ pub fn assemble_batch_arrays(samples: &[TrainingSample], unroll_k: usize) -> Bat
             // step.root_value is in the ORIGINAL step-k-side POV; flip_sign negates it
             // when the observation is flipped.
             let root_value_target = flip_sign * step.root_value;
+            // Conditional β: checkmate games use pure outcome (β=1.0) so the value head
+            // sees the full ±1 signal; non-checkmate games keep the configured β (default
+            // 0.3) to bootstrap through root_value. Rationale: under HYZERO_DISABLE_MATERIAL_SHAPING=1,
+            // non-checkmate outcomes are 0.0 — a flat β=1.0 would collapse every drawn
+            // game to target=0, wasting the information that root_value carries. Gate
+            // with HYZERO_CONDITIONAL_BETA=1 (default false to preserve historical behavior).
+            let effective_beta: f32 = if conditional_beta_enabled() && !sample.is_draw {
+                1.0
+            } else {
+                beta
+            };
             target_values[bi * kp1 + k] =
-                (1.0 - beta) * root_value_target + beta * outcome_in_step_perspective;
+                (1.0 - effective_beta) * root_value_target + effective_beta * outcome_in_step_perspective;
             // step.reward is only non-zero on the trajectory's last step; apply the same
             // POV flip so the reward head sees a consistent sign convention.
             let reward_target = flip_sign * step.reward;
@@ -453,7 +482,23 @@ impl PyTrainingThread {
     pub async fn run(&mut self) {
         while let Some(trajectory) = self.trajectory_rx.recv().await {
             let num_steps = trajectory.steps.len();
+            let game_outcome = trajectory.game_outcome;
+            let is_draw = trajectory.is_draw;
             self.replay_buffer.add(trajectory);
+
+            // Notify the Python trainer so it can maintain the checkmate counter.
+            // Called after add() so replay_buffer.len() is updated for the log line below.
+            let notify_result = Python::attach(|py| -> PyResult<()> {
+                self.trainer.call_method1(
+                    py,
+                    "notify_trajectory",
+                    (game_outcome as f64, is_draw),
+                )?;
+                Ok(())
+            });
+            if let Err(e) = notify_result {
+                eprintln!("[py_training] notify_trajectory error: {e}");
+            }
 
             println!(
                 "[py_training] Game received: {} steps, buffer: {} games / {} total steps, model v{}",
@@ -1180,6 +1225,65 @@ mod tests {
         std::env::remove_var("HYZERO_REWARD_OUTCOME_GAMMA");
     }
 
+    /// Verify that HYZERO_CONDITIONAL_BETA=1 produces target_value=1.0 for a decisive
+    /// sample with is_draw=false, game_outcome=1.0, root_value=0.0 at k=0 (no flip).
+    ///
+    /// Without conditional β the target would be (1-0.3)*0.0 + 0.3*1.0 = 0.3.
+    /// With conditional β=1.0 the target must be exactly 1.0.
+    #[test]
+    fn test_conditional_beta_decisive_uses_pure_outcome() {
+        let _guard = reward_gamma_env_lock().lock().unwrap();
+        // Disable color aug so we get deterministic values (no flip).
+        // SAFETY: protected by reward_gamma_env_lock(); no concurrent env-var access.
+        unsafe {
+            std::env::set_var("HYZERO_CONDITIONAL_BETA", "1");
+            std::env::set_var("HYZERO_DISABLE_COLOR_AUG", "1");
+            std::env::set_var("HYZERO_VALUE_OUTCOME_BETA", "0.3");
+        }
+
+        let k = 1usize;
+
+        // Decisive game: White wins (is_draw=false, game_outcome=1.0, root_value=0.0).
+        let step = make_step_with_side(true, 0.0);
+        let sample = TrainingSample {
+            steps: vec![step.clone(), step.clone()],
+            game_outcome: 1.0,
+            is_draw: false,
+        };
+
+        let arrays = assemble_batch_arrays(&[sample], k);
+
+        // k=0: outcome_in_step_perspective = 1.0 (White wins, White to move, ply 0).
+        // With conditional β=1.0: target = (1-1.0)*0.0 + 1.0*1.0 = 1.0 exactly.
+        assert!(
+            (arrays.target_values[0] - 1.0).abs() < 1e-6,
+            "expected target_value[0]=1.0 under conditional β, got {}",
+            arrays.target_values[0]
+        );
+
+        // Also verify drawn games still use the configured β=0.3.
+        let draw_step = make_step_with_side(true, 0.0);
+        let draw_sample = TrainingSample {
+            steps: vec![draw_step.clone(), draw_step.clone()],
+            game_outcome: 0.0,
+            is_draw: true,
+        };
+
+        let draw_arrays = assemble_batch_arrays(&[draw_sample], k);
+
+        // Draw: outcome=0.0, root_value=0.0 → target = (1-0.3)*0.0 + 0.3*0.0 = 0.0.
+        assert!(
+            draw_arrays.target_values[0].abs() < 1e-6,
+            "expected target_value[0]=0.0 for draw, got {}",
+            draw_arrays.target_values[0]
+        );
+
+        // Clean up.
+        std::env::remove_var("HYZERO_CONDITIONAL_BETA");
+        std::env::remove_var("HYZERO_DISABLE_COLOR_AUG");
+        std::env::remove_var("HYZERO_VALUE_OUTCOME_BETA");
+    }
+
     #[test]
     #[ignore = "requires hyzero Python package"]
     fn test_train_batch_python_returns_loss() {
@@ -1419,5 +1523,170 @@ mod tests {
         // Both branches should be exercised (≈100 each over 200 trials).
         assert!(saw_unflipped > 50, "unflipped trials too rare: {saw_unflipped}");
         assert!(saw_flipped > 50, "flipped trials too rare: {saw_flipped}");
+    }
+
+    /// Mirror-trajectory target-construction symmetry regression.
+    ///
+    /// Constructs two 6-step trajectories (unroll_k=5) that are POV-mirror images of
+    /// each other: W-trajectory starts white-to-move, B-trajectory starts black-to-move.
+    /// By the current-player POV encoding convention, mirror-equivalent positions look
+    /// byte-identical: white's e2e4 from white's POV uses the same squares as black's
+    /// e7e5 from black's POV (both map to from_sq=12, to_sq=28, action=796).
+    ///
+    /// With apply_flip=false (HYZERO_DISABLE_COLOR_AUG=1), the training pipeline must
+    /// scatter visit distributions to the same action indices for both trajectories.
+    /// Any divergence points to a bug in target-construction that is sensitive to the
+    /// `white_to_move` flag when `apply_flip=false` (where it should be irrelevant for
+    /// target_policies).
+    #[test]
+    #[ignore = "mirror-trajectory symmetry regression — expensive; run with --ignored"]
+    fn test_mirror_trajectory_targets_are_symmetric() {
+        use crate::data::encoding::encode_board;
+        use crate::game::{GameBoard, Player};
+        use crate::{Color, PrecomputedItems};
+        use std::sync::Arc;
+
+        let _guard = reward_gamma_env_lock().lock().unwrap();
+        // Force apply_flip=false for both samples so the invariant is pure.
+        std::env::set_var("HYZERO_DISABLE_COLOR_AUG", "1");
+        // Reset outcome blending to defaults so value targets are comparable.
+        std::env::remove_var("HYZERO_VALUE_OUTCOME_BETA");
+        std::env::remove_var("HYZERO_REWARD_OUTCOME_GAMMA");
+
+        // 5 POV-symmetric action IDs for a plausible opening (e2e4, e7e5, g1f3, b8c6, f1c4):
+        //   e2e4: white from_sq=12, to_sq=28  → action 796
+        //   e7e5: black from_sq=52→flip=12, to_sq=36→flip=28 → action 796
+        //   g1f3: white from_sq=6, to_sq=21   → action 405
+        //   b8c6: black from_sq=57→1, to_sq=42→18 → action 82
+        //   f1c4: white from_sq=5, to_sq=26   → action 346
+        //   f8c5: black from_sq=61→5, to_sq=34→26 → action 346
+        //
+        // Note: plies 1 and 3 differ in action ID: 796 vs 82. This is because for ply 1
+        // (e7e5 / e2e4 mirror), both map to 796; for ply 3 (b8c6 / b1c3 mirror), both map
+        // to 82. All POV-encoded.
+        let action_seq: [u16; 5] = [796, 796, 405, 82, 346];
+
+        // Visit distribution for each step: 100% on single chosen action.
+        // Two extra legal moves to make the distribution non-trivial.
+        // White trajectory uses absolute-board action IDs.
+        // Black trajectory uses the SAME action IDs from black's POV — they are identical.
+        let make_legal = |chosen: u16| -> Vec<u16> {
+            // Include a few other plausible moves so the mask has multiple entries.
+            let mut v = vec![chosen, (chosen + 1) % 4096, (chosen + 2) % 4096];
+            v.sort_unstable();
+            v.dedup();
+            v
+        };
+        let make_dist = |legal: &[u16], chosen: u16| -> Vec<f32> {
+            legal.iter().map(|&a| if a == chosen { 1.0 } else { 0.0 }).collect()
+        };
+
+        let precomputed = Arc::new(PrecomputedItems::begin_precomputing());
+
+        // Build actual board observations at mirror positions.
+        // White trajectory: board positions from white's perspective.
+        // Black trajectory: mirror positions from black's perspective — observations should
+        // be byte-identical to white's if the POV encoding is correct.
+        //
+        // We use the initial board for both (step 0) since the initial position is
+        // symmetric and encode_board(board, White) == encode_board(board, Black) (proven
+        // by test_encode_board_initial_position_symmetry in encoding.rs).
+        let initial_board = {
+            let p1 = Player::init_player(true);
+            let p2 = Player::init_player(false);
+            GameBoard::init_game_board(precomputed.clone(), p1, p2)
+        };
+        let initial_obs = {
+            let encoded = encode_board(&initial_board, Color::White, &[]);
+            BoardObservation { planes: encoded.planes.to_vec() }
+        };
+        // For the initial position, white and black observations are identical.
+        // Use the same observation for all 6 steps (no actual moves applied) — the test
+        // focuses on the target_policy construction path, not observation correctness.
+        let obs = initial_obs;
+
+        // Construct white trajectory: 6 steps (K+1=6 for unroll_k=5)
+        // Steps 0,2,4 are white-to-move; steps 1,3 are black-to-move.
+        let unroll_k = 5usize;
+        let num_steps = unroll_k + 1;
+
+        let white_steps: Vec<StepRecord> = (0..num_steps)
+            .map(|k| {
+                let action = action_seq[k.min(4)];
+                let legal = make_legal(action);
+                let dist = make_dist(&legal, action);
+                StepRecord {
+                    observation: obs.clone(),
+                    action,
+                    visit_distribution: dist,
+                    root_value: 0.3,
+                    reward: 0.0,
+                    legal_moves: legal,
+                    white_to_move: k % 2 == 0, // white moves on even plies
+                }
+            })
+            .collect();
+
+        // Construct black trajectory: mirror of white's trajectory.
+        // Starts with black to move; same action IDs (POV-symmetric), same visit dists.
+        let black_steps: Vec<StepRecord> = (0..num_steps)
+            .map(|k| {
+                let action = action_seq[k.min(4)];
+                let legal = make_legal(action);
+                let dist = make_dist(&legal, action);
+                StepRecord {
+                    observation: obs.clone(),
+                    action,
+                    visit_distribution: dist,
+                    root_value: 0.3,
+                    reward: 0.0,
+                    legal_moves: legal,
+                    white_to_move: k % 2 != 0, // black moves on even plies (mirror!)
+                }
+            })
+            .collect();
+
+        let white_sample = TrainingSample {
+            steps: white_steps,
+            game_outcome: 0.0, // draw so value targets cancel out
+            is_draw: true,
+        };
+        let black_sample = TrainingSample {
+            steps: black_steps,
+            game_outcome: 0.0,
+            is_draw: true,
+        };
+
+        // Run a single assembly (apply_flip=false guaranteed by env var).
+        let arrays = assemble_batch_arrays(&[white_sample, black_sample], unroll_k);
+
+        let pol_stride = NUM_ACTIONS;
+        let kp1 = unroll_k + 1;
+
+        let mut divergences: Vec<(usize, usize, f32, f32)> = Vec::new();
+
+        for k in 0..kp1 {
+            let base_w = (0 * kp1 + k) * pol_stride; // bi=0 is white
+            let base_b = (1 * kp1 + k) * pol_stride; // bi=1 is black
+            let pol_w = &arrays.target_policies[base_w..base_w + pol_stride];
+            let pol_b = &arrays.target_policies[base_b..base_b + pol_stride];
+
+            for a in 0..pol_stride {
+                let diff = (pol_w[a] - pol_b[a]).abs();
+                if diff > 1e-6 {
+                    divergences.push((k, a, pol_w[a], pol_b[a]));
+                }
+            }
+        }
+
+        std::env::remove_var("HYZERO_DISABLE_COLOR_AUG");
+
+        assert!(
+            divergences.is_empty(),
+            "mirror-trajectory target_policies diverge at {} (step, action) pairs.\
+             \nFirst 10 divergences (k, a, pol_w, pol_b): {:?}",
+            divergences.len(),
+            &divergences[..divergences.len().min(10)],
+        );
     }
 }

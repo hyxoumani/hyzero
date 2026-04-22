@@ -59,5 +59,30 @@ Actions are 4096-dimensional: 64 from-squares × 64 to-squares = 4096 (promotion
 
 **Action Ordering and POV Symmetry (Commit 41f6681)**: `get_legal_moves()` returns actions in absolute-square iteration order, NOT in POV-symmetric order. This means the same move (e.g., Nc3 for White, Nc6 for Black) will appear at different indices in `legal_actions`. To present an action list with identical index geometry to both colors on mirror-equivalent positions, callers must sort: `legal_actions.sort_unstable()` after the POV-flip step. MCTS simulations and inference depend on consistent action indexing; if you modify action selection code, verify it works symmetrically on both colors using `test_legal_actions_ordering_is_color_symmetric_after_sort()`.
 
-## action_to_notation Bug Fix
+## Representation Consistency Invariants
+
+When implementing board transformations under color augmentation, verify these invariants to catch asymmetries:
+
+1. **Action-spatial encode invariant**: `encode_action_spatial(flip_action(a), white_to_move=False) == flip_action_planes(encode_action_spatial(a, white_to_move=True))`
+   - Ensures action encodings are symmetric under color flip
+   - Particularly important for underpromotion, which has color-agnostic action IDs but color-specific output planes
+   - Regression test: `test_encode_action_spatial_under_color_flip` (commit cc58506)
+
+2. **Observation-flip invariant**: `encode_obs_planes(flip_board(b)) == flip_action_planes(encode_obs_planes(b))`
+   - Ensure observation encoding transforms consistently with action encoding
+   - Useful to extend regression tests once action invariant is verified
+
+3. **Legal-mask consistency**: Legal-move mask construction must account for color perspective changes. Always call `get_legal_moves()` *after* perspective flips, or verify masks are color-independent.
+
+**Bug fixed (commit cc58506)**: Underpromo action indices (4096–4671) are color-agnostic IDs, but `encode_action_spatial(action, white_to_move)` returns color-specific spatial planes (ranks 6→7 for White, ranks 1→0 for Black). Under color augmentation, this broke the encode-flip invariant for all 576 underpromotion actions. Fix: use `encode_action_spatial_for_color(action, white_to_move)` when color context matters.
+
+## Encoder Validation
+
+Python-side encoder available at `scripts/reward_probe.py` with helper functions `encode_board_python()` and `encode_action_spatial()`. Used for diagnostic probes on held-out checkpoints to validate distributional collapse (2026-04-21 session). Validated byte-identical to Rust encoder on initial position via trainer's `[start_value]` probe.
+
+## Related
+
+- [MCTS & Self-Play](mcts-selfplay.md) — action flipping at MCTS boundary, legal-actions ordering
+- [Neural Networks](neural-networks.md) — current-player perspective in observation planes
+- `docs/wiki/mistakes.md` — encoding asymmetry bugs and fixes (2026-04-17, 2026-04-20 entries)
 

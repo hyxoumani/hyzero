@@ -268,34 +268,64 @@ pub fn action_to_move(action: ActionIndex, board: &GameBoard, color: Color) -> M
 /// For underpromotion actions (>= NUM_BASE_ACTIONS), the from/to squares are derived
 /// from the encoded from_file and to_file. Since these always involve a promotion,
 /// the promotion flag plane is always set for underpromotion actions.
+///
+/// **Deprecated for new callsites**: defaults to white's promotion ranks (6→7) for
+/// underpromo actions, which is incorrect when the observation is from Black's POV.
+/// Prefer `encode_action_spatial_for_color` at callsites that have color context.
 pub fn encode_action_spatial(action: ActionIndex) -> [f32; 3 * 64] {
+    encode_action_spatial_for_color(action, true)
+}
+
+/// Color-aware spatial encoding of an action.
+///
+/// Identical to `encode_action_spatial` for base actions (from_sq/to_sq are already
+/// explicit in the index). For underpromotion actions (>= NUM_BASE_ACTIONS), uses the
+/// correct promotion ranks for the given POV color:
+/// - `white_to_move == true`:  from_sq on rank 6, to_sq on rank 7  (white promotes)
+/// - `white_to_move == false`: from_sq on rank 1, to_sq on rank 0  (black promotes)
+///
+/// This satisfies the invariant:
+///   `encode_action_spatial_for_color(flip_action(a), !c) ==
+///    flip_action_planes(encode_action_spatial_for_color(a, c))`
+/// for all `a` and both colors `c`, which is required for correct color-augmented
+/// training targets.
+pub fn encode_action_spatial_for_color(action: ActionIndex, white_to_move: bool) -> [f32; 3 * 64] {
     let mut planes = [0.0f32; 3 * 64];
 
-    let (from_sq, to_sq, is_promo) = if action as usize >= NUM_BASE_ACTIONS {
-        // Underpromotion: decode file indices; use rank 6→7 (white perspective) for spatial encoding
+    if action as usize >= NUM_BASE_ACTIONS {
+        // Underpromotion: decode file indices; use promotion ranks matching the POV color.
         let (_piece_type, from_file, to_file) = decode_underpromo_action(action);
-        let from_sq = 6 * 8 + from_file as usize; // rank 7 (0-indexed 6)
-        let to_sq = 7 * 8 + to_file as usize; // rank 8 (0-indexed 7)
-        (from_sq, to_sq, true)
+        let (from_rank, to_rank): (usize, usize) = if white_to_move {
+            (6, 7) // White pawn promotes from rank 7 (0-indexed 6) to rank 8 (0-indexed 7)
+        } else {
+            (1, 0) // Black pawn promotes from rank 2 (0-indexed 1) to rank 1 (0-indexed 0)
+        };
+        // Only set from/to squares for legal file combinations (both files 0-7).
+        // Slots with to_file >= 8 are illegal padding in the underpromo encoding;
+        // leave from/to squares as zero so both colors produce the same all-zeros
+        // pattern for those slots (preserving the flip_action_planes invariant).
+        if from_file < 8 && to_file < 8 {
+            let from_sq = from_rank * 8 + from_file as usize;
+            let to_sq = to_rank * 8 + to_file as usize;
+            planes[from_sq] = 1.0;
+            planes[64 + to_sq] = 1.0;
+        }
+        // Promotion flag is always set for any underpromo action slot.
+        for sq in 0..64 {
+            planes[128 + sq] = 1.0;
+        }
     } else {
         // Base actions: cannot reliably distinguish queen promotion from rook/king moves
         // to rank 1 or rank 8 using only the action index. Queen promotions lose their
         // flag here (rare event); correctness gained on castling and back-rank piece moves.
         let from_sq = (action / 64) as usize;
         let to_sq = (action % 64) as usize;
-        (from_sq, to_sq, false)
+        // Plane 0: source square
+        planes[from_sq] = 1.0;
+        // Plane 1: destination square
+        planes[64 + to_sq] = 1.0;
+        // No promotion flag for base actions
     };
-
-    // Plane 0: source square
-    planes[from_sq] = 1.0;
-    // Plane 1: destination square
-    planes[64 + to_sq] = 1.0;
-    // Plane 2: promotion flag
-    if is_promo {
-        for sq in 0..64 {
-            planes[128 + sq] = 1.0;
-        }
-    }
 
     planes
 }
@@ -402,6 +432,11 @@ pub(crate) fn flip_obs_planes(obs: &[f32]) -> Vec<f32> {
 ///
 /// Plane 0 (source) and Plane 1 (dest): rank-mirror the one-hot square.
 /// Plane 2 (promotion flag): constant-fill, unchanged.
+///
+/// Used in tests to verify the invariant between `encode_action_spatial_for_color`
+/// and `flip_action`. Production code now uses `encode_action_spatial_for_color`
+/// directly with the correct POV color instead of encoding then flipping.
+#[allow(dead_code)]
 pub(crate) fn flip_action_planes(planes: &[f32; 192]) -> [f32; 192] {
     let mut out = [0.0f32; 192];
     for sq in 0..64 {
@@ -849,18 +884,95 @@ mod tests {
         let board = make_board();
         let obs_white = encode_board(&board, Color::White, &[]);
         let obs_black = encode_board(&board, Color::Black, &[]);
-        let diffs: Vec<(usize, f32, f32)> = (0..102*64)
+        let diffs: Vec<(usize, f32, f32)> = (0..102 * 64)
             .filter(|&i| (obs_white.planes[i] - obs_black.planes[i]).abs() > 1e-6)
             .map(|i| (i, obs_white.planes[i], obs_black.planes[i]))
             .collect();
         if !diffs.is_empty() {
             println!("Found {} differences (first 10):", diffs.len());
             for (i, w, b) in diffs.iter().take(10) {
-                let plane = i / 64; let sq = i % 64;
+                let plane = i / 64;
+                let sq = i % 64;
                 println!("  plane={} sq={} white={} black={}", plane, sq, w, b);
             }
         }
-        assert!(diffs.is_empty(), "encode_board for initial position should be identical for both colors");
+        assert!(
+            diffs.is_empty(),
+            "encode_board for initial position should be identical for both colors"
+        );
+    }
+
+    /// Test 1: flip_action_planes invariant.
+    ///
+    /// The invariant now holds for both colors via `encode_action_spatial_for_color`:
+    ///   encode_action_spatial_for_color(flip_action(a), !c) ==
+    ///   flip_action_planes(encode_action_spatial_for_color(a, c))
+    ///
+    /// For base actions (0..NUM_BASE_ACTIONS), this is trivially satisfied because
+    /// from_sq/to_sq are explicit in the action index and flip_action rank-mirrors them.
+    ///
+    /// For underpromotion actions (NUM_BASE_ACTIONS..NUM_ACTIONS), flip_action is the
+    /// identity (files only, color-inferred at decode time). The invariant holds because
+    /// encode_action_spatial_for_color places the squares at the correct promotion ranks
+    /// for each color, so flipping the planes (rank-mirror) is equivalent to re-encoding
+    /// from the opposite color's perspective.
+    #[test]
+    fn test_flip_action_planes_matches_flip_action_invariant() {
+        let mut failing_white: Vec<usize> = Vec::new();
+        let mut failing_black: Vec<usize> = Vec::new();
+
+        for a in 0..NUM_ACTIONS {
+            // Test for white-to-move original color
+            {
+                // Path A: re-encode from the flipped color's perspective
+                let flipped_a = flip_action(a);
+                let path_a = encode_action_spatial_for_color(flipped_a as ActionIndex, false);
+
+                // Path B: encode for white, then rank-mirror the planes
+                let encoded = encode_action_spatial_for_color(a as ActionIndex, true);
+                let path_b = flip_action_planes(&encoded);
+
+                let matches = path_a
+                    .iter()
+                    .zip(path_b.iter())
+                    .all(|(&x, &y)| (x - y).abs() < 1e-6);
+                if !matches {
+                    failing_white.push(a);
+                }
+            }
+
+            // Test for black-to-move original color
+            {
+                // Path A: re-encode from the flipped color's perspective (white)
+                let flipped_a = flip_action(a);
+                let path_a = encode_action_spatial_for_color(flipped_a as ActionIndex, true);
+
+                // Path B: encode for black, then rank-mirror the planes
+                let encoded = encode_action_spatial_for_color(a as ActionIndex, false);
+                let path_b = flip_action_planes(&encoded);
+
+                let matches = path_a
+                    .iter()
+                    .zip(path_b.iter())
+                    .all(|(&x, &y)| (x - y).abs() < 1e-6);
+                if !matches {
+                    failing_black.push(a);
+                }
+            }
+        }
+
+        assert!(
+            failing_white.is_empty(),
+            "invariant failed (white original) for {} action(s). First 20: {:?}",
+            failing_white.len(),
+            &failing_white[..failing_white.len().min(20)],
+        );
+        assert!(
+            failing_black.is_empty(),
+            "invariant failed (black original) for {} action(s). First 20: {:?}",
+            failing_black.len(),
+            &failing_black[..failing_black.len().min(20)],
+        );
     }
 
     #[test]

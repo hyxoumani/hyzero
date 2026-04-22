@@ -103,6 +103,74 @@ def _flip_obs_planes(obs: torch.Tensor) -> torch.Tensor:
     return out
 
 
+def _build_kqk_white_winning_obs(device: str) -> torch.Tensor:
+    """Build the KQ-vs-K position observation [1, 102, 8, 8] (white to move, white winning).
+
+    White: King on e1 (sq 4), Queen on a2 (sq 8).
+    Black: King on e8 (sq 60).
+    White to move, empty history, no castling, no en passant, halfmove 0.
+
+    Plane layout (group 0 only; groups 1-7 are zeros):
+      Plane 4  (my queen):   a2 = rank 1, file 0  → obs[0, 4, 1, 0] = 1
+      Plane 5  (my king):    e1 = rank 0, file 4  → obs[0, 5, 0, 4] = 1
+      Plane 11 (opp king):   e8 = rank 7, file 4  → obs[0, 11, 7, 4] = 1
+      All castling planes (96-99): zeros (no castling rights in this position).
+      Plane 100: zeros (no en passant).
+      Plane 101: zeros (halfmove 0).
+
+    Args:
+        device: Torch device string.
+
+    Returns:
+        [1, 102, 8, 8] float32 tensor.
+    """
+    obs = torch.zeros(1, 102, 8, 8, dtype=torch.float32, device=device)
+    # Plane 4: my queen at a2 (rank=1, file=0); sq 8 = rank*8+file = 1*8+0
+    obs[0, 4, 1, 0] = 1.0
+    # Plane 5: my king at e1 (rank=0, file=4); sq 4 = 0*8+4
+    obs[0, 5, 0, 4] = 1.0
+    # Plane 11: opp king at e8 (rank=7, file=4); sq 60 = 7*8+4
+    obs[0, 11, 7, 4] = 1.0
+    # Castling planes 96-99: zeros (no castling in this endgame position)
+    # Plane 100: no en passant (zeros already)
+    # Plane 101: halfmove clock = 0 (zeros already)
+    return obs
+
+
+def _build_k_vs_kq_white_losing_obs(device: str) -> torch.Tensor:
+    """Build the K-vs-KQ position observation [1, 102, 8, 8] (white to move, white losing).
+
+    White: King on e1 (sq 4).
+    Black: King on e8 (sq 60), Queen on a7 (sq 48).
+    White to move, white is down a queen.
+
+    Plane layout (group 0 only; groups 1-7 are zeros):
+      Plane 5  (my king):    e1 = rank 0, file 4  → obs[0, 5, 0, 4] = 1
+      Plane 10 (opp queen):  a7 = rank 6, file 0  → obs[0, 10, 6, 0] = 1 (sq 48 = 6*8+0)
+      Plane 11 (opp king):   e8 = rank 7, file 4  → obs[0, 11, 7, 4] = 1
+      All castling planes (96-99): zeros.
+      Plane 100: zeros (no en passant).
+      Plane 101: zeros (halfmove 0).
+
+    Args:
+        device: Torch device string.
+
+    Returns:
+        [1, 102, 8, 8] float32 tensor.
+    """
+    obs = torch.zeros(1, 102, 8, 8, dtype=torch.float32, device=device)
+    # Plane 5: my king at e1 (rank=0, file=4); sq 4 = 0*8+4
+    obs[0, 5, 0, 4] = 1.0
+    # Plane 10: opp queen at a7 (rank=6, file=0); sq 48 = 6*8+0
+    obs[0, 10, 6, 0] = 1.0
+    # Plane 11: opp king at e8 (rank=7, file=4); sq 60 = 7*8+4
+    obs[0, 11, 7, 4] = 1.0
+    # Castling planes 96-99: zeros (no castling in this endgame position)
+    # Plane 100: no en passant (zeros already)
+    # Plane 101: halfmove clock = 0 (zeros already)
+    return obs
+
+
 def _build_start_obs(device: str) -> torch.Tensor:
     """Build the standard chess starting position observation [1, 102, 8, 8].
 
@@ -281,6 +349,49 @@ def _parse_loss_weight_env(name: str, default: float = 1.0) -> float:
     return clamped
 
 
+def _reinit_value_head(prediction_network: torch.nn.Module) -> None:
+    """Re-randomize the value-output layers of the prediction network.
+
+    Preserves the trunk and policy head. Used to climb out of a collapsed
+    value-head attractor (head has learned to output ~0 regardless of input)
+    after changing the target scale (e.g. switching β=0.3→1.0).
+
+    When ``HYZERO_REINIT_VALUE_BIAS`` is set to a non-zero float (e.g. 0.3),
+    the *final* Linear layer's bias is initialised to that constant instead of
+    zero.  This puts the initial output at ``tanh(bias_offset) ≈ +0.29`` for
+    any input, breaking the tie toward the positive half-plane so that TB +1
+    supervision and self-play can't pull it into a negative attractor.
+
+    Only the *final* linear layer receives the offset — earlier biases would
+    create cascaded ReLU effects that dilute the shift.  A value of ±1.0 would
+    saturate tanh and kill the gradient, so keep it in the ±0.1–0.5 range.
+    """
+    bias_offset = float(os.environ.get("HYZERO_REINIT_VALUE_BIAS", "0.0"))
+
+    # Look at the PredictionNetwork in hyzero/models/prediction.py to identify
+    # the value-path module(s). Typical structure: a shared MLP + two heads
+    # (policy_head, value_head). Reinit just value_head.
+    if hasattr(prediction_network, 'value_head'):
+        linear_layers = [m for m in prediction_network.value_head.modules() if isinstance(m, torch.nn.Linear)]
+        for i, m in enumerate(linear_layers):
+            torch.nn.init.kaiming_normal_(m.weight, nonlinearity='linear')
+            if m.bias is not None:
+                # Only the FINAL linear (before tanh) gets the bias offset.
+                # Applying earlier biases creates cascaded ReLU effects that dilute the offset.
+                is_final = (i == len(linear_layers) - 1)
+                if is_final and bias_offset != 0.0:
+                    torch.nn.init.constant_(m.bias, bias_offset)
+                else:
+                    torch.nn.init.zeros_(m.bias)
+
+        if bias_offset != 0.0:
+            print(f"[trainer] value head reinitialized with final-bias offset {bias_offset:+.3f}")
+        else:
+            print("[trainer] value head reinitialized (HYZERO_REINIT_VALUE_HEAD=1)")
+    else:
+        print("[trainer] WARN: prediction network has no .value_head attribute; cannot reinit")
+
+
 class Trainer:
     """Manages MuZero training: K-step unroll, loss computation, and weight checkpointing.
 
@@ -343,10 +454,17 @@ class Trainer:
 
         self.model_version: int = 0
 
-        # Pre-built starting-position reference observation for periodic value probes.
-        # Shape [1, 102, 8, 8]. Built once; moved to the correct device on first use
-        # via _get_start_obs() to handle device changes (though device is fixed at init).
+        # Pre-built canonical-position observations for periodic value probes.
+        # All shapes [1, 102, 8, 8]. Built once at init; device is fixed at construction.
         self._start_obs: torch.Tensor = _build_start_obs(device)
+        self._kqk_obs: torch.Tensor = _build_kqk_white_winning_obs(device)
+        self._kvk_queenless_obs: torch.Tensor = _build_k_vs_kq_white_losing_obs(device)
+
+        # Checkmate counter state.
+        # Incremented by notify_trajectory() each time a decisive (non-draw) game arrives.
+        # Logged periodically in the train_batch diagnostic block.
+        self._total_cm: int = 0
+        self._cm_since_last_log: int = 0
 
         self.policy_loss_weight = _parse_loss_weight_env("HYZERO_POLICY_LOSS_WEIGHT")
         self.value_loss_weight = _parse_loss_weight_env("HYZERO_VALUE_LOSS_WEIGHT")
@@ -360,6 +478,39 @@ class Trainer:
             f" reward={self.reward_loss_weight:.2f}"
             f" entropy={self.policy_entropy_weight:.4f}"
         )
+
+        # Syzygy tablebase supervision — optional, enabled by HYZERO_TABLEBASE_PATH.
+        tb_path = os.environ.get("HYZERO_TABLEBASE_PATH")
+        tb_cache_path = os.environ.get("HYZERO_TABLEBASE_CACHE_PATH", "data/syzygy/cache.pkl")
+        self._tb_cache: object | None = None
+        if tb_path is not None:
+            from hyzero.data.tablebase import TablebaseCache
+            if os.path.exists(tb_cache_path):
+                self._tb_cache = TablebaseCache(tb_cache_path)
+                print(f"[trainer] tablebase cache loaded: {len(self._tb_cache)} positions")
+            else:
+                print(
+                    f"[trainer] WARN: HYZERO_TABLEBASE_PATH set but cache not found at"
+                    f" {tb_cache_path!r}; TB supervision disabled"
+                )
+        self._tb_frac = float(os.environ.get("HYZERO_TABLEBASE_FRAC", "0.0"))
+
+    def notify_trajectory(self, game_outcome: float, is_draw: bool) -> None:
+        """Record a completed game trajectory for checkmate counting.
+
+        Called by the Rust training loop (via PyO3) each time a trajectory arrives,
+        BEFORE it is added to the replay buffer. Decisive games (is_draw=False and
+        |game_outcome|=1.0) increment the checkmate counter.
+
+        Args:
+            game_outcome: White-absolute game result: +1.0=white wins, -1.0=black wins,
+                          0.0=draw.
+            is_draw:      True if the game ended non-decisively (stalemate, repetition,
+                          50-move, insufficient material).
+        """
+        if not is_draw and abs(game_outcome) >= 0.999:
+            self._total_cm += 1
+            self._cm_since_last_log += 1
 
     def train_batch(self, batch: dict) -> dict:
         """Run one K-step unroll training step.
@@ -379,6 +530,12 @@ class Trainer:
             dict with keys: total_loss, policy_loss, value_loss, reward_loss,
             consistency_loss, model_version, lr (all loss values are Python floats).
         """
+        # Mix in tablebase supervision rows before tensor conversion.
+        batch, tb_indices = self._maybe_mix_tb_samples(batch)
+
+        # Pop is_tablebase before tensor conversion (Python-only field).
+        is_tb_mask = batch.pop("is_tablebase", None)
+
         # Convert numpy arrays to tensors on the target device.
         # observations: [B, K+1, 102, 8, 8] — step 0 is root, steps 1..K for consistency
         obs_all = torch.from_numpy(batch["observations"]).to(self.device)      # [B, K+1, 102, 8, 8]
@@ -398,6 +555,15 @@ class Trainer:
         k_steps = actions.shape[1]  # K
 
         self.optimizer.zero_grad()
+
+        # Build a boolean mask for TB rows: True where the sample is a tablebase row.
+        # Lifted here (before the unroll loop) so both the loss computation and the
+        # consistency loss can share it without re-building.
+        is_tb_tensor: torch.Tensor | None = (
+            torch.from_numpy(is_tb_mask).to(self.device)
+            if is_tb_mask is not None
+            else None
+        )
 
         total_policy_loss = torch.tensor(0.0, device=self.device)
         total_value_loss = torch.tensor(0.0, device=self.device)
@@ -424,10 +590,11 @@ class Trainer:
         predicted_policy_logits_per_k.append(policy_logits)
 
         # Policy loss at step 0 — apply legal mask if provided.
+        # ALL samples contribute at step 0 (no TB masking at root).
         total_policy_loss = total_policy_loss + self._policy_loss(
             policy_logits, tgt_policies[:, 0], legal_mask
         )
-        # Value loss at step 0.
+        # Value loss at step 0 — all samples contribute.
         total_value_loss = total_value_loss + F.mse_loss(value.squeeze(-1), tgt_values[:, 0])
 
         # Steps 1..K: unroll dynamics.
@@ -445,10 +612,35 @@ class Trainer:
             predicted_rewards_per_k.append(reward)
             predicted_policy_logits_per_k.append(policy_logits)
 
-            # No mask for latent steps (operating in learned latent space, not real board)
-            total_policy_loss = total_policy_loss + self._policy_loss(policy_logits, tgt_policies[:, k])
-            total_value_loss = total_value_loss + F.mse_loss(value.squeeze(-1), tgt_values[:, k])
-            total_reward_loss = total_reward_loss + F.mse_loss(reward.squeeze(-1), tgt_rewards[:, k])
+            # For TB rows at k >= 1, targets are zero-padded (not real signals).
+            # Mask them out so padded zeros don't dilute the step-0 TB supervision.
+            # Non-TB rows always contribute at all steps.
+            if is_tb_tensor is not None:
+                non_tb = (~is_tb_tensor).float()  # [B], 1.0 for replay, 0.0 for TB
+                non_tb_count = non_tb.sum().clamp(min=1.0)
+
+                # Policy loss at k >= 1: mask TB rows.
+                per_sample_pol = self._policy_loss_per_sample(policy_logits, tgt_policies[:, k])
+                total_policy_loss = total_policy_loss + (per_sample_pol * non_tb).sum() / non_tb_count
+
+                # Value loss at k >= 1: mask TB rows.
+                per_sample_val = (value.squeeze(-1) - tgt_values[:, k]) ** 2  # [B]
+                total_value_loss = total_value_loss + (per_sample_val * non_tb).sum() / non_tb_count
+
+                # Reward loss: step 1 has a real mating-action target for TB rows → all samples.
+                # Steps k >= 2 are zero-padded for TB → mask them.
+                per_sample_rwd = (reward.squeeze(-1) - tgt_rewards[:, k]) ** 2  # [B]
+                if k >= 2:
+                    total_reward_loss = total_reward_loss + (per_sample_rwd * non_tb).sum() / non_tb_count
+                else:
+                    # k == 1: TB step-1 reward carries the real mating-action signal.
+                    total_reward_loss = total_reward_loss + per_sample_rwd.mean()
+            else:
+                # No TB rows in this batch — standard unmasked losses.
+                # No mask for latent steps (operating in learned latent space, not real board)
+                total_policy_loss = total_policy_loss + self._policy_loss(policy_logits, tgt_policies[:, k])
+                total_value_loss = total_value_loss + F.mse_loss(value.squeeze(-1), tgt_values[:, k])
+                total_reward_loss = total_reward_loss + F.mse_loss(reward.squeeze(-1), tgt_rewards[:, k])
 
         # -----------------------------------------------------------------------
         # DIAGNOSTIC INSTRUMENTATION — measurements only, no training impact.
@@ -570,10 +762,40 @@ class Trainer:
                     )
                     _diag_print(f"[tgt_hist] step={self.model_version} {hist_parts}")
 
-                    # 4. Starting-position value probe.
+                    # 4. Canonical-position value probes.
+                    # start_value: starting position (material-balanced).
                     start_obs = self._start_obs  # [1, 102, 8, 8]
                     start_v = self.f(self.h(start_obs))[1].item()
                     _diag_print(f"[start_value] step={self.model_version} v={start_v:.4f}")
+
+                    # kqk_value: KQ-vs-K (white to move, white winning).
+                    kqk_v = self.f(self.h(self._kqk_obs))[1].item()
+                    _diag_print(f"[kqk_value] step={self.model_version} v={kqk_v:.4f}")
+
+                    # kvk_queenless_value: K-vs-KQ (white to move, white down a queen).
+                    kvk_v = self.f(self.h(self._kvk_queenless_obs))[1].item()
+                    _diag_print(
+                        f"[kvk_queenless_value] step={self.model_version} v={kvk_v:.4f}"
+                    )
+
+                    # value_spread: discrimination signal — how far each position deviates
+                    # from the starting position. Should grow as the value head learns
+                    # material from the checkmate stream.
+                    kqk_minus_start = kqk_v - start_v
+                    kvk_minus_start = kvk_v - start_v
+                    _diag_print(
+                        f"[value_spread] step={self.model_version}"
+                        f" kqk_minus_start={kqk_minus_start:.4f}"
+                        f" kvk_minus_start={kvk_minus_start:.4f}"
+                    )
+
+                    # 5. Checkmate counter.
+                    _diag_print(
+                        f"[cm_count] step={self.model_version}"
+                        f" total_cm={self._total_cm}"
+                        f" cm_since_last_log={self._cm_since_last_log}"
+                    )
+                    self._cm_since_last_log = 0
         except Exception as _diag_exc:
             _diag_print(f"[diag_error] step={self.model_version} exception={_diag_exc!r}")
         # -----------------------------------------------------------------------
@@ -592,6 +814,9 @@ class Trainer:
         consistency_weight = _parse_loss_weight_env("HYZERO_CONSISTENCY_LOSS_WEIGHT", default=0.5)
         consistency_loss = torch.tensor(0.0, device=self.device)
         if consistency_weight > 0 and k_steps > 0:
+            # is_tb_tensor was already built at the top of the training step.
+            # TB rows have zero obs at steps 1..K, which would force the consistency
+            # target toward a zero-latent and poison the dynamics network. Exclude them.
             for k_idx in range(1, k_steps + 1):
                 # Dynamics branch: project -> predict (online branch, receives gradients)
                 dyn_latent_k = hidden_states[k_idx]  # [B, C, 8, 8]
@@ -601,10 +826,14 @@ class Trainer:
                 target_latent = self.h(obs_k)  # [B, C, 8, 8]
                 p2 = self.h.project(target_latent).detach()  # [B, proj_dim], stop-grad
                 # Cosine similarity loss: 1 - cos_sim (maximize similarity → minimize loss)
-                consistency_loss = consistency_loss + (
-                    1 - F.cosine_similarity(p1, p2, dim=-1).mean()
-                )
-            consistency_loss = consistency_loss / k_steps
+                cos_sim = F.cosine_similarity(p1, p2, dim=-1)  # [B]
+                if is_tb_tensor is not None:
+                    # Exclude TB rows: their obs at steps 1..K are zeros, not real positions.
+                    cos_sim = cos_sim[~is_tb_tensor]
+                if cos_sim.numel() > 0:
+                    consistency_loss = consistency_loss + (1 - cos_sim.mean())
+            if k_steps > 0:
+                consistency_loss = consistency_loss / k_steps
 
         total_loss = (
             self.policy_loss_weight * avg_policy_loss
@@ -673,6 +902,101 @@ class Trainer:
 
         return ce_loss
 
+    def _policy_loss_per_sample(
+        self,
+        logits: torch.Tensor,
+        targets: torch.Tensor,
+    ) -> torch.Tensor:
+        """Per-sample cross-entropy between logits and a target probability distribution.
+
+        Like _policy_loss but returns one scalar per batch element (shape [B]) rather
+        than the batch mean. Used when a caller needs to apply a per-row loss mask
+        before reducing (e.g. TB-row masking at k >= 1 padded steps).
+
+        No legal_mask support (latent steps do not have real legal-move lists).
+        No entropy bonus (applied at the scalar level by the caller).
+
+        Args:
+            logits:  [B, num_actions]
+            targets: [B, num_actions]  (soft probability distribution summing to 1)
+
+        Returns:
+            [B] float32 tensor — per-sample cross-entropy.
+        """
+        log_probs = F.log_softmax(logits, dim=-1)
+        log_probs = log_probs.nan_to_num(nan=0.0, neginf=0.0)
+        return -torch.sum(targets * log_probs, dim=-1)  # [B]
+
+    def _maybe_mix_tb_samples(
+        self, batch: dict
+    ) -> tuple[dict, set[int]]:
+        """Replace tb_frac fraction of batch with Syzygy tablebase samples.
+
+        Inserts TB rows at the end of the batch (indices [b-n_tb, b)).
+        TB rows have exact ±1 value targets and 1-step reward signal from
+        mate-in-1 moves, providing hard gradient for the value and reward heads.
+
+        Args:
+            batch: Replay batch dict (numpy arrays, not yet converted to tensors).
+
+        Returns:
+            Tuple of (updated batch dict, set of TB row indices).
+            The batch dict gains an 'is_tablebase' bool array [B].
+        """
+        if self._tb_cache is None or self._tb_frac <= 0.0:
+            return batch, set()
+
+        b = batch["observations"].shape[0]
+        k_steps = batch["actions"].shape[1]
+        n_tb = max(1, int(b * self._tb_frac))
+        n_tb = min(n_tb, b)
+
+        from hyzero.data.tablebase import build_tb_batch, build_tb_batch_trajectories
+        tb_items = self._tb_cache.sample(n_tb)
+        # Route to trajectory builder for trajectory-format caches; fall back
+        # to the legacy snapshot builder otherwise. Both return the same dict
+        # shape, differing only in the ``is_tablebase`` flag (True for
+        # snapshots → trainer masks step-1..K losses; False for trajectories
+        # → trainer treats rows identically to replay samples).
+        if getattr(self._tb_cache, "is_trajectory_format", False):
+            tb_dict = build_tb_batch_trajectories(tb_items, k_steps=k_steps)
+        else:
+            tb_dict = build_tb_batch(tb_items, k_steps=k_steps)
+
+        # Replace last n_tb rows of the replay batch with TB rows.
+        tb_indices = set(range(b - n_tb, b))
+        merged: dict = {}
+        for key in ("observations", "actions", "target_policies",
+                    "target_values", "target_rewards"):
+            merged[key] = np.concatenate(
+                [batch[key][:b - n_tb], tb_dict[key]], axis=0
+            )
+        # legal_masks: optional in replay batch, always present in TB.
+        replay_masks = batch.get("legal_masks")
+        if replay_masks is not None:
+            merged["legal_masks"] = np.concatenate(
+                [replay_masks[:b - n_tb], tb_dict["legal_masks"]], axis=0
+            )
+        else:
+            # Only TB rows have masks; replay rows get all-True masks as placeholder.
+            # This avoids a None legal_mask downstream when TB is active.
+            placeholder = np.ones((b - n_tb, tb_dict["legal_masks"].shape[1]), dtype=bool)
+            merged["legal_masks"] = np.concatenate(
+                [placeholder, tb_dict["legal_masks"]], axis=0
+            )
+        # ``is_tablebase`` controls whether the trainer applies the
+        # step-1..K masking. Snapshot batches set it True (legacy behavior);
+        # trajectory batches set it False so the K-step loss + consistency
+        # loss apply in full. Trust what the TB builder emitted rather than
+        # mechanically marking the suffix rows.
+        merged["is_tablebase"] = np.zeros(b, dtype=bool)
+        tb_flag = tb_dict.get("is_tablebase")
+        if tb_flag is not None:
+            merged["is_tablebase"][b - n_tb:] = tb_flag
+        else:
+            merged["is_tablebase"][b - n_tb:] = True
+        return merged, tb_indices
+
     def get_weights(self) -> bytes:
         """Serialize network weights to bytes for inference server transfer.
 
@@ -730,4 +1054,8 @@ class Trainer:
         self.model_version = checkpoint["model_version"]
         if self.lr_scheduler is not None and "lr_scheduler" in checkpoint:
             self.lr_scheduler.load_state_dict(checkpoint["lr_scheduler"])
+
+        if os.environ.get('HYZERO_REINIT_VALUE_HEAD', '').strip() not in ('', '0', 'false', 'no'):
+            _reinit_value_head(self.f)
+
         return checkpoint.get("eval_metrics")
