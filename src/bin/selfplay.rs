@@ -36,9 +36,19 @@ fn find_latest_archive_version() -> Option<u64> {
     max_version
 }
 
-/// Load the bytes from `checkpoints/best.pt`.
-fn read_best_pt() -> std::io::Result<Vec<u8>> {
-    std::fs::read("checkpoints/best.pt")
+/// Path of the checkpoint used for champion init + trainer resume.
+/// Defaults to `checkpoints/best.pt`; override via `HYZERO_RESUME_FROM` to
+/// start from a different checkpoint (e.g. `checkpoints/pretrain_dynamics.pt`
+/// for a SimSiam-dynamics warm-start). Both champion and trainer read the
+/// same file so the eval ladder's baseline matches the challenger's starting
+/// weights.
+fn resume_checkpoint_path() -> String {
+    std::env::var("HYZERO_RESUME_FROM").unwrap_or_else(|_| "checkpoints/best.pt".to_string())
+}
+
+/// Load the bytes from the configured resume checkpoint.
+fn read_resume_checkpoint() -> std::io::Result<Vec<u8>> {
+    std::fs::read(resume_checkpoint_path())
 }
 
 /// Runtime configuration for the self-play binary.
@@ -186,11 +196,13 @@ async fn main() {
     });
 
     // 5. Create swappable champion backend handle for hot-swap on promotion.
-    //    If best.pt exists on disk, we boot the champion batcher immediately
-    //    with the frozen weights instead of starting from RandomBackend.
-    let best_pt_path = std::path::Path::new("checkpoints/best.pt");
+    //    If the configured resume checkpoint exists on disk, we boot the
+    //    champion batcher immediately with those frozen weights instead of
+    //    starting from RandomBackend.
+    let resume_path_str = resume_checkpoint_path();
+    let resume_path = std::path::Path::new(&resume_path_str).to_path_buf();
     let (champion_store_evaluator, champion_store_version, champion_backend_handle) =
-        if best_pt_path.exists() {
+        if resume_path.exists() {
             // Determine starting version from archived best_vNNN.pt files.
             let starting_version = match find_latest_archive_version() {
                 Some(v) => v,
@@ -203,8 +215,8 @@ async fn main() {
                 }
             };
 
-            // Load frozen weights from best.pt.
-            match read_best_pt() {
+            // Load frozen weights from the configured resume checkpoint.
+            match read_resume_checkpoint() {
                 Ok(best_pt_bytes) => {
                     // Create a fresh Python InferenceServer for the champion.
                     let (champion_server, champion_hidden_channels): (Py<PyAny>, usize) =
@@ -265,20 +277,24 @@ async fn main() {
                         Arc::new(ChannelEvaluator::new(champion_tx));
 
                     println!(
-                        "[selfplay] Loaded champion from checkpoints/best.pt (version={starting_version})"
+                        "[selfplay] Loaded champion from {} (version={starting_version})",
+                        resume_path.display()
                     );
 
                     (champion_eval, starting_version, champion_handle)
                 }
                 Err(e) => {
-                    eprintln!("[selfplay] WARNING: best.pt exists but could not be read ({e}); falling back to RandomEvaluator");
+                    eprintln!(
+                        "[selfplay] WARNING: {} exists but could not be read ({e}); falling back to RandomEvaluator",
+                        resume_path.display()
+                    );
                     let initial_champion_backend: Box<dyn hyzero::selfplay::InferenceBackend> =
                         Box::new(RandomBackend::new(hidden_channels));
                     let (_swappable, champion_handle) =
                         SwappableBackend::new(initial_champion_backend);
                     let eval: Arc<dyn Evaluator> = Arc::new(RandomEvaluator);
                     println!(
-                        "[selfplay] No existing best.pt; starting with RandomEvaluator (version=0)"
+                        "[selfplay] No existing resume checkpoint; starting with RandomEvaluator (version=0)"
                     );
                     (eval, 0, champion_handle)
                 }
@@ -288,15 +304,18 @@ async fn main() {
                 Box::new(RandomBackend::new(hidden_channels));
             let (_swappable, champion_handle) = SwappableBackend::new(initial_champion_backend);
             let eval: Arc<dyn Evaluator> = Arc::new(RandomEvaluator);
-            println!("[selfplay] No existing best.pt; starting with RandomEvaluator (version=0)");
+            println!(
+                "[selfplay] No existing resume checkpoint at {}; starting with RandomEvaluator (version=0)",
+                resume_path.display()
+            );
             (eval, 0, champion_handle)
         };
 
     // 6. Spawn training thread backed by the Python Trainer.
     println!("[selfplay] Creating Python Trainer...");
-    let resume_ckpt: Option<&str> = if best_pt_path.exists() {
-        println!("[selfplay] Resuming training from checkpoints/best.pt");
-        Some("checkpoints/best.pt")
+    let resume_ckpt: Option<&str> = if resume_path.exists() {
+        println!("[selfplay] Resuming training from {}", resume_path.display());
+        Some(resume_path_str.as_str())
     } else {
         None
     };
