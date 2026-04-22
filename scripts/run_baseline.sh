@@ -4,10 +4,14 @@ set +m
 
 # ── Configuration ──────────────────────────────────────────────
 DURATION=${1:-1800}          # 30 minutes default
-EVAL_SIMS=${HYZERO_EVAL_SIMS:-25}
+SIMS=${HYZERO_SIMS:-200}
+EVAL_SIMS=${HYZERO_EVAL_SIMS:-100}
+GAMES=${HYZERO_GAMES:-9}              # total slots: 1 for eval + N-1 for selfplay
+BATCH_SIZE=${HYZERO_BATCH_SIZE:-64}
 GAMES_PER_SIDE=${HYZERO_GAMES_PER_SIDE:-4}
 PROMOTION_THRESHOLD=${HYZERO_PROMOTION_THRESHOLD:-0.55}
 CHAMPION_SCORE_WEIGHT=${HYZERO_CHAMPION_SCORE_WEIGHT:-2.0}
+DEVICE=${HYZERO_DEVICE:-cuda}
 BASELINE_FILE="logs/baseline_score.json"
 LOG_DIR="logs"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
@@ -17,6 +21,9 @@ mkdir -p "$LOG_DIR"
 
 echo "=== hyzero Baseline Run ==="
 echo "Duration: ${DURATION}s"
+echo "Device: ${DEVICE}"
+echo "Sims: selfplay=${SIMS}, eval=${EVAL_SIMS}"
+echo "Concurrency: ${GAMES} total slots (${GAMES}-1 selfplay + 1 eval), batch_size=${BATCH_SIZE}"
 echo "Eval: ${GAMES_PER_SIDE} games/side, threshold=${PROMOTION_THRESHOLD}, weight=${CHAMPION_SCORE_WEIGHT}"
 echo "Log: ${LOG_FILE}"
 
@@ -36,7 +43,11 @@ fi
 
 # ── Run ────────────────────────────────────────────────────────
 echo "[2/5] Running selfplay for ${DURATION}s..."
+HYZERO_DEVICE=$DEVICE \
+HYZERO_SIMS=$SIMS \
 HYZERO_EVAL_SIMS=$EVAL_SIMS \
+HYZERO_GAMES=$GAMES \
+HYZERO_BATCH_SIZE=$BATCH_SIZE \
 HYZERO_GAMES_PER_SIDE=$GAMES_PER_SIDE \
 HYZERO_PROMOTION_THRESHOLD=$PROMOTION_THRESHOLD \
 HYZERO_CHAMPION_SCORE_WEIGHT=$CHAMPION_SCORE_WEIGHT \
@@ -187,8 +198,10 @@ cat > "$BASELINE_FILE" << EOF
         "promotion_threshold": $PROMOTION_THRESHOLD,
         "champion_score_weight": $CHAMPION_SCORE_WEIGHT,
         "eval_sims": $EVAL_SIMS,
-        "concurrent_games": ${HYZERO_GAMES:-5},
-        "simulations": ${HYZERO_SIMS:-40}
+        "concurrent_games": $GAMES,
+        "batch_size": $BATCH_SIZE,
+        "simulations": $SIMS,
+        "device": "$DEVICE"
     },
     "log_file": "$LOG_FILE"
 }
