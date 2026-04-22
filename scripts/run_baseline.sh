@@ -17,6 +17,11 @@ STARTS_FILE=${HYZERO_STARTS_FILE:-data/starting_positions.txt}
 TB_PATH=${HYZERO_TABLEBASE_PATH:-data/syzygy}
 TB_CACHE=${HYZERO_TABLEBASE_CACHE_PATH:-data/syzygy/cache_trajectories.pkl}
 TB_FRAC=${HYZERO_TABLEBASE_FRAC:-0.45}
+# Resume point — defaults to SimSiam-pretrained h+g (cos_sim 0.98 on random-play val).
+# f stays random; RL loop trains it. Every run starts from the same pretrained state
+# so experiments are apples-to-apples (champion ladder is wiped below for the same reason).
+# Override to checkpoints/best.pt if you want to accumulate a champion across runs.
+RESUME_FROM=${HYZERO_RESUME_FROM:-checkpoints/pretrain_dynamics.pt}
 BASELINE_FILE="logs/baseline_score.json"
 LOG_DIR="logs"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
@@ -30,6 +35,13 @@ echo "Device: ${DEVICE}"
 echo "Sims: selfplay=${SIMS}, eval=${EVAL_SIMS}"
 echo "Concurrency: ${GAMES} total slots (${GAMES}-1 selfplay + 1 eval), batch_size=${BATCH_SIZE}"
 echo "Eval: ${GAMES_PER_SIDE} games/side, threshold=${PROMOTION_THRESHOLD}, weight=${CHAMPION_SCORE_WEIGHT}"
+
+# Warn (don't fail) on missing resume checkpoint — binary will fall back to RandomEvaluator.
+if [ -n "$RESUME_FROM" ] && [ ! -f "$RESUME_FROM" ]; then
+    echo "  WARN: HYZERO_RESUME_FROM=$RESUME_FROM missing — starting from random init"
+    RESUME_FROM=""
+fi
+echo "Resume: ${RESUME_FROM:-random init (no checkpoint)}"
 
 # Warn (don't fail) on missing supervision files — training falls back to pure self-play.
 if [ -n "$STARTS_FILE" ] && [ ! -f "$STARTS_FILE" ]; then
@@ -48,14 +60,20 @@ echo "Log: ${LOG_FILE}"
 echo "[1/5] Building release binary..."
 cargo build --release --bin selfplay 2>&1 | tail -1
 
-# ── Cleanup: remove ONLY training checkpoints, preserve champion files ─────
-# model_vNNNNNN.pt = training checkpoints → delete
-# best.pt and best_vNNN.pt = champion archive → PRESERVE across runs
-echo "[1b/5] Cleaning up old training checkpoints (preserving champion files)..."
+# ── Cleanup: full-slate reset ──────────────────────────────────
+# Since we resume from a fixed pretrain checkpoint by default, wipe both
+# training checkpoints (model_v*.pt) AND any champion from a prior run
+# (best*.pt) so the ladder starts from scratch. Override RESUME_FROM to
+# checkpoints/best.pt if you want champion continuity instead.
+echo "[1b/5] Cleaning up prior-run artifacts (training ckpts + champion archive)..."
 if [ -d checkpoints ]; then
     find checkpoints -maxdepth 1 -name 'model_v*.pt' -delete 2>/dev/null || true
-    echo "  Retained champion files:"
-    ls checkpoints/best*.pt 2>/dev/null || echo "  (none yet)"
+    # Never delete the resume-from file itself — only archive/training files.
+    for f in checkpoints/best.pt checkpoints/best_v*.pt; do
+        [ -f "$f" ] && [ "$(realpath "$f")" != "$(realpath "$RESUME_FROM" 2>/dev/null || echo /dev/null)" ] && rm -f "$f"
+    done
+    echo "  Remaining checkpoints:"
+    ls checkpoints/*.pt 2>/dev/null | sed 's/^/    /' || echo "    (none)"
 fi
 
 # ── Run ────────────────────────────────────────────────────────
@@ -72,6 +90,7 @@ HYZERO_STARTS_FILE=$STARTS_FILE \
 HYZERO_TABLEBASE_PATH=$TB_PATH \
 HYZERO_TABLEBASE_CACHE_PATH=$TB_CACHE \
 HYZERO_TABLEBASE_FRAC=$TB_FRAC \
+HYZERO_RESUME_FROM=$RESUME_FROM \
 target/release/selfplay > "$LOG_FILE" 2>&1 &
 PID=$!
 sleep "$DURATION"
@@ -223,6 +242,7 @@ cat > "$BASELINE_FILE" << EOF
         "batch_size": $BATCH_SIZE,
         "simulations": $SIMS,
         "device": "$DEVICE",
+        "resume_from": "$RESUME_FROM",
         "starts_file": "$STARTS_FILE",
         "tablebase_cache": "$TB_CACHE",
         "tablebase_frac": $TB_FRAC
