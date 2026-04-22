@@ -1050,8 +1050,20 @@ class Trainer:
         self.h.load_state_dict(checkpoint["h"])
         self.g.load_state_dict(checkpoint["g"])
         self.f.load_state_dict(checkpoint["f"])
-        self.optimizer.load_state_dict(checkpoint["optimizer"])
-        self.model_version = checkpoint["model_version"]
+        # Optimizer state is optional and may not match — e.g. pretrain_dynamics.pt
+        # only optimized h+g (f was frozen), so its param-group count differs from the
+        # main trainer's h+g+f+projector optimizer. Fall back to the freshly-constructed
+        # optimizer in that case; the RL loop will rebuild running statistics quickly.
+        if "optimizer" in checkpoint:
+            try:
+                self.optimizer.load_state_dict(checkpoint["optimizer"])
+            except ValueError as e:
+                print(
+                    f"[trainer] optimizer state_dict mismatch ({e}); "
+                    f"keeping fresh optimizer state (checkpoint={path})",
+                    flush=True,
+                )
+        self.model_version = checkpoint.get("model_version", 0)
         if self.lr_scheduler is not None and "lr_scheduler" in checkpoint:
             self.lr_scheduler.load_state_dict(checkpoint["lr_scheduler"])
 

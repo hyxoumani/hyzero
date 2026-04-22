@@ -208,8 +208,9 @@ async fn main() {
                 Some(v) => v,
                 None => {
                     eprintln!(
-                        "[selfplay] WARNING: best.pt exists but no best_vNNN.pt found; \
-                         defaulting starting_version to 1"
+                        "[selfplay] No best_vNNN.pt archive found; starting ladder at version=1 \
+                         (resume from {})",
+                        resume_path.display()
                     );
                     1
                 }
