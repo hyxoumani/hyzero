@@ -12,16 +12,25 @@ GAMES_PER_SIDE=${HYZERO_GAMES_PER_SIDE:-4}
 PROMOTION_THRESHOLD=${HYZERO_PROMOTION_THRESHOLD:-0.55}
 CHAMPION_SCORE_WEIGHT=${HYZERO_CHAMPION_SCORE_WEIGHT:-2.0}
 DEVICE=${HYZERO_DEVICE:-cuda}
-# Supervision data sources (validated 2026-04-21/22). All optional; unset to disable.
+# Supervision data sources (validated 2026-04-21 through 2026-04-23).
+# Defaults are opt-in for the full stack; unset/override to disable.
 STARTS_FILE=${HYZERO_STARTS_FILE:-data/starting_positions.txt}
 TB_PATH=${HYZERO_TABLEBASE_PATH:-data/syzygy}
-TB_CACHE=${HYZERO_TABLEBASE_CACHE_PATH:-data/syzygy/cache_trajectories.pkl}
+# Default supervision cache includes both Syzygy TB endgames AND Lichess
+# mate-in-1 puzzles (built by scripts/build_merged_supervision_cache.py).
+# Mate puzzles provide the explicit +1 reward signal that pure TB endgames
+# and self-play lack — prevents "reward head dead" from mate-starvation.
+TB_CACHE=${HYZERO_TABLEBASE_CACHE_PATH:-data/syzygy/cache_tb_plus_mates.pkl}
 TB_FRAC=${HYZERO_TABLEBASE_FRAC:-0.45}
-# Resume point — defaults to SimSiam-pretrained h+g (cos_sim 0.98 on random-play val).
-# f stays random; RL loop trains it. Every run starts from the same pretrained state
-# so experiments are apples-to-apples (champion ladder is wiped below for the same reason).
-# Override to checkpoints/best.pt if you want to accumulate a champion across runs.
-RESUME_FROM=${HYZERO_RESUME_FROM:-checkpoints/pretrain_dynamics.pt}
+# Resume point — defaults to the mate-pretrained checkpoint. This gives every
+# run a starting state where the reward head already recognizes mating moves
+# (avoids the bootstrap failure where self-play never generates mates).
+# If the file is missing, the block below auto-creates it from the pretrain
+# dynamics checkpoint by running scripts/pretrain_on_mates.py.
+RESUME_FROM=${HYZERO_RESUME_FROM:-checkpoints/mate_pretrained.pt}
+MATE_PUZZLES=${HYZERO_MATE_PUZZLES:-data/lichess_mates.pkl}
+MATE_PRETRAIN_STEPS=${HYZERO_MATE_PRETRAIN_STEPS:-4000}
+MATE_PRETRAIN_POSITIONS=${HYZERO_MATE_PRETRAIN_POSITIONS:-100000}
 BASELINE_FILE="logs/baseline_score.json"
 LOG_DIR="logs"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
@@ -35,6 +44,44 @@ echo "Device: ${DEVICE}"
 echo "Sims: selfplay=${SIMS}, eval=${EVAL_SIMS}"
 echo "Concurrency: ${GAMES} total slots (${GAMES}-1 selfplay + 1 eval), batch_size=${BATCH_SIZE}"
 echo "Eval: ${GAMES_PER_SIDE} games/side, threshold=${PROMOTION_THRESHOLD}, weight=${CHAMPION_SCORE_WEIGHT}"
+
+# Auto-build the mate-pretrained checkpoint if the resume file is the default
+# mate-pretrained path and doesn't exist yet. This is the "always insert the
+# pretrained" behavior: every run starts from a network that already understands
+# mate patterns. Skips this block if user overrode RESUME_FROM to something else.
+if [ "$RESUME_FROM" = "checkpoints/mate_pretrained.pt" ] && [ ! -f "$RESUME_FROM" ]; then
+    echo "[pre-run] mate-pretrained checkpoint missing — building it..."
+    if [ ! -f "$MATE_PUZZLES" ]; then
+        echo "  WARN: $MATE_PUZZLES missing — cannot auto-pretrain. Mine it via:"
+        echo "    python3 scripts/mine_lichess_mate_in_1.py"
+        echo "  Falling back to checkpoints/pretrain_dynamics.pt"
+        RESUME_FROM="checkpoints/pretrain_dynamics.pt"
+    elif [ ! -f "checkpoints/pretrain_dynamics.pt" ] && [ ! -f "checkpoints/best.pt" ]; then
+        echo "  WARN: no base checkpoint (pretrain_dynamics.pt or best.pt) — skipping auto-pretrain"
+        RESUME_FROM=""
+    else
+        BASE_CKPT="checkpoints/pretrain_dynamics.pt"
+        [ ! -f "$BASE_CKPT" ] && BASE_CKPT="checkpoints/best.pt"
+        echo "  source: $BASE_CKPT  puzzles: $MATE_PUZZLES"
+        echo "  steps: $MATE_PRETRAIN_STEPS  positions: $MATE_PRETRAIN_POSITIONS"
+        HYZERO_MATE_PUZZLES="$MATE_PUZZLES" python3 scripts/pretrain_on_mates.py \
+            --in-ckpt "$BASE_CKPT" \
+            --out-ckpt "checkpoints/mate_pretrained.pt" \
+            --use-file \
+            --n-positions "$MATE_PRETRAIN_POSITIONS" \
+            --steps "$MATE_PRETRAIN_STEPS" \
+            --batch-size 128 \
+            --lr 3e-4 \
+            --device cpu \
+            2>&1 | tail -3
+        if [ -f "checkpoints/mate_pretrained.pt" ]; then
+            echo "  mate-pretrained checkpoint created."
+        else
+            echo "  WARN: auto-pretrain FAILED. Falling back to $BASE_CKPT"
+            RESUME_FROM="$BASE_CKPT"
+        fi
+    fi
+fi
 
 # Warn (don't fail) on missing resume checkpoint — binary will fall back to RandomEvaluator.
 if [ -n "$RESUME_FROM" ] && [ ! -f "$RESUME_FROM" ]; then
