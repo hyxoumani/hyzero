@@ -522,14 +522,19 @@ pub async fn play_game(
         GameResult::Checkmate(Color::Black) => (-1.0f32, false),
         _ => {
             // All non-checkmate terminals: stalemate, repetition, 50-move, cap, insufficient material.
-            // When HYZERO_DISABLE_MATERIAL_SHAPING is set, outcome is forced to 0.0 (AlphaZero-
-            // style pure-outcome signal). Otherwise we shape by tanh(Δmaterial/scale).
-            if material_shaping_disabled() {
-                (0.0f32, true)
-            } else {
+            // Default (AlphaZero-style): outcome = 0.0 — pure-outcome signal; only real
+            // checkmates produce non-zero value targets. Material shaping is OFF unless
+            // explicitly opted in via HYZERO_MATERIAL_SHAPING=1. Shaping was historically
+            // the cause of (a) the PGN-result labeling bug (shaped draws got labeled 1-0 /
+            // 0-1 based on the tanh(Δ) threshold) and (b) shuffle-attractor reinforcement
+            // where material-leading sides got +0.8 value targets for drawing by
+            // repetition, teaching the value head to reward passive play.
+            if material_shaping_enabled() {
                 let delta = compute_material_diff(&board);
                 let scale = material_shaping_scale();
                 ((delta as f32 / scale).tanh(), true)
+            } else {
+                (0.0f32, true)
             }
         }
     };
@@ -556,11 +561,20 @@ pub async fn play_game(
 
     // Sampled self-play PGN logging: 1% of games, for opening-diversity analysis.
     // Cheaply keyed on a single rng call; no impact on training dynamics.
+    //
+    // Result label must reflect the BOARD outcome, not the value target. Under
+    // material shaping (opt-in), non-checkmate games get game_outcome = tanh(Δ/S)
+    // which can exceed ±0.5 for a drawn-by-rule game. Labeling those "1-0" caused
+    // the analysis confusion we debugged on 2026-04-23. Respect is_draw.
     if rand::random::<f32>() < 0.01 {
-        let result_str = match game_outcome {
-            x if x > 0.5 => "1-0",
-            x if x < -0.5 => "0-1",
-            _ => "1/2-1/2",
+        let result_str = if is_draw {
+            "1/2-1/2"
+        } else if game_outcome > 0.5 {
+            "1-0"
+        } else if game_outcome < -0.5 {
+            "0-1"
+        } else {
+            "1/2-1/2"
         };
         crate::selfplay::pgn::write_pgn_game(
             "logs/selfplay_sample.pgn",
@@ -776,14 +790,22 @@ fn material_shaping_scale() -> f32 {
         .unwrap_or(5.0)
 }
 
-/// True when HYZERO_DISABLE_MATERIAL_SHAPING is set to any truthy value
-/// ("1", "true", non-empty, ...). When enabled, every non-checkmate terminal
-/// produces outcome=0.0 and the tanh(Δmaterial/scale) shaping is bypassed
-/// entirely. This is the AlphaZero-style pure-outcome training signal: only
-/// checkmates provide non-zero value targets, and the value head learns to
-/// predict 0 on unresolved positions.
-fn material_shaping_disabled() -> bool {
-    match std::env::var("HYZERO_DISABLE_MATERIAL_SHAPING") {
+/// True when HYZERO_MATERIAL_SHAPING is set to any truthy value
+/// ("1", "true", "yes", ...). When false (the DEFAULT), every non-checkmate
+/// terminal produces outcome=0.0 — AlphaZero-style pure-outcome training
+/// signal: only real checkmates provide non-zero value targets. When true,
+/// non-checkmate terminals use `tanh(Δmaterial/scale)` as a proxy outcome.
+///
+/// Shaping is opt-in because it historically caused:
+///   1. PGN result labeling bug: shaped outcomes > 0.5 got tagged "1-0"
+///      even for drawn games, misleading diagnostics.
+///   2. Shuffle-attractor reinforcement: material-leading sides drawing by
+///      repetition received high value targets (+0.8-ish), teaching the
+///      value head that passive play with a material lead is good.
+///
+/// Do not flip the default back to enabled without a deliberate decision.
+fn material_shaping_enabled() -> bool {
+    match std::env::var("HYZERO_MATERIAL_SHAPING") {
         Ok(v) => {
             let s = v.trim().to_ascii_lowercase();
             !(s.is_empty() || s == "0" || s == "false" || s == "no")
@@ -1175,9 +1197,11 @@ mod tests {
         use std::env;
 
         // Force material shaping off so game_outcome is always +1/-1/0 (not tanh).
-        // SAFETY: single-threaded test context; env-var is local to this test's timing.
+        // Default is already off, but we explicitly clear the opt-in flag in case
+        // another test left it set in this process. SAFETY: single-threaded test
+        // context; env-var is local to this test's timing.
         unsafe {
-            env::set_var("HYZERO_DISABLE_MATERIAL_SHAPING", "1");
+            env::remove_var("HYZERO_MATERIAL_SHAPING");
         }
 
         let precomputed = Arc::new(PrecomputedItems::begin_precomputing());
@@ -1213,10 +1237,6 @@ mod tests {
                     break;
                 }
             }
-        }
-
-        unsafe {
-            env::remove_var("HYZERO_DISABLE_MATERIAL_SHAPING");
         }
 
         // If no decisive game appeared in 500 tries, that itself is suspicious but

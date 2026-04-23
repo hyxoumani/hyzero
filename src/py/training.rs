@@ -218,10 +218,11 @@ pub fn assemble_batch_arrays(samples: &[TrainingSample], unroll_k: usize) -> Bat
             let root_value_target = flip_sign * step.root_value;
             // Conditional β: checkmate games use pure outcome (β=1.0) so the value head
             // sees the full ±1 signal; non-checkmate games keep the configured β (default
-            // 0.3) to bootstrap through root_value. Rationale: under HYZERO_DISABLE_MATERIAL_SHAPING=1,
-            // non-checkmate outcomes are 0.0 — a flat β=1.0 would collapse every drawn
-            // game to target=0, wasting the information that root_value carries. Gate
-            // with HYZERO_CONDITIONAL_BETA=1 (default false to preserve historical behavior).
+            // 0.3) to bootstrap through root_value. Rationale: with material shaping OFF
+            // (the default), non-checkmate outcomes are 0.0 — a flat β=1.0 would collapse
+            // every drawn game to target=0, wasting the information that root_value
+            // carries. Gate with HYZERO_CONDITIONAL_BETA=1 (default false to preserve
+            // historical behavior).
             let effective_beta: f32 = if conditional_beta_enabled() && !sample.is_draw {
                 1.0
             } else {
