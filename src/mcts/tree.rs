@@ -231,8 +231,13 @@ pub struct MCTSConfig {
     pub exploration_constant: f32,
     /// Whether to inject Dirichlet noise into root priors for exploration diversity.
     /// Set to `true` for self-play (exploration required) and `false` for evaluation
-    /// (deterministic play preferred).
+    /// (deterministic play preferred). Ignored when `gumbel_top_k.is_some()` since
+    /// Gumbel sampling provides its own root noise.
     pub add_root_noise: bool,
+    /// If `Some(k)`, use Gumbel-Top-k + sequential halving at the root in place
+    /// of PUCT. Internal nodes still use PUCT. `k` is capped to legal-action count.
+    /// `None` (default) preserves the original PUCT-only behavior.
+    pub gumbel_top_k: Option<usize>,
 }
 
 impl Default for MCTSConfig {
@@ -241,6 +246,7 @@ impl Default for MCTSConfig {
             num_simulations: 800,
             exploration_constant: 1.5,
             add_root_noise: true,
+            gumbel_top_k: None,
         }
     }
 }
@@ -268,8 +274,9 @@ impl MCTSTree {
 
         // Mix Dirichlet noise into root priors for exploration diversity.
         // P(a) = (1 - ε) * P(a) + ε * η_a, where η ~ Dir(α).
-        // Gated by config.add_root_noise: disabled for evaluation games.
-        if config.add_root_noise {
+        // Gated by config.add_root_noise: disabled for evaluation games AND when
+        // Gumbel sampling is active (Gumbel adds its own root-level noise).
+        if config.add_root_noise && config.gumbel_top_k.is_none() {
             let n = root.priors.len();
             if n > 0 {
                 let noise = dirichlet_noise(n);
@@ -282,8 +289,18 @@ impl MCTSTree {
         Self { root, config }
     }
 
-    /// Run all simulations. Each simulation: select -> expand -> backpropagate.
+    /// Run all simulations. Dispatches to either PUCT (default) or Gumbel-Top-k +
+    /// sequential halving (when `config.gumbel_top_k.is_some()`).
     pub async fn run_simulations(&mut self, evaluator: &dyn Evaluator) {
+        if self.config.gumbel_top_k.is_some() {
+            self.run_simulations_gumbel(evaluator).await;
+            return;
+        }
+        self.run_simulations_puct(evaluator).await;
+    }
+
+    /// Original PUCT-based simulation loop. Each simulation: select -> expand -> backpropagate.
+    async fn run_simulations_puct(&mut self, evaluator: &dyn Evaluator) {
         // ---------------------------------------------------------------------------
         // Trace setup (zero cost when HYZERO_MCTS_TRACE is unset or "0").
         // ---------------------------------------------------------------------------
@@ -463,6 +480,187 @@ impl MCTSTree {
             ));
             trace_flush();
         }
+    }
+
+    /// Gumbel-Top-K + sequential halving simulation loop.
+    ///
+    /// At the root: sample one Gumbel(0) value per legal action, take the top-K
+    /// candidates by `logit + g`, then run sequential halving — each round
+    /// simulates each surviving candidate, then halves the set by
+    /// `logit + g + sigma(q)`. The visit distribution at the root reflects
+    /// the halving allocation; later candidates that survived get more visits.
+    ///
+    /// Internal nodes (below root) use standard PUCT.
+    async fn run_simulations_gumbel(&mut self, evaluator: &dyn Evaluator) {
+        let n_legal = self.root.legal_actions.len();
+        if n_legal == 0 {
+            return;
+        }
+
+        let total_sims = self.config.num_simulations;
+        let k_initial = self.config.gumbel_top_k.unwrap_or(16).min(n_legal).max(1);
+
+        // logit(a) = ln(prior) — used as the "policy logit" surrogate. Gumbel-Top-K
+        // sampling on (logit + g) is equivalent to drawing from softmax(logit) once.
+        let logits: Vec<f32> = self
+            .root
+            .priors
+            .iter()
+            .map(|&p| p.max(1e-9).ln())
+            .collect();
+
+        // Sample one Gumbel value per legal action (shared across all sims).
+        let gumbel_noise = crate::mcts::gumbel::sample_gumbel(n_legal);
+
+        // Top-K considered set by (g + logit).
+        let mut scored: Vec<(usize, f32)> = (0..n_legal)
+            .map(|i| (i, gumbel_noise[i] + logits[i]))
+            .collect();
+        scored.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let mut considered: Vec<usize> = scored
+            .iter()
+            .take(k_initial)
+            .map(|&(i, _)| i)
+            .collect();
+
+        // Sequential halving: ceil(log2(K)) rounds. At each round, each surviving
+        // candidate gets `total_sims / (num_rounds * |considered|)` sims (≥1).
+        // Single-candidate case (K=1): just dump remaining budget into it below.
+        let num_rounds = crate::mcts::gumbel::num_rounds(k_initial);
+        let mut sims_done: u32 = 0;
+
+        while considered.len() > 1 && sims_done < total_sims {
+            let per_cand = crate::mcts::gumbel::sims_per_candidate(
+                total_sims,
+                num_rounds,
+                considered.len(),
+            );
+            // Snapshot the current considered list to iterate; halving mutates
+            // `considered` only after the round completes.
+            let round_set = considered.clone();
+            for &cand_idx in &round_set {
+                for _ in 0..per_cand {
+                    if sims_done >= total_sims {
+                        break;
+                    }
+                    self.simulate_with_root_action(cand_idx, evaluator).await;
+                    sims_done += 1;
+                }
+                if sims_done >= total_sims {
+                    break;
+                }
+            }
+
+            // Halve the considered set by (g + logit + sigma(q)).
+            let max_visits = considered
+                .iter()
+                .map(|&i| {
+                    self.root.children[i]
+                        .as_ref()
+                        .map(|c| c.visit_count)
+                        .unwrap_or(0)
+                })
+                .max()
+                .unwrap_or(0);
+
+            let mut round_scored: Vec<(usize, f32)> = considered
+                .iter()
+                .map(|&i| {
+                    let q = self
+                        .root
+                        .children[i]
+                        .as_ref()
+                        .map(|c| c.q_value())
+                        .unwrap_or(0.0);
+                    let s = gumbel_noise[i]
+                        + logits[i]
+                        + crate::mcts::gumbel::sigma_q(q, max_visits);
+                    (i, s)
+                })
+                .collect();
+            round_scored.sort_by(|a, b| {
+                b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
+            });
+            let new_size = (considered.len() / 2).max(1);
+            considered = round_scored
+                .iter()
+                .take(new_size)
+                .map(|&(i, _)| i)
+                .collect();
+        }
+
+        // Spend any remaining budget on the survivor (or the lone considered
+        // candidate when K_initial=1).
+        while sims_done < total_sims {
+            let cand = considered.first().copied().unwrap_or(0);
+            self.simulate_with_root_action(cand, evaluator).await;
+            sims_done += 1;
+        }
+    }
+
+    /// Run one MCTS simulation, forcing the first step at the root to take
+    /// the given child index. Below the root, standard PUCT selection applies.
+    async fn simulate_with_root_action(
+        &mut self,
+        root_action_idx: usize,
+        evaluator: &dyn Evaluator,
+    ) {
+        let mut path: Vec<usize> = vec![root_action_idx];
+
+        // Step 1: handle the forced root child. Either descend if expanded, or
+        // expand-and-backprop right here.
+        let root_child_was_some = self.root.children[root_action_idx].is_some();
+        if !root_child_was_some {
+            // Expand the root child via evaluator. This is the leaf for this sim.
+            let action = self.root.legal_actions[root_action_idx];
+            let (new_hidden, reward, policy, value) =
+                evaluator.expand_leaf(&self.root.hidden_state, action).await;
+            let child_actions = top_k_actions(&policy, 64);
+            let child = MCTSNode::new(new_hidden, &policy, child_actions, reward);
+            self.root.children[root_action_idx] = Some(Box::new(child));
+            self.backpropagate(&path, value);
+            return;
+        }
+
+        // Already-expanded root child: descend with PUCT until we hit an
+        // unexpanded child or a terminal node.
+        let mut current: *const MCTSNode = self.root.children[root_action_idx]
+            .as_ref()
+            .unwrap()
+            .as_ref() as *const MCTSNode;
+
+        let leaf_value: f32 = loop {
+            let node = unsafe { &*current };
+            if node.legal_actions.is_empty() {
+                // Terminal node — backprop with current value
+                break node.q_value();
+            }
+
+            let child_idx = select_child(node, self.config.exploration_constant);
+            path.push(child_idx);
+
+            match &node.children[child_idx] {
+                Some(child) => {
+                    current = child.as_ref() as *const MCTSNode;
+                }
+                None => {
+                    // Expand and break out
+                    let leaf_action_idx = child_idx;
+                    let parent = self.navigate_to_parent_mut(&path);
+                    let action = parent.legal_actions[leaf_action_idx];
+                    let (new_hidden, reward, policy, value) =
+                        evaluator.expand_leaf(&parent.hidden_state, action).await;
+                    let child_actions = top_k_actions(&policy, 64);
+                    let child = MCTSNode::new(new_hidden, &policy, child_actions, reward);
+                    parent.children[leaf_action_idx] = Some(Box::new(child));
+                    break value;
+                }
+            }
+        };
+
+        self.backpropagate(&path, leaf_value);
     }
 
     /// Navigate to the parent node of the last element in the path.
@@ -668,6 +866,7 @@ mod tests {
             num_simulations: 50,
             exploration_constant: 1.5,
             add_root_noise: true,
+            gumbel_top_k: None,
         };
 
         let mut tree = MCTSTree::new(HiddenState::new(64), &policy, 0.5, legal_actions, config);
@@ -687,6 +886,7 @@ mod tests {
             num_simulations: 100,
             exploration_constant: 1.5,
             add_root_noise: true,
+            gumbel_top_k: None,
         };
 
         let mut tree = MCTSTree::new(HiddenState::new(64), &policy, 0.5, legal_actions, config);
@@ -706,6 +906,7 @@ mod tests {
             num_simulations: 50,
             exploration_constant: 1.5,
             add_root_noise: true,
+            gumbel_top_k: None,
         };
 
         let mut tree = MCTSTree::new(HiddenState::new(64), &policy, 0.5, legal_actions, config);
@@ -718,6 +919,60 @@ mod tests {
         assert_eq!(action1, action2);
     }
 
+    /// Gumbel mode: 200 sims with sharp prior should still distribute visits across
+    /// the top-K considered set (sequential halving guarantees baseline sims).
+    /// Under PUCT, ~all visits go to the top-prior move; under Gumbel, top-K
+    /// candidates each get visits in round 1.
+    #[tokio::test]
+    async fn test_gumbel_distributes_visits() {
+        // Sharp prior: action 0 gets 0.9, others share the rest.
+        let mut policy = vec![0.0f32; NUM_ACTIONS];
+        let n_legal = 16;
+        let legal_actions: Vec<ActionIndex> = (0..n_legal as ActionIndex).collect();
+        policy[0] = 0.9;
+        let rest = 0.1 / (n_legal - 1) as f32;
+        for i in 1..n_legal {
+            policy[i] = rest;
+        }
+
+        let config = MCTSConfig {
+            num_simulations: 200,
+            exploration_constant: 1.5,
+            add_root_noise: false,
+            gumbel_top_k: Some(16),
+        };
+
+        let mut tree = MCTSTree::new(HiddenState::new(64), &policy, 0.0, legal_actions, config);
+        tree.run_simulations(&MockEvaluator).await;
+
+        let visits: Vec<u32> = tree
+            .root
+            .children
+            .iter()
+            .map(|c| c.as_ref().map_or(0, |n| n.visit_count))
+            .collect();
+
+        // Count children that received any visits at all.
+        let visited = visits.iter().filter(|&&v| v > 0).count();
+        // With K=16 and 200 sims, ALL 16 candidates should get at least 1 visit
+        // in round 1 (round 1 budget alone = 200/4 = 50 sims for 16 candidates).
+        assert!(
+            visited >= 8,
+            "Gumbel should visit many candidates with sharp prior; only {} of {} had visits",
+            visited, n_legal,
+        );
+
+        // Top-prior move should NOT have all the visits — under PUCT it would.
+        let top_visits = visits[0];
+        let total_visits: u32 = visits.iter().sum();
+        let frac = top_visits as f32 / total_visits as f32;
+        assert!(
+            frac < 0.7,
+            "Gumbel root visits over-concentrated on top prior: {}/{} = {:.2}",
+            top_visits, total_visits, frac,
+        );
+    }
+
     #[tokio::test]
     async fn test_tree_descends_past_depth_one() {
         // With top-K children, at least one depth-1 child should itself have expanded
@@ -728,6 +983,7 @@ mod tests {
             num_simulations: 200,
             exploration_constant: 1.5,
             add_root_noise: true,
+            gumbel_top_k: None,
         };
 
         let mut tree = MCTSTree::new(HiddenState::new(64), &policy, 0.5, legal_actions, config);
@@ -795,6 +1051,7 @@ mod tests {
                         num_simulations: num_sims,
                         exploration_constant: 1.5,
                         add_root_noise: true,
+            gumbel_top_k: None,
                     };
                     let mut tree =
                         MCTSTree::new(HiddenState::new(64), &policy, 0.0, legal.clone(), config);
@@ -868,6 +1125,7 @@ mod tests {
             num_simulations: 0,
             exploration_constant: 1.5,
             add_root_noise: false,
+            gumbel_top_k: None,
         };
 
         // Helper: install a freshly-created child at path[0..path.len()] below root.
@@ -1026,6 +1284,7 @@ mod tests {
             num_simulations: 0,
             exploration_constant: 1.5,
             add_root_noise: false,
+            gumbel_top_k: None,
         };
 
         let legal: Vec<ActionIndex> = (0..2).collect();

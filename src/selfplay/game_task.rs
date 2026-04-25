@@ -14,6 +14,27 @@ use crate::mcts::evaluator::Evaluator;
 use crate::mcts::tree::{MCTSConfig, MCTSTree};
 use crate::{BitIterator, CastleOption, Color, PieceType, PrecomputedItems, Square};
 
+/// Read HYZERO_USE_GUMBEL once. If set to a non-zero / non-empty value, return
+/// the configured top-K (HYZERO_GUMBEL_TOP_K, default 16) for the self-play
+/// MCTSConfig. None disables Gumbel and keeps the original PUCT behavior.
+fn gumbel_top_k() -> Option<usize> {
+    static CACHED: OnceLock<Option<usize>> = OnceLock::new();
+    *CACHED.get_or_init(|| {
+        let on = std::env::var("HYZERO_USE_GUMBEL")
+            .map(|v| !v.is_empty() && v != "0")
+            .unwrap_or(false);
+        if !on {
+            return None;
+        }
+        let k = std::env::var("HYZERO_GUMBEL_TOP_K")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|&k| k >= 1)
+            .unwrap_or(16);
+        Some(k)
+    })
+}
+
 // --- MCTS summary log (HYZERO_MCTS_TRACE gate) ---
 
 /// Cached env-gate: true if HYZERO_MCTS_TRACE is set and non-zero.
@@ -254,6 +275,7 @@ pub async fn play_game_dual(
         num_simulations: config.num_simulations,
         exploration_constant: config.exploration_constant,
         add_root_noise: false, // eval: no exploration noise
+        gumbel_top_k: None,    // eval uses PUCT (deterministic)
     };
 
     loop {
@@ -380,7 +402,8 @@ pub async fn play_game(
     let mcts_config = MCTSConfig {
         num_simulations: config.num_simulations,
         exploration_constant: config.exploration_constant,
-        add_root_noise: true, // self-play: inject exploration
+        add_root_noise: true, // self-play: inject exploration (no-op when Gumbel is on)
+        gumbel_top_k: gumbel_top_k(),
     };
 
     let mut moves: Vec<String> = Vec::new();
