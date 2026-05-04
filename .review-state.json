@@ -1,0 +1,26 @@
+{
+  "_purpose": "Tracks the last commit SHA reviewed by Claude on this branch. Update last_reviewed_sha after each review pass so the next run only inspects new commits.",
+  "branch": "claude/modest-rubin-m7w0s",
+  "last_reviewed_sha": "ee132c4ec4dc32f61d688af6f776a0424e56e2d3",
+  "last_reviewed_at": "2026-05-04T16:50:05Z",
+  "reviews": [
+    {
+      "sha": "7243aec",
+      "title": "mcts+selfplay: fix color asymmetry in self-play move selection",
+      "reviewed_at": "2026-05-04T16:50:05Z",
+      "verdict": "ok-with-minor-notes"
+    },
+    {
+      "sha": "38033d7",
+      "title": "docs+wiki: document color asymmetry bug-hunt and fix",
+      "reviewed_at": "2026-05-04T16:50:05Z",
+      "verdict": "doc-inaccuracies"
+    },
+    {
+      "sha": "ee132c4",
+      "title": "train: TB supervision infrastructure + canonical MuZero backup + diverse starts",
+      "reviewed_at": "2026-05-04T16:50:05Z",
+      "verdict": "bugs-found"
+    }
+  ]
+}
