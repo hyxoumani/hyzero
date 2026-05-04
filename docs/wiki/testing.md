@@ -5,8 +5,8 @@ How to validate the hyzero engine at every level — from quick smoke tests to e
 ## Quick Reference
 
 ```bash
-cargo test                                          # 89 Rust tests (82 pass, 7 ignored; ~60s debug)
-cargo test --release -- --ignored                    # + 7 slow/Python tests (~2s release)
+cargo test                                          # 151 Rust tests (141 pass, 10 ignored; ~60s debug)
+cargo test --release -- --ignored                    # + ~10 slow/Python tests (~2s release)
 python3 scripts/cross_validate.py --all              # full oracle comparison (~3 min)
 bash scripts/e2e_test.sh                             # end-to-end self-play loop
 ```
@@ -15,7 +15,7 @@ bash scripts/e2e_test.sh                             # end-to-end self-play loop
 
 **Command**: `cargo test`
 **Time**: ~60s (debug), ~2s (release)
-**Result**: 82 pass, 7 ignored
+**Result**: 141 pass, 10 ignored
 
 ### By module
 
@@ -25,6 +25,8 @@ bash scripts/e2e_test.sh                             # end-to-end self-play loop
 | `game::perft` | 13 (3 ignored) | Perft node counts for 6 standard positions × depths 1–6 |
 | `game::fen` | 5 | FEN parsing: startpos, midgame, castling rights, EP target, black-to-move |
 | `data::encoding` | 6 | action↔move round-trip: normal, castling, EP, promotion |
+| `data::replay_record` | 0 | (declarations only — no `#[test]` blocks) |
+| `selfplay::replay_writer` | 2 | round-trip serialize/deserialize, filename includes model_version |
 | `data::replay_buffer` | 7 | Buffer add/evict, sampling, checkpointing, step tracking |
 | `mcts::puct` | 4 | PUCT scoring, child selection |
 | `mcts::tree` | 3 | Simulation runs, visit distribution, action selection |
@@ -114,9 +116,9 @@ HYZERO_VALUE_OUTCOME_BETA=0.3 bash scripts/run_baseline.sh 1800
 
 ## 7. Baseline & Validation
 
-Current baseline: **14.51** (commit 63afdbe, 2026-04-15, reproducibility run, β=0.3)
-- Prior run: 11.63 (commit 294e63e, 2026-04-15, first β=0.3 run)
-- Variance: ±3 points observed between two runs at identical config (11.63 and 14.51)
+Most recent baseline run: **5.86** (commit `5f30ea8`, 2026-04-28, 24h continuous-training block via `run_nonstop.sh`; Gumbel-Top-K + 800/400 sims; 0 promotions, last_loss 2.37). See `logs/baseline_score.json` for the full record.
+- Prior controlled 30-min runs: 14.51 (commit 63afdbe, 2026-04-15, β=0.3 reproducibility) and 11.63 (commit 294e63e, 2026-04-15, first β=0.3)
+- Variance: ±3 points observed between two 30-min runs at identical config (11.63 and 14.51); 24h nonstop runs not directly comparable to 30-min scores.
 
 Previous baseline: **6.78** (commit d407281, 2026-04-14 — Dirichlet alpha fix: 0.03 → 0.3 for chess).
 

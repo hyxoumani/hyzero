@@ -1,0 +1,24 @@
+{
+  "name": "claude-template",
+  "version": "0.1.0",
+  "description": "Minimal Claude Code template: 2 agents, 3 skills, 5 hooks, path-scoped rules.",
+  "agents": [
+    "developer",
+    "analyst"
+  ],
+  "skills": [
+    "verify",
+    "plan-and-develop",
+    "compact"
+  ],
+  "hooks": [
+    "safety-net",
+    "auto-format",
+    "test-gate",
+    "commit-review-gate",
+    "agent-trace"
+  ],
+  "commands": [
+    "bootstrap"
+  ]
+}

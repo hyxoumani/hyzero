@@ -1,7 +1,6 @@
 # Project Wiki
 
-Knowledge base maintained by the context-keeper. Pages are synthesized from
-session findings, reviewer feedback, experiments, and architectural decisions.
+Knowledge base maintained by analyst dispatches via the `/verify` + `/approve-wiki` + `/compact` flow. Pages are synthesized from session findings, reviewer feedback, experiments, and architectural decisions.
 
 ## Project
 - [Project Roadmap](project-roadmap.md) — current state, baseline score, next batches
@@ -16,12 +15,13 @@ session findings, reviewer feedback, experiments, and architectural decisions.
 - [MCTS & Self-Play](mcts-selfplay.md) — tree search, coordinator, checkpoints, evaluation task
 - [MCTS Action Selection](selection-mechanics.md) — tie-breaking, POV symmetry bugs (2026-04-19 fixes)
 - [Neural Networks](neural-networks.md) — MuZero h/g/f networks, tensor shapes, training plan
-- [Syzygy Tablebase Supervision](../plans/tablebase-supervision/plan.md) — break distributional collapse with external WDL labels (2026-04-21 initiative)
+- [Replay Subsystem](replay-subsystem.md) — per-ply MCTS replay format, viewer binary, writer
+- [Elo Evaluation (design)](elo-evaluation.md) — design spec for relative-chain Elo (not yet implemented)
 
 ## Integration
 - [Rust-Python Integration](rust-python-integration.md) — FFI boundary, data flow, PyO3 status
 
 ## Development
 - [Testing Procedures](testing.md) — commands, cross-validation, perft CLI, edge cases
-- [Dev Workflow & Framework](dev-workflow.md) — orchestration, agents, baseline scoring
+- [Dev Workflow & Framework](dev-workflow.md) — thin-orchestrator workflow, hooks, skills
 - [Mistakes Log](mistakes.md) — agent failure cases with root cause analysis, error classification, escalation tiers

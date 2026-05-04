@@ -20,7 +20,7 @@ See [MCTS Action Selection Mechanics](selection-mechanics.md) for detailed analy
 ## MCTS Tree Search (Per Move)
 
 **Per-move flow**:
-1. Encode board → `BoardObservation` (103 planes: current position + 7 historical positions × 12 piece planes + 7 auxiliary channels)
+1. Encode board → `BoardObservation` (102 planes: 96 piece planes for current + 7 history × 12 + 6 game-state planes; see `board-encoding.md`)
 2. Call `evaluator.root_setup(observation)` → (hidden_state, policy, value)
 3. Run N simulations (50 for CPU dev, 200+ for GPU production)
 4. Extract visit count distribution, select action by visits (temperature scheduling)
@@ -33,13 +33,17 @@ See [MCTS Action Selection Mechanics](selection-mechanics.md) for detailed analy
 3. **EVALUATE**: Call f(s_new) → (policy, value) to initialize children
 4. **BACKUP**: Propagate value to root with negation per ply, increment visit counts (two-player zero-sum)
 
+## Root Action Selection: Gumbel-Top-K + Sequential Halving
+
+When `gumbel_top_k = Some(k)` is configured, root selection switches from PUCT-with-Dirichlet-noise to Gumbel-Top-K with sequential halving (commit `5f30ea8`): sample one Gumbel(0) value per legal action, take the top-K candidates by `logit + g`, then run sequential halving rounds that progressively halve the candidate set until one survives. Gumbel provides its own root noise so Dirichlet is auto-disabled when this mode is active. Implementation in `src/mcts/tree.rs::run_simulations_gumbel` (Gumbel sampling helper in `src/mcts/gumbel.rs`).
+
 ## Inference Batching
 
 Game threads send `InferenceRequest` (RootSetup or ExpandLeaf) to batcher. Batcher collects up to `batch_size` requests or times out (T_timeout), makes single PyO3 call to Python, distributes results via oneshot channels. Reduces GIL acquisitions from ~800/move to ~1/move.
 
 ## Replay Buffer
 
-Ring buffer (`VecDeque<GameTrajectory>`) with K-step sampling: pick random trajectory (weighted by length), pick random index t where t+K ≤ len, return steps t..=t+K. Each trajectory tagged with model_version. Serialized with bincode for checkpoints.
+Ring buffer (`VecDeque<GameTrajectory>`) with K-step sampling: pick random trajectory (weighted by length), pick random index t where t+K ≤ len, return steps t..=t+K. Each trajectory tagged with model_version. Serialized with bincode for checkpoints. See `replay-subsystem.md` for the per-ply MCTS replay capture (a separate, opt-in diagnostic; distinct from this training-time buffer).
 
 ## Self-Play Coordinator
 
@@ -194,6 +198,6 @@ After a promotion to v1 (new challenger = champion snapshot), both models have i
 ## Related Files
 
 - `src/mcts/{mod,node,tree,puct,evaluator}.rs` — tree operations, PUCT selection
-- `src/selfplay/{mod,game_task,coordinator,inference,training}.rs` — orchestration
+- `src/selfplay/{mod,game_task,coordinator,inference,evaluation,champion,pgn,replay_writer}.rs` — orchestration, eval ladder, PGN logging, replay capture
 - `src/data/{types,encoding,replay_buffer}.rs` — board observation, action space, buffer
 - `docs/TASKS_MCTS_SELFPLAY.md` — detailed task specs (Tasks 17-23)

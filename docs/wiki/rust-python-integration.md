@@ -1,5 +1,7 @@
 # Rust-Python Integration (PyO3)
 
+See `board-encoding.md` for plane definitions; see `neural-networks.md` for full network input shape.
+
 ## Status
 
 - **Done**: Rust engine, MCTS, self-play pipeline with `RandomBackend` (uniform policies, zero values)
@@ -13,9 +15,9 @@ N Game Threads → InferenceRequest → InferenceBatcher
                                         └─ single PyO3 call
                                               ↓
                                     Python InferenceServer
-                                        ├─ root_setup_batch([B,19,8,8])
-                                        │   → hidden[B,64,8,8], policy[B,4096], value[B]
-                                        └─ expand_leaf_batch(hidden[B,64,8,8], actions[B,3,8,8])
+                                        ├─ root_setup_batch([B,102,8,8])
+                                        │   → hidden[B,128,8,8], policy[B,4096], value[B]
+                                        └─ expand_leaf_batch(hidden[B,128,8,8], actions[B,3,8,8])
                                             → next_hidden, rewards, policy, value
                                               ↓
                                     Batcher distributes via oneshot channels
@@ -34,8 +36,8 @@ N Game Threads → InferenceRequest → InferenceBatcher
 All arrays `float32` numpy. Policies are post-softmax. Values tanh-bounded [-1, 1].
 
 ```
-RootSetup:   observations[B,19,8,8] → hidden[B,64,8,8], policies[B,4096], values[B]
-ExpandLeaf:  hidden[B,64,8,8] + actions[B,3,8,8] → next_hidden, rewards[B], policies[B,4096], values[B]
+RootSetup:   observations[B,102,8,8] → hidden[B,128,8,8], policies[B,4096], values[B]
+ExpandLeaf:  hidden[B,128,8,8] + actions[B,3,8,8] → next_hidden, rewards[B], policies[B,4096], values[B]
 ```
 
 ## Weight Sync & Checkpointing

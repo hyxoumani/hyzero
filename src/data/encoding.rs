@@ -354,7 +354,7 @@ pub(crate) fn flip_base_action(a: usize) -> usize {
 /// Underpromotion indices are invariant — they encode files, not ranks, and the
 /// rank is inferred from color at decode time; so the same index is used for
 /// both White and Black underpromotions.
-pub(crate) fn flip_action(action: usize) -> usize {
+pub fn flip_action(action: usize) -> usize {
     if action < NUM_BASE_ACTIONS {
         flip_base_action(action)
     } else {

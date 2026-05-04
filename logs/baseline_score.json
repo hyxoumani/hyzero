@@ -1,29 +1,35 @@
 {
-    "score": 9.0332,
-    "timestamp": "20260422_034453",
-    "git_commit": "012e6b2",
-    "duration_s": 3600,
+    "score": 5.8589,
+    "timestamp": "20260428_211338",
+    "git_commit": "5f30ea8",
+    "duration_s": 86400,
     "metrics": {
-        "games_completed": 219,
-        "training_steps": 3471,
-        "first_loss": 8.6978,
-        "last_loss": 2.8353,
-        "last_policy_loss": 2.7908,
-        "avg_game_length": 72.6,
+        "games_completed": 6311,
+        "training_steps": 100848,
+        "first_loss": 4.2184,
+        "last_loss": 2.3670,
+        "last_policy_loss": 2.3371,
+        "avg_game_length": 35.4,
         "last_win_rate": 0.5,
-        "eval_cycles": 18,
-        "promotions": 2,
-        "max_champion_version": 132,
-        "checkpoints": 69,
+        "eval_cycles": 72,
+        "promotions": 0,
+        "max_champion_version": 0,
+        "checkpoints": 2016,
         "errors": 0
     },
     "config": {
         "games_per_side": 4,
         "promotion_threshold": 0.55,
         "champion_score_weight": 2.0,
-        "eval_sims": 25,
-        "concurrent_games": 5,
-        "simulations": 40
+        "eval_sims": 400,
+        "concurrent_games": 6311,
+        "batch_size": 128,
+        "simulations": 800,
+        "device": "cuda",
+        "resume_from": "checkpoints/best.pt",
+        "starts_file": "data/starting_positions.txt",
+        "tablebase_cache": "data/syzygy/cache_tb_plus_mates.pkl",
+        "tablebase_frac": 0.45
     },
-    "log_file": "logs/baseline_20260422_034453.log"
+    "log_file": "logs/baseline_20260428_211338.log"
 }

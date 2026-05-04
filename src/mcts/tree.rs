@@ -251,6 +251,16 @@ impl Default for MCTSConfig {
     }
 }
 
+/// Per-child snapshot taken from the MCTS root after search.
+///
+/// All vectors are parallel to `root.legal_actions` (sorted at the call site).
+/// Unexpanded children report `visit=0`, `q=0`.
+pub struct RootDiagnostics {
+    pub child_visits: Vec<u32>,
+    pub priors: Vec<f32>,
+    pub q_values: Vec<f32>,
+}
+
 /// Transient MCTS tree built fresh for each move.
 /// After search, extract the visit distribution, then discard the tree.
 pub struct MCTSTree {
@@ -763,6 +773,28 @@ impl MCTSTree {
     /// Root Q-value estimate.
     pub fn root_value(&self) -> f32 {
         self.root.q_value()
+    }
+
+    /// Snapshot of root statistics needed to reconstruct PUCT in a replay viewer.
+    /// Each returned vector is parallel to `root.legal_actions`: position `i` describes
+    /// the child for `legal_actions[i]`. Unexpanded children report visits=0, q=0.
+    pub fn extract_root_diagnostics(&self) -> RootDiagnostics {
+        let n = self.root.legal_actions.len();
+        let mut child_visits = Vec::with_capacity(n);
+        let mut q_values = Vec::with_capacity(n);
+        for child_opt in &self.root.children {
+            let (v, q) = match child_opt {
+                Some(c) => (c.visit_count, c.q_value()),
+                None => (0, 0.0),
+            };
+            child_visits.push(v);
+            q_values.push(q);
+        }
+        RootDiagnostics {
+            child_visits,
+            priors: self.root.priors.clone(),
+            q_values,
+        }
     }
 
     /// Select an action based on visit counts and temperature.

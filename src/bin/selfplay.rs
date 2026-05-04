@@ -352,12 +352,25 @@ async fn main() {
     // 8. Create evaluator and coordinator.
     let evaluator: Arc<dyn Evaluator> = Arc::new(ChannelEvaluator::new(inference_tx.clone()));
 
+    // Replay capture: opt-in via HYZERO_REPLAY_DIR. When set, every completed
+    // self-play game writes a `.replay` file (bincode) into the given directory
+    // for use with `cargo run --bin replay -- <file>`. Files are large
+    // (per-ply MCTS dump) — do not enable for unattended long runs.
+    let replay_dir: Option<Arc<std::path::PathBuf>> = env::var("HYZERO_REPLAY_DIR")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .map(|s| Arc::new(std::path::PathBuf::from(s)));
+    if let Some(dir) = replay_dir.as_ref() {
+        println!("[selfplay] Replay capture ON → {}", dir.display());
+    }
+
     let selfplay_config = SelfPlayConfig {
         max_concurrent_games: selfplay_games,
         game_config: GameConfig {
             num_simulations: config.num_simulations,
             exploration_constant: 1.5,
             temperature_moves: config.temperature_moves,
+            replay_dir: replay_dir.clone(),
         },
     };
 

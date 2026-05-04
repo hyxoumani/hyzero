@@ -4,6 +4,7 @@ pub mod coordinator;
 pub mod evaluation;
 pub mod champion;
 pub mod pgn;
+pub mod replay_writer;
 
 pub use inference::{
     InferenceRequest, InferenceBackend, RandomBackend, SwappableBackend,

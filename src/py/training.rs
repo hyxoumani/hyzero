@@ -431,18 +431,24 @@ impl PyTrainingThread {
             Ok::<Py<PyAny>, PyErr>(trainer)
         })?;
 
+        let train_batch_size: usize = std::env::var("HYZERO_TRAIN_BATCH_SIZE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|&n: &usize| n >= 1)
+            .unwrap_or(256);
+
         let mut thread = Self::new(
             trainer,
             trajectory_rx,
             version_tx,
             weight_tx,
-            10_000, // max_replay_trajectories
-            256,    // train_batch_size
-            5,      // unroll_k
-            200,    // min_samples
-            16,     // train_steps_per_game
-            50,     // checkpoint_interval_steps
-            5,      // checkpoint_keep_last
+            10_000,           // max_replay_trajectories
+            train_batch_size, // train_batch_size (env: HYZERO_TRAIN_BATCH_SIZE, default 256)
+            5,                // unroll_k
+            200,              // min_samples
+            16,               // train_steps_per_game
+            50,               // checkpoint_interval_steps
+            5,                // checkpoint_keep_last
         );
 
         if let Some(path) = resume_checkpoint {

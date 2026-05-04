@@ -176,6 +176,7 @@ impl EvaluationTask {
                 num_simulations: self.config.num_simulations,
                 exploration_constant: 1.5,
                 temperature_moves: self.config.temperature_moves,
+                replay_dir: None,
             };
 
             let gps = self.config.games_per_side;

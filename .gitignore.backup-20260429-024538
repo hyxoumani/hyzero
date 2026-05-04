@@ -1,0 +1,23 @@
+/target
+docs/sessions/
+results.tsv
+run.log
+evals/results/
+*.log
+
+# Build artifacts
+rust_out
+
+# Python caches
+**/__pycache__/
+*.pyc
+
+# Model checkpoints — binaries, regenerated per run
+checkpoints/
+
+# Agent worktrees — ephemeral, per-session
+.claude/worktrees/
+
+# Tablebase files and position cache — downloaded at runtime, not committed
+# Only ignores the top-level data/ directory (Syzygy files + cache.pkl).
+/data/

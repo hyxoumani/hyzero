@@ -8,7 +8,7 @@ Three networks on 8×8 boards, C=128 channels:
 | **g** | [B, 131, 8, 8] | [B, 128, 8, 8] + [B] | Dynamics: next hidden + reward |
 | **f** | [B, 128, 8, 8] | [B, 4096] + [B] | Policy logits + value |
 
-Observation planes (102): 12 piece planes (current-player perspective, current + 7 history slices) + 6 auxiliary planes (castling, en passant, side-to-move, halfmove clock). Encoded from current-player perspective (AlphaZero convention, commit bb39db6). Planes 0–5 = current player's pieces, 6–11 = opponent, rank-mirrored for Black to move. See [Board Encoding](board-encoding.md) for details.
+Observation planes (102): 96 piece planes (8 positions × 12, current + 7 history slices, current-player perspective) + 6 game-state planes (4 castling + 1 en passant + 1 halfmove clock). Side-to-move is NOT a plane (Phase 3b removal); color is implicit in the perspective convention. Planes 0–5 = current player's pieces, 6–11 = opponent, rank-mirrored for Black to move. See `board-encoding.md` for full plane definitions.
 
 ## Network Shapes
 
@@ -40,7 +40,7 @@ All arrays: `float32` numpy. Policies are post-softmax. Values tanh-bounded [-1,
 ## Training (K-Step Unrolling)
 
 ```
-Batch: observations [B,19,8,8], actions [B,K,3,8,8],
+Batch: observations [B,102,8,8], actions [B,K,3,8,8],
        target_policies [B,K+1,4096], target_values [B,K+1], target_rewards [B,K+1]
 
 Step 0:  h0 = h(obs); p0,v0 = f(h0)

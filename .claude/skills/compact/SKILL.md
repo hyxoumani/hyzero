@@ -1,135 +1,72 @@
-# Compact
+---
+name: compact
+description: Synthesize session findings, recent changes, and reviewer feedback into the project wiki at docs/wiki/. Use at end of session, before /clear, or periodically as hygiene to ensure knowledge compounds across sessions.
+---
 
-Triggers the context-keeper to synthesize accumulated knowledge into the project wiki.
-Merges session summaries, reviewer findings, experiment results, and agent memory into
-`docs/wiki/` pages — then runs a lint pass to clean up contradictions and stale references.
+# /compact
 
-Use this when context is getting long, before `/clear`, or at the end of a work session
-to ensure nothing is lost.
+Compact what this session learned into `docs/wiki/` so the next session can recover it without re-discovering. Wiki pages are durable understanding — not changelogs, not session logs. Each page reads as current truth, written for a future reader who has no memory of how it got that way.
 
-## When to use
+Test for inclusion: would a future agent need this fact to make a good decision? If no, it doesn't belong.
 
-- Before running `/clear` to reset context — compact first so findings persist
-- After a long session with multiple tasks
-- After autoresearch runs to synthesize experiment findings
-- When you notice agents re-discovering things from previous sessions
-- Periodically as hygiene (e.g., end of day)
+## Scope: focused vs. session-wide
 
-## Workflow
+- **Focused** (chained from `/verify` on APPROVE) — operate only on the change just approved. Pull the diff, wiki pages overlapping the changed files, and session notes referencing them. Don't load the full session.
+- **Session-wide** (manual, end of session) — sweep all unmerged findings.
 
-### Step 1: Gather unmerged knowledge
+In focused mode, skip Step 1's broad scans. Read only inputs the change actually touches.
 
-Collect everything that hasn't been synthesized into the wiki yet:
+After compact, invoke `/clear` to reset the orchestrator. Verify → compact → clear is the unit boundary that keeps the orchestrator clean between routing decisions.
 
-```bash
-# Recent session summaries
-ls -t docs/sessions/*.md 2>/dev/null | head -10
+## Step 1: Read the existing wiki
 
-# Recent git activity for context
-git log --oneline -20
+Don't re-derive findings from `git log`/`diff` — synthesize from session memory. Read existing wiki only to avoid duplicating: `ls docs/wiki/*.md`, `docs/wiki/index.md`, and any page whose topic overlaps with the change at hand.
 
-# Current wiki state
-ls docs/wiki/ 2>/dev/null
+## Step 2: Map findings to wiki pages
 
-# Current knowledge log
-tail -20 docs/log.md 2>/dev/null
-```
+| Type of finding | Wiki destination |
+|---|---|
+| Architecture decision | `docs/wiki/{subsystem}.md` → `## Key decisions` |
+| Pattern discovery | `docs/wiki/patterns.md` or domain-specific page |
+| Constraint identified | `docs/wiki/{domain}.md` → `## Gotchas` |
+| Bug rationale / fix | `docs/wiki/{subsystem}.md` → `## Gotchas` |
+| Reviewer recurring issue | `docs/wiki/{domain}.md` → `## Gotchas` |
 
-Read the recent session summaries. Read `docs/wiki/index.md` to understand what wiki
-pages already exist.
+## Step 3: Update or create pages
 
-### Step 2: Identify gaps
+You synthesize content from session context (decisions, summaries, findings). The actual write goes through analyst with the user-approval gate.
 
-Compare what's in the session summaries and recent git history against what's already
-in the wiki. Look for:
+For each page that needs updating:
 
-- New topics that don't have wiki pages yet
-- Existing pages that are missing recent findings
-- Reviewer findings or bug fixes that revealed gotchas not yet documented
-- Architecture decisions made but not recorded
-- Experiment results not yet synthesized
+1. Present to user verbatim:
+   ```
+   Page: docs/wiki/{topic}.md
+   Proposed content: <synthesized text>
+   Save? (yes / iterate / discard)
+   ```
+2. Wait for user response.
+3. On "yes": user invokes `/approve-wiki`. Then dispatch `analyst`:
+   > Write/update `docs/wiki/{topic}.md` with this content: [paste synthesized text].
+4. The `wiki-gate.sh` hook permits the write; flag clears post-write (one-shot).
 
-### Step 3: Update the wiki
+Repeat per page. Each page requires its own `/approve-wiki`.
 
-For each gap found, either create a new page or update an existing one.
+Page structure: one-paragraph synthesized summary (current truth, not history), `## Key decisions`, `## Gotchas`, `## Related`.
 
-**Creating a new page** (`docs/wiki/{topic}.md`):
-```markdown
-# {Topic}
+Constraints:
+- Each page ≤100 lines. Split if larger.
+- Every page has a `## Related` section.
+- When updating a page, check pages it links to. Update them if affected.
 
-{Synthesized understanding from all available sources.}
+## Step 4: Finalize
 
-## Key decisions
-- {Decision}: {why, what alternatives were rejected}
+- **Update `docs/wiki/index.md`**: same gate flow as Step 3 — synthesize index changes, present, user invokes `/approve-wiki`, dispatch analyst.
+- **Lint** via state queries: `wc -l CLAUDE.md` (≤150?), `find docs/wiki -name '*.md' -exec wc -l {} +` (any over 100?), check for orphan pages and unresolved `> CONTRADICTION:` markers. For any fixes, dispatch analyst (each fix needs its own approval).
+- **Log append**: `echo "$(date -I) — Compact: {summary}" >> docs/log.md` — orchestrator runs this directly (Bash redirect to non-wiki paths is unblocked).
 
-## Gotchas
-- {Non-obvious things that caused bugs or confusion}
+## Report
 
-## Related
-- [{Other topic}](other-topic.md) — {relationship}
-```
-
-**Updating an existing page**: Rewrite sections to incorporate new knowledge. The page
-should read as current truth, not as a changelog. Don't just append — synthesize.
-
-**Cross-references**: When updating a page, check all pages listed in its `## Related`
-section. Update them too if the new information affects them. Add new cross-references
-if the update connects to pages not yet linked.
-
-### Step 4: Update the index
-
-Update `docs/wiki/index.md` to include any new pages. Group pages by domain, not
-alphabetically.
-
-### Step 5: Mistake pattern detection
-
-Read `docs/wiki/mistakes.md`. Analyze logged mistakes for systemic patterns:
-
-1. **Type clustering**: Are 3+ mistakes sharing the same error type (e.g., `missing-context`,
-   `wrong-assumption`)? This signals a pipeline problem, not an agent problem.
-   - `missing-context` cluster → orchestrator briefs need more context, or wiki is incomplete
-   - `wrong-assumption` cluster → researcher isn't verifying claims against code
-   - `breaking-change` cluster → reviewer needs to grep for callers more aggressively
-   - `stale-context` cluster → wiki pages are outdated, run lint pass
-
-2. **Domain clustering**: Are 3+ mistakes in the same domain? That area needs:
-   - A dedicated wiki page if one doesn't exist
-   - Richer gotchas if the page exists but mistakes keep happening
-   - A path-scoped rule in `.claude/rules/` for automated enforcement
-
-3. **Escalation audit**: Are any mistakes still at **gotcha** tier but recurring?
-   Escalate to **rule** or **hook**. The goal is: every recurring mistake eventually
-   becomes automated prevention.
-
-4. **Root cause depth**: Are root cause chains consistently shallow ("wrong output")?
-   Push for deeper analysis — the systemic cause is what prevents recurrence.
-
-Report patterns found and escalation recommendations.
-
-### Step 6: Lint pass
-
-Audit all documentation for health:
-
-1. **CLAUDE.md**: Still accurate? Under 150 lines? Commands still correct?
-2. **`.claude/rules/`**: Any rules referencing deleted files or functions? Any orphan
-   rules whose path globs match nothing?
-3. **Wiki pages**: Any pages over 100 lines that should be split? Any orphan pages
-   not linked from index or other pages? Any `CONTRADICTION` flags that can now be
-   resolved?
-4. **Cross-references**: Grep wiki pages for topics mentioned but not linked.
-5. **Mistakes log**: Any mistakes marked "pending" escalation that can now be resolved?
-
-Fix issues in-place.
-
-### Step 7: Log and summarize
-
-Append to `docs/log.md`:
-```
-YYYY-MM-DD — Compact: {summary of what was merged/created/cleaned}
-```
-
-Report to the user:
 - Wiki pages created or updated
-- Contradictions found and resolved (or flagged)
-- Stale content cleaned up
-- Any open questions that need user input
+- Contradictions resolved (or flagged)
+- Stale content cleaned
+- Open questions needing user input

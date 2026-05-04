@@ -1,10 +1,11 @@
 use std::collections::VecDeque;
 use std::io::{BufWriter, Write};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::data::{
     board_to_snapshot, encode_board, move_to_action, ActionIndex, BoardSnapshot, GameTrajectory,
-    StepRecord, NUM_BASE_ACTIONS,
+    ReplayFile, ReplayRecord, StepRecord, NUM_BASE_ACTIONS,
 };
 use crate::data::encoding::flip_action;
 use crate::game::board::GameResult;
@@ -12,6 +13,7 @@ use crate::game::fen::board_from_fen;
 use crate::game::{GameBoard, Move, Player};
 use crate::mcts::evaluator::Evaluator;
 use crate::mcts::tree::{MCTSConfig, MCTSTree};
+use crate::selfplay::replay_writer::write_replay;
 use crate::{BitIterator, CastleOption, Color, PieceType, PrecomputedItems, Square};
 
 /// Read HYZERO_USE_GUMBEL once. If set to a non-zero / non-empty value, return
@@ -186,20 +188,22 @@ fn pick_starting_position() -> Option<&'static str> {
 
 /// Initialize the self-play board either from a sampled diverse-start FEN
 /// (when HYZERO_STARTS_FILE is configured) or from the standard initial
-/// position. Returns `(board, side_to_move)`.
+/// position. Returns `(board, side_to_move, starting_fen)` where `starting_fen`
+/// is `Some(fen)` when a non-default position was used (so the replay viewer
+/// can reconstruct from the same starting state).
 ///
 /// If a sampled FEN fails to parse, logs a warning and falls back to the
 /// default initial position so self-play never aborts on a bad FEN.
 fn init_self_play_board(
     precomputed: Arc<PrecomputedItems>,
-) -> (GameBoard, Color) {
+) -> (GameBoard, Color, Option<String>) {
     if let Some(fen) = pick_starting_position() {
         match board_from_fen(fen, precomputed.clone()) {
             Ok((board, side_to_move, _fullmove)) => {
                 // Skip positions that are already terminal (rare but possible
                 // for FENs pulled from mid-game random play).
                 if board.result() == GameResult::Ongoing {
-                    return (board, side_to_move);
+                    return (board, side_to_move, Some(fen.to_string()));
                 }
                 eprintln!(
                     "[selfplay] WARN: sampled start FEN is already terminal; \
@@ -218,7 +222,7 @@ fn init_self_play_board(
     let player1 = Player::init_player(true);
     let player2 = Player::init_player(false);
     let board = GameBoard::init_game_board(precomputed, player1, player2);
-    (board, Color::White)
+    (board, Color::White, None)
 }
 
 /// Configuration for a self-play game.
@@ -228,6 +232,10 @@ pub struct GameConfig {
     pub exploration_constant: f32,
     /// Use temperature=1.0 for the first N moves, then near 0.
     pub temperature_moves: u32,
+    /// If `Some(dir)`, every completed game writes a `.replay` file into `dir`.
+    /// `None` (default) disables replay capture entirely — zero overhead when
+    /// off. The viewer (`cargo run --bin replay -- <file>`) reads these files.
+    pub replay_dir: Option<Arc<PathBuf>>,
 }
 
 impl Default for GameConfig {
@@ -236,6 +244,7 @@ impl Default for GameConfig {
             num_simulations: 800,
             exploration_constant: 1.5,
             temperature_moves: 30,
+            replay_dir: None,
         }
     }
 }
@@ -263,7 +272,7 @@ pub async fn play_game_dual(
     black_evaluator: Arc<dyn Evaluator>,
     config: GameConfig,
 ) -> DualGameOutcome {
-    let (mut board, mut side_to_move) = init_self_play_board(precomputed.clone());
+    let (mut board, mut side_to_move, _starting_fen) = init_self_play_board(precomputed.clone());
 
     let mut turn_count: usize = 0;
     let mut history: VecDeque<BoardSnapshot> = VecDeque::with_capacity(7);
@@ -390,9 +399,13 @@ pub async fn play_game(
     model_version: u64,
     config: GameConfig,
 ) -> GameTrajectory {
-    let (mut board, mut side_to_move) = init_self_play_board(precomputed.clone());
+    let (mut board, mut side_to_move, starting_fen) = init_self_play_board(precomputed.clone());
 
     let mut steps: Vec<StepRecord> = Vec::new();
+    // Optional replay capture: per-ply MCTS dump, written to disk at game end
+    // when `GameConfig.replay_dir` is set (typically from HYZERO_REPLAY_DIR).
+    let capture_replay = config.replay_dir.is_some();
+    let mut replay_records: Vec<ReplayRecord> = Vec::new();
     let mut turn_count: usize = 0;
     // History buffer for encode_board: stores up to 7 past snapshots (oldest first).
     let mut history: VecDeque<BoardSnapshot> = VecDeque::with_capacity(7);
@@ -468,6 +481,14 @@ pub async fn play_game(
         let visit_distribution = tree.extract_visit_distribution();
         let root_value = tree.root_value();
 
+        // Optional MCTS diagnostics for the replay viewer (raw visits, priors,
+        // q-values per child). Cheap when capture is on; skipped entirely otherwise.
+        let diagnostics = if capture_replay {
+            Some(tree.extract_root_diagnostics())
+        } else {
+            None
+        };
+
         // Write one-line summary to logs/mcts_summary.log when HYZERO_MCTS_TRACE is set.
         if mcts_summary_enabled() {
             trace_summary(model_version, turn_count, &legal_actions, &policy, &visit_distribution);
@@ -488,6 +509,18 @@ pub async fn play_game(
         } else {
             selected_action
         };
+
+        if let Some(diag) = diagnostics {
+            replay_records.push(ReplayRecord {
+                action: selected_action,
+                legal_moves: legal_actions.clone(),
+                child_visits: diag.child_visits,
+                priors: diag.priors,
+                q_values: diag.q_values,
+                root_value,
+                white_to_move: side_to_move == Color::White,
+            });
+        }
 
         // Record step — store selected_action (current-player perspective) in trajectory.
         // legal_moves also stored in current-player perspective.
@@ -580,6 +613,33 @@ pub async fn play_game(
             game_outcome,
             is_draw,
         );
+    }
+
+    // Replay capture: write the per-ply MCTS dump to disk if the user opted in
+    // via `GameConfig.replay_dir`. One file per game, no sampling — opting in
+    // means you want the data, even at high disk cost. Failures are logged and
+    // swallowed so a flaky filesystem can't take down a self-play run.
+    if let Some(dir) = config.replay_dir.as_ref() {
+        let replay = ReplayFile {
+            steps: replay_records,
+            game_outcome,
+            model_version,
+            is_draw,
+            starting_fen: starting_fen.clone(),
+            c_puct: config.exploration_constant,
+        };
+        match write_replay(&replay, dir.as_ref()) {
+            Ok(path) => {
+                if mcts_summary_enabled() {
+                    println!(
+                        "[replay] wrote {} ({} plies)",
+                        path.display(),
+                        replay.steps.len()
+                    );
+                }
+            }
+            Err(e) => eprintln!("[replay] write failed: {e}"),
+        }
     }
 
     // Sampled self-play PGN logging: 1% of games, for opening-diversity analysis.
@@ -945,6 +1005,7 @@ mod tests {
             num_simulations: 2, // Very few for speed
             exploration_constant: 1.5,
             temperature_moves: 5,
+            replay_dir: None,
         };
 
         let trajectory = play_game(precomputed, evaluator, 1, config).await;
@@ -1044,6 +1105,7 @@ mod tests {
             num_simulations: 2,
             exploration_constant: 1.5,
             temperature_moves: 0,
+            replay_dir: None,
         };
 
         const N: usize = 2000;
@@ -1101,6 +1163,7 @@ mod tests {
             num_simulations: 2,
             exploration_constant: 1.5,
             temperature_moves: 5,
+            replay_dir: None,
         };
 
         let outcome = play_game_dual(precomputed, white_evaluator, black_evaluator, config).await;
@@ -1233,6 +1296,7 @@ mod tests {
             num_simulations: 2,
             exploration_constant: 1.5,
             temperature_moves: 0, // greedy — faster termination
+            replay_dir: None,
         };
 
         // Play many games until we see a decisive result (Black wins), then verify

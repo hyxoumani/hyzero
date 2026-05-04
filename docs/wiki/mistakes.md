@@ -1,5 +1,7 @@
 # Mistakes Log
 
+> **Note:** Entries before 2026-05-01 reference the prior researcher / implementer / orchestrator / verifier four-agent framework, which has been replaced by the thin-orchestrator + analyst + developer model. The mistakes catalogued in those entries remain instructive, but the agent names map roughly: researcher → analyst, implementer → developer, verifier → analyst-via-`/verify`, orchestrator → main-session orchestrator. See `dev-workflow.md` for the current architecture.
+
 Record of agent failures with root cause analysis and error classification.
 
 ## 2026-04-13: Zobrist Implementation — Incomplete Cleanup

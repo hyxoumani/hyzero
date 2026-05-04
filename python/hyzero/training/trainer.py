@@ -494,6 +494,15 @@ class Trainer:
                     f" {tb_cache_path!r}; TB supervision disabled"
                 )
         self._tb_frac = float(os.environ.get("HYZERO_TABLEBASE_FRAC", "0.0"))
+        # Absolute supervision-row count override. When set, the trainer uses
+        # exactly this many supervision rows per batch regardless of batch size,
+        # so changing HYZERO_TRAIN_BATCH_SIZE doesn't accidentally rescale the
+        # amount of TB / mate / midgame supervision exposure. Falls back to
+        # int(batch_size * tb_frac) if unset/zero.
+        _tb_abs = os.environ.get("HYZERO_TB_ABS_PER_BATCH", "")
+        self._tb_abs_per_batch: int | None = (
+            int(_tb_abs) if _tb_abs.strip().isdigit() and int(_tb_abs) > 0 else None
+        )
 
     def notify_trajectory(self, game_outcome: float, is_draw: bool) -> None:
         """Record a completed game trajectory for checkmate counting.
@@ -948,7 +957,12 @@ class Trainer:
 
         b = batch["observations"].shape[0]
         k_steps = batch["actions"].shape[1]
-        n_tb = max(1, int(b * self._tb_frac))
+        if self._tb_abs_per_batch is not None:
+            # Absolute count locked via HYZERO_TB_ABS_PER_BATCH — keeps supervision
+            # exposure stable when training batch size changes.
+            n_tb = self._tb_abs_per_batch
+        else:
+            n_tb = max(1, int(b * self._tb_frac))
         n_tb = min(n_tb, b)
 
         from hyzero.data.tablebase import build_tb_batch, build_tb_batch_trajectories
