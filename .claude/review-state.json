@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "description": "Tracks Claude code-review coverage so subsequent reviews can be incremental. Update reviewed_to_sha when you finish a review pass.",
+  "reviewed_to_sha": "ee132c4ec4dc32f61d688af6f776a0424e56e2d3",
+  "reviewed_to_subject": "train: TB supervision infrastructure + canonical MuZero backup + diverse starts",
+  "reviewed_branch": "claude/modest-rubin-Fg8mF",
+  "reviewed_at_utc": "2026-05-05",
+  "review_focus": "bugs",
+  "passes": [
+    {
+      "sha": "ee132c4ec4dc32f61d688af6f776a0424e56e2d3",
+      "date": "2026-05-05",
+      "scope": "full squash diff (Rust + Python TB infra)",
+      "findings_high": 1,
+      "findings_medium": 3,
+      "findings_low": 2,
+      "report_in_chat": true
+    }
+  ]
+}
