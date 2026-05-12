@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "reviewer": "claude-opus-4-7",
+  "format": "Records commits already reviewed for bugs on this branch. The reviewer reads this on subsequent runs and only reviews commits whose SHAs are NOT present.",
+  "reviewed": [
+    {
+      "sha": "ee132c4",
+      "subject": "train: TB supervision infrastructure + canonical MuZero backup + diverse starts",
+      "reviewed_at": "2026-05-12",
+      "verdict": "approve with concerns",
+      "findings_count": { "bugs": 2, "concerns": 3 }
+    },
+    {
+      "sha": "7243aec",
+      "subject": "mcts+selfplay: fix color asymmetry in self-play move selection",
+      "reviewed_at": "2026-05-12",
+      "verdict": "approve",
+      "findings_count": { "bugs": 0, "concerns": 0 }
+    },
+    {
+      "sha": "38033d7",
+      "subject": "docs+wiki: document color asymmetry bug-hunt and fix",
+      "reviewed_at": "2026-05-12",
+      "verdict": "approve (docs only, not reviewed for bugs)",
+      "findings_count": { "bugs": 0, "concerns": 0 }
+    }
+  ]
+}
