@@ -125,6 +125,7 @@ fi
 
 # ── Run ────────────────────────────────────────────────────────
 echo "[2/5] Running selfplay for ${DURATION}s..."
+export HYZERO_POLICY_ENTROPY_WEIGHT=0.01
 echo "[env] $(env | grep '^HYZERO_' | sort | tr '\n' ' ')"
 HYZERO_DEVICE=$DEVICE \
 HYZERO_SIMS=$SIMS \
