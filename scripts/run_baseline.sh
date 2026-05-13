@@ -125,6 +125,7 @@ fi
 
 # ── Run ────────────────────────────────────────────────────────
 echo "[2/5] Running selfplay for ${DURATION}s..."
+echo "[env] $(env | grep '^HYZERO_' | sort | tr '\n' ' ')"
 HYZERO_DEVICE=$DEVICE \
 HYZERO_SIMS=$SIMS \
 HYZERO_EVAL_SIMS=$EVAL_SIMS \
