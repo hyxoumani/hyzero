@@ -898,13 +898,12 @@ mod tests {
             // Build two InferenceServers with the same config (defaults to "cpu").
             let cfg_mod = PyModule::import(py, "hyzero.config")?;
             let cfg = cfg_mod.getattr("DEFAULT_CONFIG")?;
-            let srv_cls = PyModule::import(py, "hyzero.inference.server")?
-                .getattr("InferenceServer")?;
+            let srv_cls =
+                PyModule::import(py, "hyzero.inference.server")?.getattr("InferenceServer")?;
             let server: Py<PyAny> = srv_cls.call1((cfg.clone(), "cpu"))?.unbind();
 
             // Hold a directly cloned handle, as EvaluationTask does.
-            let opp_handle: Arc<Mutex<Py<PyAny>>> =
-                Arc::new(Mutex::new(server.clone_ref(py)));
+            let opp_handle: Arc<Mutex<Py<PyAny>>> = Arc::new(Mutex::new(server.clone_ref(py)));
 
             // Build a numpy obs batch of shape [2, INPUT_PLANES, 8, 8]; pull
             // INPUT_PLANES from the config to keep this independent of constants.
@@ -912,29 +911,24 @@ mod tests {
             let input_planes: usize = cfg
                 .cast::<pyo3::types::PyDict>()?
                 .get_item("input_planes")?
-                .ok_or_else(|| {
-                    pyo3::exceptions::PyKeyError::new_err("input_planes not in config")
-                })?
+                .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("input_planes not in config"))?
                 .extract()?;
             let randn = np.getattr("random")?.getattr("randn")?;
             let obs_f64 = randn.call1((2, input_planes, 8, 8))?;
             let obs = obs_f64.call_method1("astype", ("float32",))?;
 
             // Capture pre-load output (policies tensor index 1).
-            let pre = server
-                .call_method1(py, "root_setup_batch", (obs.clone(),))?;
+            let pre = server.call_method1(py, "root_setup_batch", (obs.clone(),))?;
             let policies_before = pre.bind(py).get_item(1)?.unbind();
 
             // Drive a Trainer for a few steps to diverge from init weights.
-            let trainer_cls = PyModule::import(py, "hyzero.training.trainer")?
-                .getattr("Trainer")?;
+            let trainer_cls =
+                PyModule::import(py, "hyzero.training.trainer")?.getattr("Trainer")?;
             let trainer = trainer_cls.call1(("cpu",))?;
             let num_actions: usize = cfg
                 .cast::<pyo3::types::PyDict>()?
                 .get_item("num_actions")?
-                .ok_or_else(|| {
-                    pyo3::exceptions::PyKeyError::new_err("num_actions not in config")
-                })?
+                .ok_or_else(|| pyo3::exceptions::PyKeyError::new_err("num_actions not in config"))?
                 .extract()?;
             let batch = pyo3::types::PyDict::new(py);
             let zeros = np.getattr("zeros")?;
@@ -971,20 +965,16 @@ mod tests {
             for _ in 0..5 {
                 trainer.call_method1("train_batch", (batch.clone(),))?;
             }
-            let weight_bytes: Vec<u8> = trainer
-                .call_method0("get_weights")?
-                .extract()?;
+            let weight_bytes: Vec<u8> = trainer.call_method0("get_weights")?.extract()?;
 
             // Apply weights via the held handle (the exact path used by EvaluationTask).
             {
                 let guard = opp_handle.lock().unwrap();
-                guard
-                    .call_method1(py, "load_weights", (PyBytes::new(py, &weight_bytes),))?;
+                guard.call_method1(py, "load_weights", (PyBytes::new(py, &weight_bytes),))?;
             }
 
             // Capture post-load output and verify it differs.
-            let post = server
-                .call_method1(py, "root_setup_batch", (obs,))?;
+            let post = server.call_method1(py, "root_setup_batch", (obs,))?;
             let policies_after = post.bind(py).get_item(1)?.unbind();
 
             let allclose = np

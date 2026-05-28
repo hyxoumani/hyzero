@@ -436,9 +436,10 @@ async fn main() {
         (srv, hc)
     });
     // Direct Py<PyAny> handle for the EvaluationTask to call `load_weights`.
-    let opponent_server_handle: Arc<std::sync::Mutex<Py<PyAny>>> = Arc::new(
-        std::sync::Mutex::new(Python::attach(|py| opponent_server.clone_ref(py))),
-    );
+    let opponent_server_handle: Arc<std::sync::Mutex<Py<PyAny>>> =
+        Arc::new(std::sync::Mutex::new(Python::attach(|py| {
+            opponent_server.clone_ref(py)
+        })));
     let (opponent_tx, opponent_rx) = mpsc::channel(256);
     let opponent_backend = Box::new(PyO3Backend::new(opponent_server, opponent_hidden_channels));
     let mut opponent_batcher =

@@ -81,7 +81,13 @@ mod tests {
         // vs. fixed opponent at 1500.0 with K=32, starting at 1500.0. Values computed
         // at f32 precision (cross-validated with Python `struct.pack('f', r)`).
         let scores = [1.0, 0.5, 1.0, 0.0, 1.0];
-        let expected = [1516.0_f32, 1515.263_67, 1530.561_2, 1513.157_3, 1528.551_8];
+        let expected = [
+            1516.0_f32,
+            1_515.263_67,
+            1_530.561_2,
+            1_513.157_3,
+            1_528.551_8,
+        ];
         let mut r = 1500.0_f32;
         for (i, s) in scores.iter().enumerate() {
             r = update_rating(r, 1500.0, *s, 32.0);
