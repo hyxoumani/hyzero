@@ -68,6 +68,11 @@ struct RunConfig {
     promotion_cooldown_games: usize,
     eval_num_simulations: u32,
     champion_score_weight: f64,
+    // Elo ladder (pool-based promotion gate)
+    elo_k_factor: f32,
+    pool_size: usize,
+    promotion_elo_delta: f32,
+    opponent_initial_elo: f32,
 }
 
 impl Default for RunConfig {
@@ -83,19 +88,19 @@ impl Default for RunConfig {
             promotion_cooldown_games: 0,
             eval_num_simulations: 50,
             champion_score_weight: 2.0,
+            elo_k_factor: 32.0,
+            pool_size: 3,
+            promotion_elo_delta: 20.0,
+            opponent_initial_elo: 1500.0,
         }
     }
 }
 
-#[tokio::main]
-async fn main() {
-    println!("[selfplay] Initializing...");
-
-    let device = std::env::var("HYZERO_DEVICE").unwrap_or_else(|_| "cpu".to_string());
-    println!("[selfplay] Device: {device}");
-
+/// Build a `RunConfig` from the environment + defaults. Factored out so unit
+/// tests can drive it under a serial lock without forking a binary.
+fn run_config_from_env() -> RunConfig {
     let defaults = RunConfig::default();
-    let config = RunConfig {
+    RunConfig {
         total_games: env::var("HYZERO_GAMES")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -136,7 +141,55 @@ async fn main() {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(defaults.champion_score_weight),
-    };
+        elo_k_factor: env::var("HYZERO_ELO_K_FACTOR")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(defaults.elo_k_factor),
+        pool_size: env::var("HYZERO_POOL_SIZE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(defaults.pool_size),
+        promotion_elo_delta: env::var("HYZERO_PROMOTION_ELO_DELTA")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(defaults.promotion_elo_delta),
+        opponent_initial_elo: env::var("HYZERO_OPPONENT_INITIAL_ELO")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(defaults.opponent_initial_elo),
+    }
+}
+
+#[tokio::main]
+async fn main() {
+    println!("[selfplay] Initializing...");
+
+    let device = std::env::var("HYZERO_DEVICE").unwrap_or_else(|_| "cpu".to_string());
+    println!("[selfplay] Device: {device}");
+
+    let config = run_config_from_env();
+
+    // Bootstrap-path notice: HYZERO_PROMOTION_THRESHOLD now only governs the
+    // empty-pool path. Once any best_v{NNN}.pt exists, gating switches to Elo.
+    if env::var("HYZERO_PROMOTION_THRESHOLD").is_ok() {
+        eprintln!(
+            "[selfplay] NOTE: HYZERO_PROMOTION_THRESHOLD applies only to the empty-pool bootstrap path; once any archive exists, gating switches to Elo (HYZERO_PROMOTION_ELO_DELTA)."
+        );
+    }
+
+    // Cooldown semantics notice: `promotion_cooldown_games` counts games, not
+    // cycles. With pool_size=K and games_per_side=g, one cycle = 2*K*g games.
+    // The default (0) is a no-op so existing baselines are unaffected.
+    if config.promotion_cooldown_games > 0 {
+        let n = 2 * config.pool_size * config.games_per_side;
+        eprintln!(
+            "[selfplay] NOTE: promotion_cooldown_games={cd} counts games (not cycles). \
+             With pool_size={ps} and games_per_side={gps}, one cycle = {n} games.",
+            cd = config.promotion_cooldown_games,
+            ps = config.pool_size,
+            gps = config.games_per_side,
+        );
+    }
 
     // Derive self-play concurrency: N-1 slots for games, 1 for eval.
     let selfplay_games = config.total_games.saturating_sub(1).max(1);
@@ -447,12 +500,21 @@ async fn main() {
         temperature_moves: config.temperature_moves,
         poll_interval_ms: 500,
         champion_score_weight: config.champion_score_weight,
+        elo_k_factor: config.elo_k_factor,
+        pool_size: config.pool_size,
+        promotion_elo_delta: config.promotion_elo_delta,
+        opponent_initial_elo: config.opponent_initial_elo,
         ..EvaluationConfig::default()
     };
 
     println!(
-        "[selfplay] Starting evaluation ladder ({} games/side, threshold={:.2}, weight={:.1})",
-        config.games_per_side, config.promotion_threshold, config.champion_score_weight
+        "[selfplay] Starting evaluation ladder ({} games/side, pool_size={}, elo_delta={:.1}, \
+         weight={:.1}, bootstrap_threshold={:.2})",
+        config.games_per_side,
+        config.pool_size,
+        config.promotion_elo_delta,
+        config.champion_score_weight,
+        config.promotion_threshold,
     );
 
     let eval_task_obj = EvaluationTask::new(
@@ -477,4 +539,64 @@ async fn main() {
         selfplay_games, config.num_simulations
     );
     coordinator.run().await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Serial lock for the env-var tests below. Mirrors the
+    /// `decisive_frac_env_lock` pattern in `src/data/replay_buffer.rs:264-266`.
+    /// `std::env::set_var` is process-global and unsafe to race.
+    fn elo_env_lock() -> &'static std::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
+    fn clear_elo_env() {
+        // SAFETY: protected by elo_env_lock() at all call sites.
+        unsafe {
+            std::env::remove_var("HYZERO_POOL_SIZE");
+            std::env::remove_var("HYZERO_PROMOTION_ELO_DELTA");
+            std::env::remove_var("HYZERO_ELO_K_FACTOR");
+            std::env::remove_var("HYZERO_OPPONENT_INITIAL_ELO");
+        }
+    }
+
+    #[test]
+    fn from_env_returns_defaults_when_unset() {
+        let _guard = elo_env_lock().lock().unwrap();
+        clear_elo_env();
+        let cfg = run_config_from_env();
+        assert!((cfg.elo_k_factor - 32.0).abs() < f32::EPSILON);
+        assert_eq!(cfg.pool_size, 3);
+        assert!((cfg.promotion_elo_delta - 20.0).abs() < f32::EPSILON);
+        assert!((cfg.opponent_initial_elo - 1500.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn from_env_parses_pool_size_override() {
+        let _guard = elo_env_lock().lock().unwrap();
+        clear_elo_env();
+        // SAFETY: protected by elo_env_lock(); no concurrent env-var access.
+        unsafe {
+            std::env::set_var("HYZERO_POOL_SIZE", "5");
+        }
+        let cfg = run_config_from_env();
+        clear_elo_env();
+        assert_eq!(cfg.pool_size, 5);
+    }
+
+    #[test]
+    fn from_env_parses_elo_delta_override() {
+        let _guard = elo_env_lock().lock().unwrap();
+        clear_elo_env();
+        // SAFETY: protected by elo_env_lock(); no concurrent env-var access.
+        unsafe {
+            std::env::set_var("HYZERO_PROMOTION_ELO_DELTA", "30.0");
+        }
+        let cfg = run_config_from_env();
+        clear_elo_env();
+        assert!((cfg.promotion_elo_delta - 30.0).abs() < f32::EPSILON);
+    }
 }
