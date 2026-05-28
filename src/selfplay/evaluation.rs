@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use pyo3::prelude::*;
 use tokio::sync::watch;
 
 use crate::PrecomputedItems;
@@ -79,6 +80,15 @@ pub struct EvaluationTask {
     /// Champion backend handle for hot-swap. When None, champion uses a closure-based
     /// approach (the champion_store is the source of truth).
     champion_backend: Option<Arc<Mutex<Box<dyn crate::selfplay::inference::InferenceBackend>>>>,
+    /// Opponent evaluator used for pool ladder games. The opponent batcher
+    /// is shared across all pool members — weights are swapped via
+    /// `opponent_server_handle` before each opponent's games.
+    opponent_evaluator: Option<Arc<dyn Evaluator>>,
+    /// Direct handle to the Python `InferenceServer` backing `opponent_evaluator`,
+    /// used to call `load_weights(bytes)` between pool members. When `None`, the
+    /// Elo-ladder code path is skipped and the task falls back to the legacy
+    /// single-opponent (champion) eval.
+    opponent_server_handle: Option<Arc<Mutex<Py<PyAny>>>>,
     config: EvaluationConfig,
     cycle: u64,
     total_games_since_last_promotion: usize,
@@ -101,6 +111,8 @@ impl EvaluationTask {
             latest_checkpoint_path,
             champion_store,
             champion_backend: None,
+            opponent_evaluator: None,
+            opponent_server_handle: None,
             config,
             cycle: 0,
             total_games_since_last_promotion: 0,
@@ -113,6 +125,21 @@ impl EvaluationTask {
         backend: Arc<Mutex<Box<dyn crate::selfplay::inference::InferenceBackend>>>,
     ) -> Self {
         self.champion_backend = Some(backend);
+        self
+    }
+
+    /// Attach the opponent evaluator + its `InferenceServer` handle for the
+    /// pool-based Elo ladder. When set, each cycle iterates over archived
+    /// `best_v{NNN}.pt` files, calls `load_weights(bytes)` on the held server,
+    /// and plays `2 * games_per_side` games per pool member against this
+    /// evaluator. When unset, the task falls back to single-opponent eval.
+    pub fn with_opponent(
+        mut self,
+        evaluator: Arc<dyn Evaluator>,
+        server_handle: Arc<Mutex<Py<PyAny>>>,
+    ) -> Self {
+        self.opponent_evaluator = Some(evaluator);
+        self.opponent_server_handle = Some(server_handle);
         self
     }
 
@@ -401,6 +428,121 @@ mod tests {
         assert!(result.is_ok());
         // With threshold=0.0, champion_version should have been updated to 5.
         assert_eq!(store_ref.version(), 5, "champion_version should be 5 after forced promotion");
+    }
+
+    /// Verify the opponent `Py<PyAny>` reload path swaps actual weights into a held
+    /// `InferenceServer`. Mirrors `python/tests/test_inference.py:102-138` byte-format:
+    /// drive a `Trainer` for a handful of steps, dump weights, call `load_weights` via
+    /// the held handle, and assert `root_setup_batch` output differs pre- vs. post-load.
+    #[test]
+    #[ignore = "requires hyzero Python package"]
+    fn opponent_load_weights_changes_root_setup_output() {
+        use pyo3::types::PyBytes;
+
+        let result: pyo3::PyResult<()> = Python::attach(|py| {
+            // Build two InferenceServers with the same config (defaults to "cpu").
+            let cfg_mod = PyModule::import(py, "hyzero.config")?;
+            let cfg = cfg_mod.getattr("DEFAULT_CONFIG")?;
+            let srv_cls = PyModule::import(py, "hyzero.inference.server")?
+                .getattr("InferenceServer")?;
+            let server: Py<PyAny> = srv_cls.call1((cfg.clone(), "cpu"))?.unbind();
+
+            // Hold a directly cloned handle, as EvaluationTask does.
+            let opp_handle: Arc<Mutex<Py<PyAny>>> =
+                Arc::new(Mutex::new(server.clone_ref(py)));
+
+            // Build a numpy obs batch of shape [2, INPUT_PLANES, 8, 8]; pull
+            // INPUT_PLANES from the config to keep this independent of constants.
+            let np = PyModule::import(py, "numpy")?;
+            let input_planes: usize = cfg
+                .cast::<pyo3::types::PyDict>()?
+                .get_item("input_planes")?
+                .ok_or_else(|| {
+                    pyo3::exceptions::PyKeyError::new_err("input_planes not in config")
+                })?
+                .extract()?;
+            let randn = np.getattr("random")?.getattr("randn")?;
+            let obs_f64 = randn.call1((2, input_planes, 8, 8))?;
+            let obs = obs_f64.call_method1("astype", ("float32",))?;
+
+            // Capture pre-load output (policies tensor index 1).
+            let pre = server
+                .call_method1(py, "root_setup_batch", (obs.clone(),))?;
+            let policies_before = pre.bind(py).get_item(1)?.unbind();
+
+            // Drive a Trainer for a few steps to diverge from init weights.
+            let trainer_cls = PyModule::import(py, "hyzero.training.trainer")?
+                .getattr("Trainer")?;
+            let trainer = trainer_cls.call1(("cpu",))?;
+            let num_actions: usize = cfg
+                .cast::<pyo3::types::PyDict>()?
+                .get_item("num_actions")?
+                .ok_or_else(|| {
+                    pyo3::exceptions::PyKeyError::new_err("num_actions not in config")
+                })?
+                .extract()?;
+            let batch = pyo3::types::PyDict::new(py);
+            let zeros = np.getattr("zeros")?;
+            let full = np.getattr("full")?;
+            batch.set_item(
+                "observations",
+                randn
+                    .call1((4, 4, input_planes, 8, 8))?
+                    .call_method1("astype", ("float32",))?,
+            )?;
+            batch.set_item(
+                "actions",
+                randn
+                    .call1((4, 3, 3, 8, 8))?
+                    .call_method1("astype", ("float32",))?,
+            )?;
+            batch.set_item(
+                "target_policies",
+                full.call1(((4, 4, num_actions), 1.0_f64 / num_actions as f64))?
+                    .call_method1("astype", ("float32",))?,
+            )?;
+            batch.set_item(
+                "target_values",
+                zeros
+                    .call1(((4, 4),))?
+                    .call_method1("astype", ("float32",))?,
+            )?;
+            batch.set_item(
+                "target_rewards",
+                zeros
+                    .call1(((4, 4),))?
+                    .call_method1("astype", ("float32",))?,
+            )?;
+            for _ in 0..5 {
+                trainer.call_method1("train_batch", (batch.clone(),))?;
+            }
+            let weight_bytes: Vec<u8> = trainer
+                .call_method0("get_weights")?
+                .extract()?;
+
+            // Apply weights via the held handle (the exact path used by EvaluationTask).
+            {
+                let guard = opp_handle.lock().unwrap();
+                guard
+                    .call_method1(py, "load_weights", (PyBytes::new(py, &weight_bytes),))?;
+            }
+
+            // Capture post-load output and verify it differs.
+            let post = server
+                .call_method1(py, "root_setup_batch", (obs,))?;
+            let policies_after = post.bind(py).get_item(1)?.unbind();
+
+            let allclose = np
+                .getattr("allclose")?
+                .call1((policies_before, policies_after, 1e-6_f64))?
+                .extract::<bool>()?;
+            assert!(
+                !allclose,
+                "policies unchanged after load_weights — weights may not have been loaded"
+            );
+            Ok(())
+        });
+        result.expect("opponent load_weights test failed");
     }
 
     /// Validate win_rate sign convention for Black-side games.

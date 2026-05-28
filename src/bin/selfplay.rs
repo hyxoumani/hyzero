@@ -349,6 +349,53 @@ async fn main() {
         println!("[selfplay] Weight loader stopped");
     });
 
+    // 7b. Spawn an additional InferenceServer + batcher dedicated to the
+    //     opponent (pool) side of the Elo ladder. Weights are reloaded from
+    //     `checkpoints/best_v{NNN}.pt` once per pool member per cycle by the
+    //     `EvaluationTask`. The server starts uninitialized; if the pool is
+    //     empty (bootstrap), the ladder falls back to the legacy win-rate gate
+    //     and this opponent batcher sits idle.
+    println!("[selfplay] Creating opponent InferenceServer (Elo ladder)...");
+    let (opponent_server, opponent_hidden_channels): (Py<PyAny>, usize) = Python::attach(|py| {
+        let config_obj = PyModule::import(py, "hyzero.config")
+            .expect("hyzero Python package not found")
+            .getattr("DEFAULT_CONFIG")
+            .expect("DEFAULT_CONFIG missing")
+            .into_pyobject(py)
+            .expect("into_pyobject failed");
+        let hc: usize = config_obj
+            .cast::<PyDict>()
+            .expect("DEFAULT_CONFIG is not a dict")
+            .get_item("hidden_channels")
+            .expect("hidden_channels lookup failed")
+            .expect("hidden_channels not in DEFAULT_CONFIG")
+            .extract()
+            .expect("hidden_channels is not a usize");
+        let config_unbound = config_obj.unbind();
+        let cls = PyModule::import(py, "hyzero.inference.server")
+            .expect("hyzero.inference.server not found")
+            .getattr("InferenceServer")
+            .expect("InferenceServer class not found");
+        let srv: Py<PyAny> = cls
+            .call1((config_unbound, device.as_str()))
+            .expect("opponent InferenceServer() constructor failed")
+            .unbind();
+        (srv, hc)
+    });
+    // Direct Py<PyAny> handle for the EvaluationTask to call `load_weights`.
+    let opponent_server_handle: Arc<std::sync::Mutex<Py<PyAny>>> = Arc::new(
+        std::sync::Mutex::new(Python::attach(|py| opponent_server.clone_ref(py))),
+    );
+    let (opponent_tx, opponent_rx) = mpsc::channel(256);
+    let opponent_backend = Box::new(PyO3Backend::new(opponent_server, opponent_hidden_channels));
+    let mut opponent_batcher =
+        InferenceBatcher::new(opponent_rx, opponent_backend, batcher_config.clone());
+    tokio::spawn(async move {
+        opponent_batcher.run().await;
+        println!("[selfplay] Opponent inference batcher stopped");
+    });
+    let opponent_evaluator: Arc<dyn Evaluator> = Arc::new(ChannelEvaluator::new(opponent_tx));
+
     // 8. Create evaluator and coordinator.
     let evaluator: Arc<dyn Evaluator> = Arc::new(ChannelEvaluator::new(inference_tx.clone()));
 
@@ -415,7 +462,8 @@ async fn main() {
         champion_store,
         eval_config,
     )
-    .with_champion_backend(champion_backend_handle);
+    .with_champion_backend(champion_backend_handle)
+    .with_opponent(opponent_evaluator, opponent_server_handle);
 
     let mut eval_task = eval_task_obj;
     tokio::spawn(async move {
