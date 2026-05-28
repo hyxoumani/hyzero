@@ -447,6 +447,7 @@ async fn main() {
         temperature_moves: config.temperature_moves,
         poll_interval_ms: 500,
         champion_score_weight: config.champion_score_weight,
+        ..EvaluationConfig::default()
     };
 
     println!(

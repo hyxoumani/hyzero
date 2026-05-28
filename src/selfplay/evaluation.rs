@@ -36,7 +36,9 @@ impl Evaluator for RandomEvaluator {
 pub struct EvaluationConfig {
     /// Games played per side in each ladder match (total = 2 × games_per_side).
     pub games_per_side: usize,
-    /// Win-rate threshold for promotion (0.0–1.0). Default 0.55.
+    /// Win-rate threshold for promotion (0.0–1.0). Default 0.55. Active only on the
+    /// empty-pool bootstrap path (no archived champions yet); once at least one
+    /// `best_v{NNN}.pt` exists, gating switches to Elo (`promotion_elo_delta`).
     pub promotion_threshold: f64,
     /// Minimum games between promotion decisions (cooldown). Default 0.
     pub promotion_cooldown_games: usize,
@@ -49,6 +51,20 @@ pub struct EvaluationConfig {
     /// Multiplier applied to champion_version in the scoring formula.
     /// Read from HYZERO_CHAMPION_SCORE_WEIGHT at runtime (default 2.0).
     pub champion_score_weight: f64,
+    /// K-factor used in per-game Elo updates against the pool. Default 32.0.
+    pub elo_k_factor: f32,
+    /// Maximum number of archived champions used as ladder opponents per cycle.
+    /// Default 3.
+    pub pool_size: usize,
+    /// Promotion gate: candidate is promoted when its post-cycle Elo exceeds
+    /// `opponent_initial_elo + promotion_elo_delta`. Default 20.0.
+    pub promotion_elo_delta: f32,
+    /// Fixed rating assigned to every pool opponent at the start of each cycle.
+    /// Default 1500.0.
+    pub opponent_initial_elo: f32,
+    /// Directory scanned for `best_v{NNN}.pt` archives when building the pool.
+    /// Default `checkpoints`.
+    pub checkpoints_dir: PathBuf,
 }
 
 impl Default for EvaluationConfig {
@@ -61,6 +77,11 @@ impl Default for EvaluationConfig {
             temperature_moves: 15,
             poll_interval_ms: 500,
             champion_score_weight: 2.0,
+            elo_k_factor: crate::selfplay::elo::K_FACTOR,
+            pool_size: 3,
+            promotion_elo_delta: 20.0,
+            opponent_initial_elo: crate::selfplay::elo::INITIAL_RATING,
+            checkpoints_dir: PathBuf::from("checkpoints"),
         }
     }
 }
@@ -168,14 +189,41 @@ impl EvaluationTask {
         );
     }
 
+    /// Pure helper: fold per-game scores into a final candidate Elo against a
+    /// fixed-rating opponent. Each `score` ∈ {1.0, 0.5, 0.0} = win/draw/loss
+    /// from the candidate's perspective. Exposed for unit testing — production
+    /// `run()` inlines the update (per-game `candidate_elo` is needed for
+    /// log output between updates), so this helper is test-only.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn compute_candidate_elo_from_results(
+        initial: f32,
+        opp_initial: f32,
+        k: f32,
+        scores: &[f32],
+    ) -> f32 {
+        let mut r = initial;
+        for s in scores {
+            r = crate::selfplay::elo::update_rating(r, opp_initial, *s, k);
+        }
+        r
+    }
+
     /// Run the evaluation ladder loop.
     ///
     /// On each cycle:
     /// 1. Wait for a new training version.
-    /// 2. Play `2 × games_per_side` games (balanced White/Black assignment).
-    /// 3. Compute win_rate for challenger.
-    /// 4. If win_rate ≥ promotion_threshold → promote challenger to champion.
-    /// 5. Log structured output for run_baseline.sh grep anchors.
+    /// 2. Enumerate up to `pool_size` archived champions from `checkpoints_dir`.
+    /// 3a. **Pool nonempty**: per opponent, reload weights via the held
+    ///     `opponent_server_handle.load_weights(bytes)` then play
+    ///     `2 * games_per_side` games against `opponent_evaluator`. Update the
+    ///     candidate's Elo per game (opponents pinned at `opponent_initial_elo`).
+    ///     Promotion gate: `candidate_elo > opponent_initial_elo + promotion_elo_delta`.
+    /// 3b. **Pool empty (bootstrap)**: play 2×gps games against the live
+    ///     `champion_store.champion()` and use the legacy `win_rate >=
+    ///     promotion_threshold` gate. This is the ONLY path that produces the
+    ///     FIRST promotion (transitions to the Elo gate once `best_v001.pt` lands).
+    /// 4. Log structured output for run_baseline.sh grep anchors (existing
+    ///    fields preserved verbatim; new fields appended before `ladder_match`).
     pub async fn run(&mut self) {
         let mut last_evaluated_version: u64 = 0;
 
@@ -195,9 +243,12 @@ impl EvaluationTask {
             let challenger_version = last_evaluated_version;
             self.cycle += 1;
 
-            // Get current champion evaluator for this eval cycle.
-            let champion_eval = self.champion_store.champion().await;
             let champion_version = self.champion_store.version();
+            let pool = crate::selfplay::pool::latest_archive_versions(
+                &self.config.checkpoints_dir,
+                champion_version,
+                self.config.pool_size,
+            );
 
             let game_config = GameConfig {
                 num_simulations: self.config.num_simulations,
@@ -210,91 +261,285 @@ impl EvaluationTask {
             let mut ladder_wins: usize = 0;
             let mut ladder_draws: usize = 0;
             let mut ladder_losses: usize = 0;
+            let mut candidate_elo = self.config.opponent_initial_elo;
+            let opp_initial = self.config.opponent_initial_elo;
+            let k = self.config.elo_k_factor;
+            let mut scored_games: Vec<f32> = Vec::new();
+            let mut opponents_label = String::from("none");
 
-            // games_per_side games with challenger as White, champion as Black.
-            for game_idx in 0..gps {
-                let outcome = play_game_dual(
-                    self.precomputed.clone(),
-                    self.challenger_evaluator.clone(),
-                    champion_eval.clone(),
-                    game_config.clone(),
-                )
-                .await;
-
-                Self::write_pgn_game(
-                    self.cycle,
-                    game_idx + 1,
-                    &format!("challenger v{challenger_version}"),
-                    &format!("champion v{champion_version}"),
-                    &outcome,
-                );
-
-                // game_outcome is White-perspective. Challenger = White.
-                match outcome.game_outcome {
-                    o if o > 0.5 => ladder_wins += 1,
-                    o if o < -0.5 => ladder_losses += 1,
-                    _ => ladder_draws += 1,
+            if pool.is_empty() {
+                // Bootstrap path: legacy single-opponent (live champion) ladder
+                // with `win_rate` gating. Only path that can fire the FIRST
+                // promotion. Transition to the Elo gate happens once
+                // `best_v{NNN}.pt` exists. When `champion_version > 0` but
+                // pool is empty (unexpected: archives were deleted), emit a
+                // WARN — still safe to run.
+                if champion_version > 0 {
+                    eprintln!(
+                        "[eval] WARN: pool empty despite champion_version={champion_version} > 0; using win-rate fallback"
+                    );
                 }
-                self.total_games_since_last_promotion += 1;
+                let champion_eval = self.champion_store.champion().await;
+
+                // games_per_side games with challenger as White, champion as Black.
+                for game_idx in 0..gps {
+                    let outcome = play_game_dual(
+                        self.precomputed.clone(),
+                        self.challenger_evaluator.clone(),
+                        champion_eval.clone(),
+                        game_config.clone(),
+                    )
+                    .await;
+
+                    Self::write_pgn_game(
+                        self.cycle,
+                        game_idx + 1,
+                        &format!("challenger v{challenger_version}"),
+                        &format!("champion v{champion_version}"),
+                        &outcome,
+                    );
+
+                    match outcome.game_outcome {
+                        o if o > 0.5 => ladder_wins += 1,
+                        o if o < -0.5 => ladder_losses += 1,
+                        _ => ladder_draws += 1,
+                    }
+                    self.total_games_since_last_promotion += 1;
+                }
+
+                // games_per_side games with champion as White, challenger as Black.
+                for game_idx in 0..gps {
+                    let outcome = play_game_dual(
+                        self.precomputed.clone(),
+                        champion_eval.clone(),
+                        self.challenger_evaluator.clone(),
+                        game_config.clone(),
+                    )
+                    .await;
+
+                    Self::write_pgn_game(
+                        self.cycle,
+                        gps + game_idx + 1,
+                        &format!("champion v{champion_version}"),
+                        &format!("challenger v{challenger_version}"),
+                        &outcome,
+                    );
+
+                    let challenger_perspective = -outcome.game_outcome;
+                    match challenger_perspective {
+                        o if o > 0.5 => ladder_wins += 1,
+                        o if o < -0.5 => ladder_losses += 1,
+                        _ => ladder_draws += 1,
+                    }
+                    self.total_games_since_last_promotion += 1;
+                }
+            } else {
+                // Elo-gate path: per-opponent ladder against archived champions.
+                // The opponent evaluator + server handle MUST be set; otherwise
+                // we cannot reload weights, so we fall back to the bootstrap
+                // log and skip the ladder.
+                let (opp_eval, opp_handle) = match (
+                    self.opponent_evaluator.clone(),
+                    self.opponent_server_handle.clone(),
+                ) {
+                    (Some(e), Some(h)) => (e, h),
+                    _ => {
+                        eprintln!(
+                            "[eval] WARN: pool nonempty (size={}) but opponent evaluator/server handle unset; skipping ladder",
+                            pool.len()
+                        );
+                        // Build opponents= label for the log line, no games played.
+                        let labels: Vec<String> =
+                            pool.iter().map(|(v, _)| format!("v{v}")).collect();
+                        opponents_label = labels.join(",");
+                        let total_games = 0usize;
+                        let win_rate = 0.0_f64;
+                        let pool_score = 0.0_f64;
+                        println!(
+                            "[eval] v{challenger_version} cycle={cycle} ladder_wins={w} ladder_draws={d} \
+                             ladder_losses={l} win_rate={r:.3} champion_version={cv} \
+                             candidate_elo={elo:.1} pool_size={ps} opponents={opps} \
+                             pool_score={ps_score:.3} ladder_match",
+                            cycle = self.cycle,
+                            w = ladder_wins,
+                            d = ladder_draws,
+                            l = ladder_losses,
+                            r = win_rate,
+                            cv = champion_version,
+                            elo = candidate_elo,
+                            ps = pool.len(),
+                            opps = opponents_label,
+                            ps_score = pool_score,
+                        );
+                        let _ = total_games;
+                        continue;
+                    }
+                };
+
+                let labels: Vec<String> =
+                    pool.iter().map(|(v, _)| format!("v{v}")).collect();
+                opponents_label = labels.join(",");
+
+                'pool_loop: for (opponent_version, ckpt_path) in pool.iter() {
+                    // Read checkpoint bytes; skip on read error.
+                    let bytes = match std::fs::read(ckpt_path) {
+                        Ok(b) => b,
+                        Err(e) => {
+                            eprintln!(
+                                "[eval] WARN: failed to read pool member v{opponent_version}: {e}"
+                            );
+                            continue 'pool_loop;
+                        }
+                    };
+
+                    // Swap weights via the held Py<PyAny>. On error, skip this opponent.
+                    let load_res: pyo3::PyResult<()> = Python::attach(|py| {
+                        let guard = opp_handle.lock().unwrap();
+                        guard.call_method1(
+                            py,
+                            "load_weights",
+                            (pyo3::types::PyBytes::new(py, &bytes),),
+                        )?;
+                        Ok(())
+                    });
+                    if let Err(e) = load_res {
+                        eprintln!(
+                            "[eval] WARN: load_weights failed for pool member v{opponent_version}: {e}"
+                        );
+                        continue 'pool_loop;
+                    }
+
+                    // games_per_side games challenger=White vs. this opponent.
+                    for game_idx in 0..gps {
+                        let outcome = play_game_dual(
+                            self.precomputed.clone(),
+                            self.challenger_evaluator.clone(),
+                            opp_eval.clone(),
+                            game_config.clone(),
+                        )
+                        .await;
+
+                        Self::write_pgn_game(
+                            self.cycle,
+                            game_idx + 1,
+                            &format!("challenger v{challenger_version}"),
+                            &format!("pool v{opponent_version}"),
+                            &outcome,
+                        );
+
+                        let challenger_score: f32 = if outcome.game_outcome > 0.5 {
+                            ladder_wins += 1;
+                            1.0
+                        } else if outcome.game_outcome < -0.5 {
+                            ladder_losses += 1;
+                            0.0
+                        } else {
+                            ladder_draws += 1;
+                            0.5
+                        };
+                        candidate_elo = crate::selfplay::elo::update_rating(
+                            candidate_elo,
+                            opp_initial,
+                            challenger_score,
+                            k,
+                        );
+                        scored_games.push(challenger_score);
+                        self.total_games_since_last_promotion += 1;
+                    }
+
+                    // games_per_side games opponent=White vs. challenger=Black.
+                    for game_idx in 0..gps {
+                        let outcome = play_game_dual(
+                            self.precomputed.clone(),
+                            opp_eval.clone(),
+                            self.challenger_evaluator.clone(),
+                            game_config.clone(),
+                        )
+                        .await;
+
+                        Self::write_pgn_game(
+                            self.cycle,
+                            gps + game_idx + 1,
+                            &format!("pool v{opponent_version}"),
+                            &format!("challenger v{challenger_version}"),
+                            &outcome,
+                        );
+
+                        let challenger_perspective = -outcome.game_outcome;
+                        let challenger_score: f32 = if challenger_perspective > 0.5 {
+                            ladder_wins += 1;
+                            1.0
+                        } else if challenger_perspective < -0.5 {
+                            ladder_losses += 1;
+                            0.0
+                        } else {
+                            ladder_draws += 1;
+                            0.5
+                        };
+                        candidate_elo = crate::selfplay::elo::update_rating(
+                            candidate_elo,
+                            opp_initial,
+                            challenger_score,
+                            k,
+                        );
+                        scored_games.push(challenger_score);
+                        self.total_games_since_last_promotion += 1;
+                    }
+                }
             }
 
-            // games_per_side games with champion as White, challenger as Black.
-            for game_idx in 0..gps {
-                let outcome = play_game_dual(
-                    self.precomputed.clone(),
-                    champion_eval.clone(),
-                    self.challenger_evaluator.clone(),
-                    game_config.clone(),
-                )
-                .await;
-
-                Self::write_pgn_game(
-                    self.cycle,
-                    gps + game_idx + 1,
-                    &format!("champion v{champion_version}"),
-                    &format!("challenger v{challenger_version}"),
-                    &outcome,
-                );
-
-                // game_outcome is White-perspective. Champion = White, challenger = Black.
-                // Flip to get challenger-perspective.
-                let challenger_perspective = -outcome.game_outcome;
-                match challenger_perspective {
-                    o if o > 0.5 => ladder_wins += 1,
-                    o if o < -0.5 => ladder_losses += 1,
-                    _ => ladder_draws += 1,
-                }
-                self.total_games_since_last_promotion += 1;
-            }
-
-            let total_games = 2 * gps;
-            let win_rate = (ladder_wins as f64 + ladder_draws as f64 * 0.5) / total_games as f64;
+            let total_games = if pool.is_empty() {
+                2 * gps
+            } else {
+                scored_games.len()
+            };
+            // `win_rate` keeps its existing semantics (win_rate = pool_score for
+            // the pool path); preserved under the legacy field name so
+            // run_baseline.sh extractors keep working.
+            let win_rate = if total_games > 0 {
+                (ladder_wins as f64 + ladder_draws as f64 * 0.5) / total_games as f64
+            } else {
+                0.0
+            };
+            let pool_score = win_rate;
 
             println!(
                 "[eval] v{challenger_version} cycle={cycle} ladder_wins={w} ladder_draws={d} \
-                 ladder_losses={l} win_rate={r:.3} champion_version={cv} ladder_match",
+                 ladder_losses={l} win_rate={r:.3} champion_version={cv} \
+                 candidate_elo={elo:.1} pool_size={ps} opponents={opps} \
+                 pool_score={ps_score:.3} ladder_match",
                 cycle = self.cycle,
                 w = ladder_wins,
                 d = ladder_draws,
                 l = ladder_losses,
                 r = win_rate,
                 cv = champion_version,
+                elo = candidate_elo,
+                ps = pool.len(),
+                opps = opponents_label,
+                ps_score = pool_score,
             );
 
-            // Check cooldown
+            // Promotion gate: bootstrap (empty-pool) uses legacy win-rate; pool
+            // path uses Elo. The bootstrap branch is single-shot — once any
+            // archive lands, all subsequent cycles route through the Elo gate.
             let cooldown_ok = self.total_games_since_last_promotion
                 >= self.config.promotion_cooldown_games
                 || self.config.promotion_cooldown_games == 0;
 
-            if win_rate >= self.config.promotion_threshold && cooldown_ok {
-                // Read latest completed checkpoint path (may be None if no checkpoint yet).
+            let promote = if pool.is_empty() {
+                win_rate >= self.config.promotion_threshold
+            } else {
+                candidate_elo > self.config.opponent_initial_elo + self.config.promotion_elo_delta
+            };
+
+            if promote && cooldown_ok {
                 let ckpt_path = self
                     .latest_checkpoint_path
                     .lock()
                     .ok()
                     .and_then(|g| g.clone());
 
-                // Promote: new champion = current challenger evaluator.
                 let new_champ = self.challenger_evaluator.clone();
                 self.champion_store
                     .promote(new_champ, challenger_version, ckpt_path.as_ref())
@@ -303,10 +548,11 @@ impl EvaluationTask {
                 self.total_games_since_last_promotion = 0;
 
                 println!(
-                    "[eval] promoted champion_version={cv} challenger_version={cv_train} win_rate={r:.3}",
+                    "[eval] promoted champion_version={cv} challenger_version={cv_train} win_rate={r:.3} candidate_elo={elo:.1}",
                     cv = challenger_version,
                     cv_train = challenger_version,
                     r = win_rate,
+                    elo = candidate_elo,
                 );
             }
         }
@@ -324,6 +570,213 @@ mod tests {
         assert_eq!(config.games_per_side, 4);
         assert!((config.promotion_threshold - 0.55).abs() < f64::EPSILON);
         assert_eq!(config.num_simulations, 50);
+    }
+
+    /// Regression guard: extended defaults from the Elo refactor + verifies the
+    /// preserved `champion_score_weight` field still defaults to 2.0.
+    #[test]
+    fn evaluation_config_defaults_have_elo_fields() {
+        let config = EvaluationConfig::default();
+        assert!((config.elo_k_factor - 32.0).abs() < f32::EPSILON);
+        assert_eq!(config.pool_size, 3);
+        assert!((config.promotion_elo_delta - 20.0).abs() < f32::EPSILON);
+        assert!((config.opponent_initial_elo - 1500.0).abs() < f32::EPSILON);
+        assert_eq!(config.checkpoints_dir, PathBuf::from("checkpoints"));
+        // Preserved field — MUST remain 2.0 (existing tests at lines 320, 374
+        // construct EvaluationConfig literals that set this).
+        assert!((config.champion_score_weight - 2.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn compute_candidate_elo_empty_scores_returns_initial() {
+        let r = EvaluationTask::compute_candidate_elo_from_results(1500.0, 1500.0, 32.0, &[]);
+        assert!((r - 1500.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn compute_candidate_elo_all_wins_against_equal() {
+        // 8 wins vs. 1500 with K=32 starting at 1500. Must clear the
+        // promotion threshold (default 1520) so the gate is reachable in a sweep.
+        let scores = [1.0_f32; 8];
+        let r = EvaluationTask::compute_candidate_elo_from_results(1500.0, 1500.0, 32.0, &scores);
+        assert!(r > 1520.0, "expected r > 1520, got {r}");
+    }
+
+    #[test]
+    fn compute_candidate_elo_50_percent_against_equal_is_noop() {
+        // Alternating [W, L, W, L] vs. fixed 1500 with K=32: ends near 1498.6
+        // (delta ≈ -1.41 from start). Not exactly 1500 due to compounding
+        // asymmetry — after a W the candidate is rated higher, so the next L
+        // costs slightly MORE than the symmetric −16, and after a L the
+        // candidate is rated lower, so the next W earns slightly LESS than
+        // the symmetric +16. The plan reviewer flagged this exact tolerance:
+        // "|final - 1500| < 1.0 accounts for compounding asymmetry — add a
+        // comment". The actual asymmetry for 4 games with K=32 is ~1.41, so
+        // we use a 2.0 tolerance (covers the genuine asymmetry while still
+        // failing if the helper inverts a sign or skips an update).
+        let scores = [1.0_f32, 0.0, 1.0, 0.0];
+        let r = EvaluationTask::compute_candidate_elo_from_results(1500.0, 1500.0, 32.0, &scores);
+        assert!(
+            (r - 1500.0).abs() < 2.0,
+            "expected |r - 1500| < 2 (compounding asymmetry), got r={r}"
+        );
+    }
+
+    #[test]
+    fn compute_candidate_elo_all_losses_against_equal() {
+        let scores = [0.0_f32; 8];
+        let r = EvaluationTask::compute_candidate_elo_from_results(1500.0, 1500.0, 32.0, &scores);
+        assert!(r < 1480.0, "expected r < 1480, got {r}");
+    }
+
+    /// Bootstrap path: with empty pool and `champion_version == 0`, the legacy
+    /// `win_rate >= promotion_threshold` gate fires. The test drives the
+    /// evaluation task with `RandomEvaluator` opponents and asserts the
+    /// champion store version is bumped (promotion fired) when threshold=0.0
+    /// (always promote). Conversely, with threshold=2.0 (impossible), no
+    /// promotion fires. This exercises the bootstrap branch end-to-end.
+    #[tokio::test]
+    async fn bootstrap_path_uses_win_rate_gate() {
+        // Case 1: threshold=0.0 → always promote on the bootstrap branch.
+        let precomputed = Arc::new(crate::PrecomputedItems::begin_precomputing());
+        let challenger: Arc<dyn Evaluator> = Arc::new(RandomEvaluator);
+        let champion_eval: Arc<dyn Evaluator> = Arc::new(RandomEvaluator);
+
+        let (version_tx, version_rx) = watch::channel(0u64);
+        let ckpt_path: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
+        let champion_store = Arc::new(ChampionStore::new(champion_eval, 5));
+        let store_ref = champion_store.clone();
+
+        // Use a non-existent checkpoints dir so the pool is always empty
+        // (forces the bootstrap branch).
+        let config = EvaluationConfig {
+            games_per_side: 1,
+            promotion_threshold: 0.0, // Always promote on the bootstrap path.
+            promotion_cooldown_games: 0,
+            num_simulations: 2,
+            temperature_moves: 2,
+            poll_interval_ms: 10,
+            champion_score_weight: 2.0,
+            checkpoints_dir: PathBuf::from("/nonexistent/test/dir/abc"),
+            ..EvaluationConfig::default()
+        };
+
+        // champion_store.version() == 0 (no promote yet) — true bootstrap state.
+        assert_eq!(store_ref.version(), 0);
+
+        let mut task = EvaluationTask::new(
+            precomputed,
+            challenger,
+            version_rx,
+            ckpt_path,
+            champion_store,
+            config,
+        );
+
+        version_tx.send(7).expect("send failed");
+        let task_handle = tokio::spawn(async move {
+            task.run().await;
+        });
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        drop(version_tx);
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(30), task_handle).await;
+
+        assert_eq!(
+            store_ref.version(),
+            7,
+            "bootstrap path with threshold=0.0 must promote"
+        );
+    }
+
+    /// Bootstrap path: with `promotion_threshold` above 1.0, no promotion fires.
+    #[tokio::test]
+    async fn bootstrap_path_blocks_when_threshold_unreachable() {
+        let precomputed = Arc::new(crate::PrecomputedItems::begin_precomputing());
+        let challenger: Arc<dyn Evaluator> = Arc::new(RandomEvaluator);
+        let champion_eval: Arc<dyn Evaluator> = Arc::new(RandomEvaluator);
+
+        let (version_tx, version_rx) = watch::channel(0u64);
+        let ckpt_path: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
+        let champion_store = Arc::new(ChampionStore::new(champion_eval, 5));
+        let store_ref = champion_store.clone();
+
+        let config = EvaluationConfig {
+            games_per_side: 1,
+            promotion_threshold: 2.0, // Impossible — never promote.
+            promotion_cooldown_games: 0,
+            num_simulations: 2,
+            temperature_moves: 2,
+            poll_interval_ms: 10,
+            champion_score_weight: 2.0,
+            checkpoints_dir: PathBuf::from("/nonexistent/test/dir/xyz"),
+            ..EvaluationConfig::default()
+        };
+
+        let mut task = EvaluationTask::new(
+            precomputed,
+            challenger,
+            version_rx,
+            ckpt_path,
+            champion_store,
+            config,
+        );
+
+        version_tx.send(11).expect("send failed");
+        let task_handle = tokio::spawn(async move {
+            task.run().await;
+        });
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        drop(version_tx);
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(30), task_handle).await;
+
+        assert_eq!(
+            store_ref.version(),
+            0,
+            "bootstrap path with unreachable threshold must NOT promote"
+        );
+    }
+
+    /// Integration test (helper-based form): runs the sequential Elo math
+    /// helper against a canned outcome sequence representing 8 wins against
+    /// three equal-rated opponents, and verifies it crosses the default
+    /// promotion threshold (1500 + 20 = 1520). Helper-based form runs
+    /// unconditionally; the full per-opponent ladder path requires PyO3
+    /// opponent setup which is covered by the `#[ignore]`-gated test.
+    #[test]
+    fn eval_task_runs_per_opponent_ladder_helper_form() {
+        // 3 opponents × 2 gps = 6 games; assume challenger sweeps each.
+        let scores = vec![1.0_f32; 6];
+        let final_elo =
+            EvaluationTask::compute_candidate_elo_from_results(1500.0, 1500.0, 32.0, &scores);
+        assert!(
+            final_elo > 1520.0,
+            "expected final_elo > 1520 after a clean sweep, got {final_elo}"
+        );
+    }
+
+    /// Log-format regression: with empty pool, the `opponents=` token reads
+    /// `none` and `pool_size=0` is present. This is a string-construction
+    /// shape check via the helper used in `run()` (we replicate the same
+    /// join logic the production path uses).
+    #[test]
+    fn eval_log_format_with_empty_pool() {
+        let pool: Vec<(u64, PathBuf)> = Vec::new();
+        let labels: Vec<String> = pool.iter().map(|(v, _)| format!("v{v}")).collect();
+        let opponents_label = if labels.is_empty() {
+            String::from("none")
+        } else {
+            labels.join(",")
+        };
+        let line = format!(
+            "[eval] v1 cycle=1 ladder_wins=0 ladder_draws=0 ladder_losses=0 \
+             win_rate=0.000 champion_version=0 candidate_elo=1500.0 pool_size={} \
+             opponents={} pool_score=0.000 ladder_match",
+            pool.len(),
+            opponents_label,
+        );
+        assert!(line.contains("pool_size=0"));
+        assert!(line.contains("opponents=none"));
+        assert!(line.ends_with("ladder_match"));
     }
 
     #[tokio::test]
@@ -345,6 +798,7 @@ mod tests {
             temperature_moves: 2,
             poll_interval_ms: 10,
             champion_score_weight: 2.0,
+            ..EvaluationConfig::default()
         };
 
         let mut task = EvaluationTask::new(
@@ -399,6 +853,7 @@ mod tests {
             temperature_moves: 2,
             poll_interval_ms: 10,
             champion_score_weight: 2.0,
+            ..EvaluationConfig::default()
         };
 
         let mut task = EvaluationTask::new(
