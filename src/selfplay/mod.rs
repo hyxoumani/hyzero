@@ -1,6 +1,7 @@
 pub mod inference;
 pub mod game_task;
 pub mod coordinator;
+pub mod elo;
 pub mod evaluation;
 pub mod champion;
 pub mod pgn;
@@ -12,5 +13,6 @@ pub use inference::{
 };
 pub use game_task::{GameConfig, play_game, DualGameOutcome};
 pub use coordinator::{SelfPlayConfig, SelfPlayCoordinator};
+pub use elo::{expected_score, update_rating, INITIAL_RATING, K_FACTOR};
 pub use evaluation::{EvaluationConfig, EvaluationTask, RandomEvaluator};
 pub use champion::ChampionStore;
