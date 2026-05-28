@@ -213,15 +213,15 @@ impl EvaluationTask {
     /// On each cycle:
     /// 1. Wait for a new training version.
     /// 2. Enumerate up to `pool_size` archived champions from `checkpoints_dir`.
-    /// 3a. **Pool nonempty**: per opponent, reload weights via the held
-    ///     `opponent_server_handle.load_weights(bytes)` then play
-    ///     `2 * games_per_side` games against `opponent_evaluator`. Update the
-    ///     candidate's Elo per game (opponents pinned at `opponent_initial_elo`).
-    ///     Promotion gate: `candidate_elo > opponent_initial_elo + promotion_elo_delta`.
-    /// 3b. **Pool empty (bootstrap)**: play 2×gps games against the live
-    ///     `champion_store.champion()` and use the legacy `win_rate >=
-    ///     promotion_threshold` gate. This is the ONLY path that produces the
-    ///     FIRST promotion (transitions to the Elo gate once `best_v001.pt` lands).
+    /// 3. If pool is nonempty: per opponent, reload weights via the held
+    ///    `opponent_server_handle.load_weights(bytes)` then play
+    ///    `2 * games_per_side` games against `opponent_evaluator`. Update the
+    ///    candidate's Elo per game (opponents pinned at `opponent_initial_elo`).
+    ///    Promotion gate: `candidate_elo > opponent_initial_elo + promotion_elo_delta`.
+    ///    Otherwise (bootstrap): play 2×gps games against the live
+    ///    `champion_store.champion()` and use the legacy `win_rate >=
+    ///    promotion_threshold` gate. This is the ONLY path that produces the
+    ///    FIRST promotion (transitions to the Elo gate once `best_v001.pt` lands).
     /// 4. Log structured output for run_baseline.sh grep anchors (existing
     ///    fields preserved verbatim; new fields appended before `ladder_match`).
     pub async fn run(&mut self) {
