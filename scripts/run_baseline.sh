@@ -11,6 +11,7 @@ BATCH_SIZE=${HYZERO_BATCH_SIZE:-64}
 GAMES_PER_SIDE=${HYZERO_GAMES_PER_SIDE:-4}
 PROMOTION_THRESHOLD=${HYZERO_PROMOTION_THRESHOLD:-0.55}
 CHAMPION_SCORE_WEIGHT=${HYZERO_CHAMPION_SCORE_WEIGHT:-2.0}
+ELO_SCORE_WEIGHT=${HYZERO_ELO_SCORE_WEIGHT:-0.05}
 DEVICE=${HYZERO_DEVICE:-cuda}
 # Supervision data sources (validated 2026-04-21 through 2026-04-23).
 # Defaults are opt-in for the full stack; unset/override to disable.
@@ -203,20 +204,39 @@ if [ "$EVAL_CYCLES" -gt 0 ]; then
     # We use win_rate rather than decisive_ratio for the new ladder
     LAST_WIN_RATE=$(echo "$EVAL_SUMMARY" | awk '{last=$2} END{print last+0}')
     DECISIVE_RATIO=${LAST_WIN_RATE:-0.0}
+
+    # Extract per-cycle candidate Elo for the pool-based promotion gate.
+    # Falls back to 1500.0 (initial) on cycles that pre-date the field.
+    CANDIDATE_ELO_SUMMARY=$(awk '/\[eval\].*ladder_match/{
+        cycle++
+        elo = "1500.0"
+        for (i=1; i<=NF; i++) {
+            if ($i ~ /^candidate_elo=/) { split($i, a, "="); elo = a[2] }
+        }
+        print cycle, elo
+    }' "$LOG_FILE")
+    LAST_CANDIDATE_ELO=$(echo "$CANDIDATE_ELO_SUMMARY" | awk '{last=$2} END{print last+0}')
+    LAST_CANDIDATE_ELO=${LAST_CANDIDATE_ELO:-1500.0}
+
     # avg_length from game received logs
     EVAL_AVG_LEN=$AVG_STEPS
     echo "  Max champion_version: $MAX_CHAMPION_VERSION"
     echo "  Promotions: $PROMOTIONS"
     echo "  Last win_rate: $DECISIVE_RATIO"
+    echo "  Last candidate Elo:  $LAST_CANDIDATE_ELO"
 else
     EVAL_CYCLES=0
     DECISIVE_RATIO="0.0"
     EVAL_AVG_LEN="300.0"
+    LAST_CANDIDATE_ELO="1500.0"
 fi
 
 # ── Compute composite score ────────────────────────────────────
-# score = (8.55 - final_policy_loss) + (promotions * CHAMPION_SCORE_WEIGHT) - (avg_length / 100)
-# Higher is better. Rewards: fast policy learning, promotion count (not version tag), shorter games.
+# score = (8.55 - final_policy_loss) + (promotions * CHAMPION_SCORE_WEIGHT)
+#       - (avg_length / 100) + (last_candidate_elo - 1500.0) * ELO_SCORE_WEIGHT
+# Higher is better. Rewards: fast policy learning, promotion count (not version
+# tag), shorter games, and Elo progress against the archive pool. The Elo term
+# is signed (gains contribute, regressions subtract).
 # Note: max_champion_version is kept in JSON for debugging but NOT used in scoring.
 echo "[4/5] Computing score..."
 
@@ -226,7 +246,9 @@ SCORE=$(awk "BEGIN {
     promotions = $PROMOTIONS;
     weight = $CHAMPION_SCORE_WEIGHT;
     avg_len = $AVG_STEPS;
-    score = (init_loss - policy_loss) + (promotions * weight) - (avg_len / 100);
+    last_candidate_elo = $LAST_CANDIDATE_ELO;
+    elo_score_weight = $ELO_SCORE_WEIGHT;
+    score = (init_loss - policy_loss) + (promotions * weight) - (avg_len / 100) + (last_candidate_elo - 1500.0) * elo_score_weight;
     printf \"%.4f\", score
 }")
 
@@ -243,6 +265,7 @@ echo "  Eval cycles:         $EVAL_CYCLES"
 echo "  Promotions:          $PROMOTIONS"
 echo "  Max champion ver:    $MAX_CHAMPION_VERSION"
 echo "  Last win_rate:       $DECISIVE_RATIO"
+echo "  Last candidate Elo:  $LAST_CANDIDATE_ELO"
 echo "  Champion weight:     $CHAMPION_SCORE_WEIGHT"
 echo "  Checkpoints:         $CHECKPOINTS"
 echo "  Errors:              $ERRORS"
@@ -279,6 +302,7 @@ cat > "$BASELINE_FILE" << EOF
         "last_policy_loss": $LAST_POLICY,
         "avg_game_length": $AVG_STEPS,
         "last_win_rate": $DECISIVE_RATIO,
+        "last_candidate_elo": $LAST_CANDIDATE_ELO,
         "eval_cycles": $EVAL_CYCLES,
         "promotions": $PROMOTIONS,
         "max_champion_version": $MAX_CHAMPION_VERSION,
