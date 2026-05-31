@@ -1,0 +1,13 @@
+reviewed_to: df794b37e72ebf7fcb9be0f42c3a261ce374f843
+reviewed_from: aff97fbd5429d8908c900563d3c3983b516ad9a9
+range: aff97fb..df794b3
+date: 2026-05-31
+feature: elo-promotion
+focus: bugs
+findings: 5 low-severity, 0 medium, 0 high
+findings_summary:
+  - selfplay.rs:268 — resume-without-archive logs spurious "pool empty" WARN
+  - selfplay.rs:174-178 — HYZERO_PROMOTION_THRESHOLD notice always prints
+  - selfplay.rs:357-365 — unused champion_backend field (dead, pre-existing)
+  - evaluation.rs:264 — candidate elo coupled to opponent_initial_elo (intentional, hidden)
+  - selfplay.rs:21 vs pool.rs:16 — duplicate best_v{NNN}.pt parser, divergence risk
