@@ -1,0 +1,17 @@
+{
+  "last_reviewed_commit": "df794b3",
+  "last_reviewed_subject": "selfplay: fix doc-list indentation in eval task run() doc",
+  "review_date": "2026-06-03",
+  "reviewer": "claude-opus-4-7",
+  "scope": "aff97fb..df794b3",
+  "scope_description": "elo-promotion feature stack (10 commits)",
+  "focus": "bugs",
+  "findings": {
+    "blockers": 1,
+    "behavior_migration_notes": 2,
+    "latent_or_cosmetic": 4,
+    "portability": 1
+  },
+  "blocker_summary": "scripts/run_baseline.sh:219 — when EVAL_CYCLES>0 but ladder_match lines lack candidate_elo= tokens, awk emits 0 (not empty), so :-1500.0 default never fires; score formula then adds a phantom -75 Elo penalty to baseline composite score.",
+  "notes": "First baseline review on this branch — no prior marker. Subsequent reviews should diff from this commit forward."
+}
