@@ -1,0 +1,26 @@
+{
+  "reviewed_head": "df794b37e72ebf7fcb9be0f42c3a261ce374f843",
+  "reviewed_range_base": "aff97fbd5429d8908c900563d3c3983b516ad9a9",
+  "reviewed_feature": "elo-promotion ladder",
+  "reviewed_on": "2026-06-04",
+  "scope": "bugs only; commits 0ab40d4..df794b3 (11 commits)",
+  "verdict": "FIX BEFORE SHIP",
+  "open_high": [
+    "src/selfplay/evaluation.rs:340-377 — misleading ladder_match log when opponent handle unset (silent skip)",
+    "src/selfplay/evaluation.rs:526-534 — bootstrap cooldown bypassed on first promotion",
+    "src/selfplay/evaluation.rs:382-488 — per-opponent mid-pool failure silently skews candidate_elo + games count"
+  ],
+  "open_medium": [
+    "src/bin/selfplay.rs:174-178 — HYZERO_PROMOTION_THRESHOLD notice fires when value equals default",
+    "scripts/run_baseline.sh:218 — awk '{last+0}' silently coerces NaN/inf candidate_elo to 0",
+    "src/bin/selfplay.rs:443 — opponent inference server shared across pool; load_weights has no quiesce/barrier",
+    "src/selfplay/evaluation.rs:198-209 — compute_candidate_elo_from_results helper unused by production; integration test asserts on helper, not prod fold"
+  ],
+  "open_low": [
+    "src/selfplay/pool.rs:21-46 — read_dir race against concurrent archive writes (latent under single-promoter)"
+  ],
+  "clean": [
+    "src/selfplay/elo.rs:16-18 — expected_score math + sign convention"
+  ],
+  "next_review_starts_at": "df794b37e72ebf7fcb9be0f42c3a261ce374f843"
+}
