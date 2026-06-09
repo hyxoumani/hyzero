@@ -10,7 +10,12 @@ import torch
 
 from hyzero.config import DEFAULT_CONFIG
 from hyzero.training import Trainer
-from hyzero.training.trainer import _parse_loss_weight_env, _parse_lr_schedule_env, _reinit_value_head
+from hyzero.training.trainer import (
+    _antisym_probe_n,
+    _parse_loss_weight_env,
+    _parse_lr_schedule_env,
+    _reinit_value_head,
+)
 
 INPUT_PLANES = DEFAULT_CONFIG["input_planes"]   # 102
 NUM_ACTIONS = DEFAULT_CONFIG["num_actions"]     # 4672
@@ -305,3 +310,87 @@ def test_reinit_value_head_no_bias_offset(monkeypatch: pytest.MonkeyPatch) -> No
     assert abs(mean_output) < 0.3, (
         f"Expected mean value output near 0 without bias offset, got {mean_output:.4f}"
     )
+
+
+# --- Value-antisymmetry regularizer tests ---
+
+
+def _seeded_trainer_loss(batch: dict, seed: int = 7) -> float:
+    """Build a deterministically-seeded trainer and return one train_batch total_loss."""
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    trainer = Trainer(device="cpu")
+    return trainer.train_batch(batch)["total_loss"]
+
+
+def test_antisym_loss_zero_when_weight_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    """HYZERO_ANTISYM_LOSS_WEIGHT=0 (and unset) is a true no-op on total_loss.
+
+    Two identically-seeded trainers — one with the weight explicitly 0.0, one with
+    it unset — must produce a byte-identical total_loss, proving the regularizer adds
+    nothing (no extra forward passes, no loss change) for existing default runs.
+    """
+    np.random.seed(123)
+    batch = make_random_batch(batch_size=4, k_steps=3)
+
+    monkeypatch.delenv("HYZERO_ANTISYM_LOSS_WEIGHT", raising=False)
+    loss_unset = _seeded_trainer_loss(batch)
+
+    monkeypatch.setenv("HYZERO_ANTISYM_LOSS_WEIGHT", "0.0")
+    loss_zero = _seeded_trainer_loss(batch)
+
+    assert loss_zero == loss_unset, (
+        f"weight=0 must match unset exactly: {loss_zero} vs {loss_unset}"
+    )
+
+
+def test_antisym_loss_penalizes_nonantisymmetric_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With weight>0 and a value head that ignores POV, total_loss gains the penalty.
+
+    Stub the prediction head so v(obs)==v(flip(obs))==const != 0, the maximally
+    non-antisymmetric case where v+v_flip = 2*const. The squared-sum penalty is then
+    strictly positive, so the weighted total_loss must exceed the weight-0 baseline.
+    FAILS without the regularizer term (the two losses would be equal).
+    """
+    np.random.seed(321)
+    batch = make_random_batch(batch_size=4, k_steps=3)
+
+    def constant_value_f(self_f, hidden):
+        logits = torch.zeros(hidden.shape[0], NUM_ACTIONS, device=hidden.device)
+        value = torch.full((hidden.shape[0], 1), 0.5, device=hidden.device)
+        return logits, value
+
+    np.random.seed(7)
+    torch.manual_seed(7)
+    trainer_zero = Trainer(device="cpu")
+    trainer_zero.f.forward = constant_value_f.__get__(trainer_zero.f)
+    monkeypatch.setenv("HYZERO_ANTISYM_LOSS_WEIGHT", "0.0")
+    loss_zero = trainer_zero.train_batch(batch)["total_loss"]
+
+    np.random.seed(7)
+    torch.manual_seed(7)
+    trainer_pos = Trainer(device="cpu")
+    trainer_pos.f.forward = constant_value_f.__get__(trainer_pos.f)
+    monkeypatch.setenv("HYZERO_ANTISYM_LOSS_WEIGHT", "1.0")
+    loss_pos = trainer_pos.train_batch(batch)["total_loss"]
+
+    assert loss_pos > loss_zero, (
+        f"Antisym penalty must raise total_loss: pos={loss_pos} vs zero={loss_zero}"
+    )
+
+
+def test_antisym_probe_n_default_and_clamp(monkeypatch: pytest.MonkeyPatch) -> None:
+    """HYZERO_ANTISYM_PROBE_N defaults to 8, parses ints, and clamps to [1, 64]."""
+    monkeypatch.delenv("HYZERO_ANTISYM_PROBE_N", raising=False)
+    assert _antisym_probe_n() == 8
+
+    monkeypatch.setenv("HYZERO_ANTISYM_PROBE_N", "16")
+    assert _antisym_probe_n() == 16
+
+    monkeypatch.setenv("HYZERO_ANTISYM_PROBE_N", "0")
+    assert _antisym_probe_n() == 1
+
+    monkeypatch.setenv("HYZERO_ANTISYM_PROBE_N", "999")
+    assert _antisym_probe_n() == 64
