@@ -602,16 +602,8 @@ impl EvaluationTask {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::data::types::TestEnvGuard;
     use tokio::sync::watch;
-
-    /// Serialize tests that mutate the HYZERO_EVAL_ADJUDICATE* env vars. Rust
-    /// tests run in parallel by default and these vars are read per-call from
-    /// the process-global environment, so concurrent mutation would race.
-    /// Mirrors the lock pattern in replay_buffer.rs / game_task.rs.
-    fn env_lock() -> &'static std::sync::Mutex<()> {
-        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-        LOCK.get_or_init(|| std::sync::Mutex::new(()))
-    }
 
     /// Eval-side adjudication is wired into the `GameConfig` that drives
     /// `play_game_dual`: with `HYZERO_EVAL_ADJUDICATE` set truthy, the config
@@ -620,7 +612,7 @@ mod tests {
     /// `run()` (the S2 stub hard-coded `adjudicate_at_cap: false`).
     #[test]
     fn eval_game_config_enables_adjudication_when_env_set() {
-        let _guard = env_lock().lock().unwrap();
+        let _env = TestEnvGuard::new(&["HYZERO_EVAL_ADJUDICATE", "HYZERO_EVAL_ADJ_MARGIN"]);
         std::env::set_var("HYZERO_EVAL_ADJUDICATE", "1");
         std::env::set_var("HYZERO_EVAL_ADJ_MARGIN", "7");
         // Mirror the exact construction `run()` uses for the eval GameConfig.
@@ -637,15 +629,12 @@ mod tests {
 
         std::env::set_var("HYZERO_EVAL_ADJUDICATE", "0");
         assert!(!eval_adjudicate_enabled());
-
-        std::env::remove_var("HYZERO_EVAL_ADJUDICATE");
-        std::env::remove_var("HYZERO_EVAL_ADJ_MARGIN");
     }
 
     /// Default (env unset) keeps eval adjudication ON and the margin at 5.
     #[test]
     fn eval_adjudication_defaults_on_with_margin_five() {
-        let _guard = env_lock().lock().unwrap();
+        let _env = TestEnvGuard::new(&["HYZERO_EVAL_ADJUDICATE", "HYZERO_EVAL_ADJ_MARGIN"]);
         std::env::remove_var("HYZERO_EVAL_ADJUDICATE");
         std::env::remove_var("HYZERO_EVAL_ADJ_MARGIN");
         assert!(eval_adjudicate_enabled());

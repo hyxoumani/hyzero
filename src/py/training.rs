@@ -647,6 +647,7 @@ impl PyTrainingThread {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::data::types::TestEnvGuard;
     use crate::data::{BoardObservation, StepRecord};
 
     fn make_step_with_dist(dist: Vec<f32>) -> StepRecord {
@@ -1015,6 +1016,7 @@ mod tests {
     fn test_value_target_outcome_blend_white_root() {
         // Ensure env var is at the default 0.1 for this test.
         // Remove it in case a parent test set it to something else.
+        let _env = TestEnvGuard::new(&["HYZERO_VALUE_OUTCOME_BETA"]);
         std::env::remove_var("HYZERO_VALUE_OUTCOME_BETA");
 
         let k = 3usize;
@@ -1058,6 +1060,7 @@ mod tests {
     /// From Black's perspective at k=0: outcome is positive (+0.1).
     #[test]
     fn test_value_target_outcome_blend_black_root() {
+        let _env = TestEnvGuard::new(&["HYZERO_VALUE_OUTCOME_BETA"]);
         std::env::remove_var("HYZERO_VALUE_OUTCOME_BETA");
 
         let k = 3usize;
@@ -1100,6 +1103,7 @@ mod tests {
     /// No draw penalty is applied — draws just produce outcome_in_step_perspective = 0.
     #[test]
     fn test_value_target_outcome_blend_root_value_preserved() {
+        let _env = TestEnvGuard::new(&["HYZERO_VALUE_OUTCOME_BETA"]);
         std::env::remove_var("HYZERO_VALUE_OUTCOME_BETA");
 
         let k = 3usize;
@@ -1133,24 +1137,13 @@ mod tests {
         }
     }
 
-    /// Serialize tests that mutate env vars read during batch assembly.
-    ///
-    /// Rust tests run in parallel by default; env-var mutations are process-global.
-    /// Any test that reads or writes HYZERO_REWARD_OUTCOME_GAMMA,
-    /// HYZERO_VALUE_OUTCOME_BETA, or HYZERO_DISABLE_COLOR_AUG MUST hold this lock
-    /// for its full duration to prevent races with other env-mutating tests.
-    fn reward_gamma_env_lock() -> &'static std::sync::Mutex<()> {
-        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-        LOCK.get_or_init(|| std::sync::Mutex::new(()))
-    }
-
     /// γ=0.0 (default, no env var set) → reward targets equal raw step.reward.
     ///
     /// Verifies backward compatibility: when HYZERO_REWARD_OUTCOME_GAMMA is absent,
     /// the blend is a no-op and step.reward passes through unchanged.
     #[test]
     fn test_reward_target_blend_default() {
-        let _guard = reward_gamma_env_lock().lock().unwrap();
+        let _env = TestEnvGuard::new(&["HYZERO_REWARD_OUTCOME_GAMMA", "HYZERO_DISABLE_COLOR_AUG"]);
         std::env::remove_var("HYZERO_REWARD_OUTCOME_GAMMA");
         std::env::remove_var("HYZERO_DISABLE_COLOR_AUG");
 
@@ -1209,9 +1202,9 @@ mod tests {
     /// So target_reward = 0.5 * ply_flip (positive at even k, negative at odd k).
     #[test]
     fn test_reward_target_blend_with_outcome() {
-        let _guard = reward_gamma_env_lock().lock().unwrap();
+        let _env = TestEnvGuard::new(&["HYZERO_REWARD_OUTCOME_GAMMA", "HYZERO_DISABLE_COLOR_AUG"]);
         std::env::remove_var("HYZERO_DISABLE_COLOR_AUG");
-        // SAFETY: protected by reward_gamma_env_lock(); no concurrent env-var access.
+        // SAFETY: protected by TestEnvGuard; no concurrent env-var access.
         unsafe {
             std::env::set_var("HYZERO_REWARD_OUTCOME_GAMMA", "0.5");
         }
@@ -1250,8 +1243,6 @@ mod tests {
                 );
             }
         }
-
-        std::env::remove_var("HYZERO_REWARD_OUTCOME_GAMMA");
     }
 
     /// Verify that HYZERO_CONDITIONAL_BETA=1 produces target_value=1.0 for a decisive
@@ -1261,9 +1252,13 @@ mod tests {
     /// With conditional β=1.0 the target must be exactly 1.0.
     #[test]
     fn test_conditional_beta_decisive_uses_pure_outcome() {
-        let _guard = reward_gamma_env_lock().lock().unwrap();
+        let _env = TestEnvGuard::new(&[
+            "HYZERO_CONDITIONAL_BETA",
+            "HYZERO_DISABLE_COLOR_AUG",
+            "HYZERO_VALUE_OUTCOME_BETA",
+        ]);
         // Disable color aug so we get deterministic values (no flip).
-        // SAFETY: protected by reward_gamma_env_lock(); no concurrent env-var access.
+        // SAFETY: protected by TestEnvGuard; no concurrent env-var access.
         unsafe {
             std::env::set_var("HYZERO_CONDITIONAL_BETA", "1");
             std::env::set_var("HYZERO_DISABLE_COLOR_AUG", "1");
@@ -1308,11 +1303,6 @@ mod tests {
             "expected target_value[0]=0.0 for draw, got {}",
             draw_arrays.target_values[0]
         );
-
-        // Clean up.
-        std::env::remove_var("HYZERO_CONDITIONAL_BETA");
-        std::env::remove_var("HYZERO_DISABLE_COLOR_AUG");
-        std::env::remove_var("HYZERO_VALUE_OUTCOME_BETA");
     }
 
     /// When a step carries a TD target, the value target equals `flip_sign·G`
@@ -1325,8 +1315,8 @@ mod tests {
     /// FAILS without the TD override + β→0 branch (legacy would yield the outcome term).
     #[test]
     fn td_target_overrides_root_value_and_zeroes_beta() {
-        let _guard = reward_gamma_env_lock().lock().unwrap();
-        // SAFETY: protected by reward_gamma_env_lock(); no concurrent env-var access.
+        let _env = TestEnvGuard::new(&["HYZERO_DISABLE_COLOR_AUG", "HYZERO_VALUE_OUTCOME_BETA"]);
+        // SAFETY: protected by TestEnvGuard; no concurrent env-var access.
         unsafe {
             std::env::set_var("HYZERO_DISABLE_COLOR_AUG", "1");
             std::env::set_var("HYZERO_VALUE_OUTCOME_BETA", "1.0");
@@ -1346,9 +1336,6 @@ mod tests {
 
         let arrays = assemble_batch_arrays(&[sample], k);
 
-        std::env::remove_var("HYZERO_DISABLE_COLOR_AUG");
-        std::env::remove_var("HYZERO_VALUE_OUTCOME_BETA");
-
         // flip_sign=1.0 (aug disabled): target_values[0] must equal G_0=0.42 exactly,
         // not the β=1.0 legacy outcome (which would be 1.0).
         assert!(
@@ -1362,8 +1349,12 @@ mod tests {
     /// preserved byte-for-byte (TD-disabled / legacy path is unchanged).
     #[test]
     fn legacy_none_td_target_preserves_old_value_target() {
-        let _guard = reward_gamma_env_lock().lock().unwrap();
-        // SAFETY: protected by reward_gamma_env_lock(); no concurrent env-var access.
+        let _env = TestEnvGuard::new(&[
+            "HYZERO_DISABLE_COLOR_AUG",
+            "HYZERO_VALUE_OUTCOME_BETA",
+            "HYZERO_CONDITIONAL_BETA",
+        ]);
+        // SAFETY: protected by TestEnvGuard; no concurrent env-var access.
         unsafe {
             std::env::set_var("HYZERO_DISABLE_COLOR_AUG", "1");
         }
@@ -1392,8 +1383,6 @@ mod tests {
             td_targets: vec![None, None],
         };
         let arrays_none = assemble_batch_arrays(&[sample_none], k);
-
-        std::env::remove_var("HYZERO_DISABLE_COLOR_AUG");
 
         assert!(
             (arrays_empty.target_values[0] - 0.55).abs() < 1e-6,
@@ -1463,9 +1452,9 @@ mod tests {
     /// assemble_batch_arrays must pass through +1.0 unchanged (not invert to -1.0).
     #[test]
     fn test_terminal_reward_in_step_pov_not_white_absolute() {
-        let _guard = reward_gamma_env_lock().lock().unwrap();
+        let _env = TestEnvGuard::new(&["HYZERO_REWARD_OUTCOME_GAMMA", "HYZERO_DISABLE_COLOR_AUG"]);
         std::env::remove_var("HYZERO_REWARD_OUTCOME_GAMMA");
-        // SAFETY: protected by reward_gamma_env_lock(); no concurrent env-var access.
+        // SAFETY: protected by TestEnvGuard; no concurrent env-var access.
         unsafe {
             std::env::set_var("HYZERO_DISABLE_COLOR_AUG", "1");
         }
@@ -1535,8 +1524,6 @@ mod tests {
         assert!((arrays.target_rewards[0]).abs() < 1e-6, "step 0 reward should be 0.0");
         assert!((arrays.target_rewards[1]).abs() < 1e-6, "step 1 reward should be 0.0");
         assert!((arrays.target_rewards[2]).abs() < 1e-6, "step 2 reward should be 0.0");
-
-        std::env::remove_var("HYZERO_DISABLE_COLOR_AUG");
     }
 
     /// Regression test for the apply_flip value-target POV bug.
@@ -1557,7 +1544,11 @@ mod tests {
     /// implied by which slot was populated.
     #[test]
     fn test_value_target_sign_under_flip_matches_observation_pov() {
-        let _guard = reward_gamma_env_lock().lock().unwrap();
+        let _env = TestEnvGuard::new(&[
+            "HYZERO_VALUE_OUTCOME_BETA",
+            "HYZERO_REWARD_OUTCOME_GAMMA",
+            "HYZERO_DISABLE_COLOR_AUG",
+        ]);
         std::env::remove_var("HYZERO_VALUE_OUTCOME_BETA");
         std::env::remove_var("HYZERO_REWARD_OUTCOME_GAMMA");
         // Test requires both flip branches to fire; ensure aug is not disabled.
@@ -1671,7 +1662,11 @@ mod tests {
         use crate::{Color, PrecomputedItems};
         use std::sync::Arc;
 
-        let _guard = reward_gamma_env_lock().lock().unwrap();
+        let _env = TestEnvGuard::new(&[
+            "HYZERO_DISABLE_COLOR_AUG",
+            "HYZERO_VALUE_OUTCOME_BETA",
+            "HYZERO_REWARD_OUTCOME_GAMMA",
+        ]);
         // Force apply_flip=false for both samples so the invariant is pure.
         std::env::set_var("HYZERO_DISABLE_COLOR_AUG", "1");
         // Reset outcome blending to defaults so value targets are comparable.
@@ -1805,8 +1800,6 @@ mod tests {
                 }
             }
         }
-
-        std::env::remove_var("HYZERO_DISABLE_COLOR_AUG");
 
         assert!(
             divergences.is_empty(),

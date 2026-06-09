@@ -288,7 +288,7 @@ impl ReplayBuffer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::data::types::{BoardObservation, GameTrajectory, StepRecord};
+    use crate::data::types::{BoardObservation, GameTrajectory, StepRecord, TestEnvGuard};
 
     fn make_step() -> StepRecord {
         StepRecord {
@@ -373,16 +373,9 @@ mod tests {
         assert_eq!(buf.total_steps(), 30);
     }
 
-    /// Serialize tests that mutate HYZERO_DECISIVE_SAMPLE_FRAC to prevent data races.
-    /// Rust tests run in parallel by default; env-var mutations are process-global.
-    fn decisive_frac_env_lock() -> &'static std::sync::Mutex<()> {
-        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-        LOCK.get_or_init(|| std::sync::Mutex::new(()))
-    }
-
     #[test]
     fn test_priority_sampling_prefers_decisive_when_set() {
-        let _guard = decisive_frac_env_lock().lock().unwrap();
+        let _env = TestEnvGuard::new(&["HYZERO_DECISIVE_SAMPLE_FRAC"]);
 
         // 1 decisive trajectory, 9 drawn trajectories
         let mut buf = ReplayBuffer::new(100);
@@ -397,15 +390,13 @@ mod tests {
             buf.add(draw_traj);
         }
 
-        // SAFETY: protected by decisive_frac_env_lock(); no concurrent env-var access.
+        // SAFETY: protected by TestEnvGuard; no concurrent env-var access.
         unsafe {
             std::env::set_var("HYZERO_DECISIVE_SAMPLE_FRAC", "0.5");
         }
 
         let samples = buf.sample_batch(100, 5);
         let from_decisive = samples.iter().filter(|s| !s.is_draw).count();
-
-        std::env::remove_var("HYZERO_DECISIVE_SAMPLE_FRAC");
 
         // With decisive_frac=0.5, expect ~50% from decisive (at least 30 — conservative).
         assert!(
@@ -416,7 +407,7 @@ mod tests {
 
     #[test]
     fn test_priority_sampling_falls_back_when_no_decisive() {
-        let _guard = decisive_frac_env_lock().lock().unwrap();
+        let _env = TestEnvGuard::new(&["HYZERO_DECISIVE_SAMPLE_FRAC"]);
 
         // All trajectories are draws
         let mut buf = ReplayBuffer::new(100);
@@ -426,12 +417,11 @@ mod tests {
             buf.add(draw_traj);
         }
 
-        // SAFETY: protected by decisive_frac_env_lock(); no concurrent env-var access.
+        // SAFETY: protected by TestEnvGuard; no concurrent env-var access.
         unsafe {
             std::env::set_var("HYZERO_DECISIVE_SAMPLE_FRAC", "0.5");
         }
         let samples = buf.sample_batch(50, 5);
-        std::env::remove_var("HYZERO_DECISIVE_SAMPLE_FRAC");
 
         // Should still return 50 samples despite no decisive games (all from draws).
         assert_eq!(samples.len(), 50);
@@ -462,14 +452,6 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
-    /// Serialize tests that mutate the TD env vars (HYZERO_TD, HYZERO_TD_NSTEP,
-    /// HYZERO_TD_GAMMA). Held for the full duration to prevent races with other
-    /// env-mutating tests in this module.
-    fn td_env_lock() -> &'static std::sync::Mutex<()> {
-        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-        LOCK.get_or_init(|| std::sync::Mutex::new(()))
-    }
-
     /// Build a StepRecord with explicit side-to-move, root_value and reward.
     fn make_step_full(white_to_move: bool, root_value: f32, reward: f32) -> StepRecord {
         StepRecord {
@@ -494,8 +476,8 @@ mod tests {
     ///       = reward[0] - γ·reward[1] + γ^2·root_value[2]
     #[test]
     fn td_target_equals_signed_discounted_reward_plus_bootstrap() {
-        let _guard = td_env_lock().lock().unwrap();
-        // SAFETY: protected by td_env_lock(); no concurrent env-var access.
+        let _env = TestEnvGuard::new(&["HYZERO_TD", "HYZERO_TD_NSTEP", "HYZERO_TD_GAMMA"]);
+        // SAFETY: protected by TestEnvGuard; no concurrent env-var access.
         unsafe {
             std::env::set_var("HYZERO_TD", "1");
             std::env::set_var("HYZERO_TD_NSTEP", "2");
@@ -520,10 +502,6 @@ mod tests {
 
         let g0 = compute_td_target(&traj, 0, 2, g);
 
-        std::env::remove_var("HYZERO_TD");
-        std::env::remove_var("HYZERO_TD_NSTEP");
-        std::env::remove_var("HYZERO_TD_GAMMA");
-
         assert!(
             (g0 - expected_g0).abs() < 1e-6,
             "G_0 expected {expected_g0}, got {g0}"
@@ -542,8 +520,8 @@ mod tests {
     /// so root_value[2] (= a large distractor value) must NOT appear in the result.
     #[test]
     fn td_target_uses_outcome_bootstrap_at_trajectory_end() {
-        let _guard = td_env_lock().lock().unwrap();
-        // SAFETY: protected by td_env_lock(); no concurrent env-var access.
+        let _env = TestEnvGuard::new(&["HYZERO_TD"]);
+        // SAFETY: protected by TestEnvGuard; no concurrent env-var access.
         unsafe {
             std::env::set_var("HYZERO_TD", "1");
         }
@@ -571,8 +549,6 @@ mod tests {
         // Sanity: the distractor-bootstrap value would have been γ^2·root_value[2].
         let distractor = g * g * 0.99;
 
-        std::env::remove_var("HYZERO_TD");
-
         assert!(
             (g0 - expected_g0).abs() < 1e-6,
             "G_0 should bootstrap on outcome (expected {expected_g0}), got {g0}"
@@ -586,8 +562,8 @@ mod tests {
     /// With TD disabled (HYZERO_TD=0), every sampled step carries `None` (legacy path).
     #[test]
     fn td_disabled_yields_all_none_td_targets() {
-        let _guard = td_env_lock().lock().unwrap();
-        // SAFETY: protected by td_env_lock(); no concurrent env-var access.
+        let _env = TestEnvGuard::new(&["HYZERO_TD"]);
+        // SAFETY: protected by TestEnvGuard; no concurrent env-var access.
         unsafe {
             std::env::set_var("HYZERO_TD", "0");
         }
@@ -597,8 +573,6 @@ mod tests {
 
         let k = 5usize;
         let samples = buf.sample_batch(8, k);
-
-        std::env::remove_var("HYZERO_TD");
 
         assert!(!samples.is_empty(), "expected non-empty batch");
         for s in &samples {
@@ -617,8 +591,8 @@ mod tests {
     /// With TD enabled (default), sampled steps carry `Some(_)` TD targets.
     #[test]
     fn td_enabled_yields_some_td_targets() {
-        let _guard = td_env_lock().lock().unwrap();
-        // SAFETY: protected by td_env_lock(); no concurrent env-var access.
+        let _env = TestEnvGuard::new(&["HYZERO_TD"]);
+        // SAFETY: protected by TestEnvGuard; no concurrent env-var access.
         unsafe {
             std::env::set_var("HYZERO_TD", "1");
         }
@@ -628,8 +602,6 @@ mod tests {
 
         let k = 5usize;
         let samples = buf.sample_batch(8, k);
-
-        std::env::remove_var("HYZERO_TD");
 
         assert!(!samples.is_empty(), "expected non-empty batch");
         for s in &samples {

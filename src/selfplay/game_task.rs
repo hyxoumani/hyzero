@@ -1090,14 +1090,7 @@ mod tests {
     use crate::mcts::evaluator::Evaluator;
     use async_trait::async_trait;
 
-    /// Serialize tests that mutate the HYZERO_RESIGN*/HYZERO_TEMP_ANNEAL* env
-    /// vars. Rust tests run in parallel by default and these vars are read
-    /// per-call from the process-global environment, so concurrent mutation
-    /// would race. Mirrors the lock pattern in replay_buffer.rs.
-    fn env_lock() -> &'static std::sync::Mutex<()> {
-        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-        LOCK.get_or_init(|| std::sync::Mutex::new(()))
-    }
+    use crate::data::types::TestEnvGuard;
 
     /// Regression: legal_actions ordering after POV-flip must be color-symmetric.
     ///
@@ -1494,13 +1487,18 @@ mod tests {
     /// (game_outcome=-1.0, white_to_move=false on the last step), the stored
     /// reward must be +1.0 (Black's POV of Black winning), not -1.0 (raw white-absolute).
     #[tokio::test]
+    // Deliberate: hold the TestEnvGuard across awaits to serialize env mutation
+    // for the whole test (HYZERO_MATERIAL_SHAPING is read per-ply in play_game).
+    #[allow(clippy::await_holding_lock)]
     async fn test_terminal_reward_pov_conversion() {
         use std::env;
 
         // Force material shaping off so game_outcome is always +1/-1/0 (not tanh).
         // Default is already off, but we explicitly clear the opt-in flag in case
-        // another test left it set in this process. SAFETY: single-threaded test
-        // context; env-var is local to this test's timing.
+        // another test left it set in this process. The guard serializes against
+        // every other env-mutating test and restores the var on exit.
+        let _env = TestEnvGuard::new(&["HYZERO_MATERIAL_SHAPING"]);
+        // SAFETY: env mutation serialized by TestEnvGuard for this test's duration.
         unsafe {
             env::remove_var("HYZERO_MATERIAL_SHAPING");
         }
@@ -1560,8 +1558,13 @@ mod tests {
     #[allow(clippy::await_holding_lock)]
     async fn resigns_after_consecutive_losing_plies_below_threshold() {
         use std::env;
-        let _guard = env_lock().lock().unwrap();
-        // SAFETY: env mutation serialized by env_lock for this test's duration.
+        let _env = TestEnvGuard::new(&[
+            "HYZERO_RESIGN",
+            "HYZERO_RESIGN_THRESHOLD",
+            "HYZERO_RESIGN_CONSECUTIVE",
+            "HYZERO_RESIGN_MIN_PLY",
+        ]);
+        // SAFETY: env mutation serialized by TestEnvGuard for this test's duration.
         unsafe {
             env::remove_var("HYZERO_RESIGN"); // default ON
             env::remove_var("HYZERO_RESIGN_THRESHOLD"); // default -0.90
@@ -1572,7 +1575,13 @@ mod tests {
         let precomputed = Arc::new(PrecomputedItems::begin_precomputing());
         let evaluator: Arc<dyn Evaluator> = Arc::new(LosingEvaluator);
         let config = GameConfig {
-            num_simulations: 2,
+            // Exactly one simulation: from a fresh root only depth-1 expansions are
+            // reachable, so the backup is always g_0 = reward(0) - leaf = -1.0 and
+            // root_value stays deterministically at the LosingEvaluator's -1.0. With
+            // >=2 sims a depth-2 revisit can flip g_0 to +1.0 (Dirichlet root noise
+            // steers selection), pushing root_value above the resign threshold and
+            // making resignation fire nondeterministically.
+            num_simulations: 1,
             exploration_constant: 1.5,
             temperature_moves: 0,
             replay_dir: None,
@@ -1581,11 +1590,6 @@ mod tests {
         };
 
         let trajectory = play_game(precomputed, evaluator, 1, config).await;
-
-        unsafe {
-            env::remove_var("HYZERO_RESIGN_CONSECUTIVE");
-            env::remove_var("HYZERO_RESIGN_MIN_PLY");
-        }
 
         // Resignation fires at ply index 1 (the 2nd losing ply): step 0 = White,
         // step 1 = Black, so Black resigns and White wins (+1.0). Two steps total.
@@ -1613,8 +1617,13 @@ mod tests {
     #[allow(clippy::await_holding_lock)]
     async fn does_not_resign_before_min_ply() {
         use std::env;
-        let _guard = env_lock().lock().unwrap();
-        // SAFETY: env mutation serialized by env_lock for this test's duration.
+        let _env = TestEnvGuard::new(&[
+            "HYZERO_RESIGN",
+            "HYZERO_RESIGN_THRESHOLD",
+            "HYZERO_RESIGN_CONSECUTIVE",
+            "HYZERO_RESIGN_MIN_PLY",
+        ]);
+        // SAFETY: env mutation serialized by TestEnvGuard for this test's duration.
         unsafe {
             env::remove_var("HYZERO_RESIGN");
             env::remove_var("HYZERO_RESIGN_THRESHOLD");
@@ -1625,7 +1634,10 @@ mod tests {
         let precomputed = Arc::new(PrecomputedItems::begin_precomputing());
         let evaluator: Arc<dyn Evaluator> = Arc::new(LosingEvaluator);
         let config = GameConfig {
-            num_simulations: 2,
+            // One simulation keeps root_value deterministically at -1.0 (see the
+            // resigns_after_* test); with >=2 sims Dirichlet root noise can flip the
+            // backup sign and make resignation timing nondeterministic.
+            num_simulations: 1,
             exploration_constant: 1.5,
             temperature_moves: 0,
             replay_dir: None,
@@ -1634,11 +1646,6 @@ mod tests {
         };
 
         let trajectory = play_game(precomputed, evaluator, 1, config).await;
-
-        unsafe {
-            env::remove_var("HYZERO_RESIGN_CONSECUTIVE");
-            env::remove_var("HYZERO_RESIGN_MIN_PLY");
-        }
 
         // The gate holds resignation until turn_count >= 3, so the game records
         // plies 0..3 (4 steps) before resigning, instead of resigning at ply 0.
@@ -1656,8 +1663,8 @@ mod tests {
     #[test]
     fn temperature_anneals_linearly_within_window() {
         use std::env;
-        let _guard = env_lock().lock().unwrap();
-        // SAFETY: env mutation serialized by env_lock for this test's duration.
+        let _env = TestEnvGuard::new(&["HYZERO_TEMP_ANNEAL", "HYZERO_TEMP_ANNEAL_PLIES"]);
+        // SAFETY: env mutation serialized by TestEnvGuard for this test's duration.
         unsafe {
             env::remove_var("HYZERO_TEMP_ANNEAL"); // default ON
             env::set_var("HYZERO_TEMP_ANNEAL_PLIES", "100");
@@ -1685,11 +1692,6 @@ mod tests {
         }
         assert!((selfplay_temperature(29, temperature_moves) - 1.0).abs() < 1e-6);
         assert!((selfplay_temperature(31, temperature_moves) - 0.01).abs() < 1e-6);
-
-        unsafe {
-            env::remove_var("HYZERO_TEMP_ANNEAL");
-            env::remove_var("HYZERO_TEMP_ANNEAL_PLIES");
-        }
     }
 
     /// Eval cap-adjudication: when enabled and one side is clearly ahead on

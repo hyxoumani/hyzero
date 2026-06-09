@@ -103,3 +103,58 @@ pub struct GameTrajectory {
     /// False only for actual checkmate. Used by trainer to apply non-zero-sum draw penalty.
     pub is_draw: bool,
 }
+
+/// Crate-wide lock serializing tests that mutate `std::env`.
+///
+/// The process environment is global, so a per-module mutex only serializes
+/// env access *within* that module — tests in different modules still race.
+/// Every test that calls `set_var`/`remove_var` must acquire this single lock
+/// (via [`TestEnvGuard`]) so all such tests run mutually exclusive crate-wide.
+#[cfg(test)]
+pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// RAII guard for env-mutating tests.
+///
+/// Acquiring one holds the crate-wide [`TEST_ENV_LOCK`] (recovering from poison
+/// so a panicking test cannot cascade `PoisonError` into others) and snapshots
+/// the named env vars. On drop — including unwind on a failed assertion — every
+/// named var is restored to its pre-test value (or removed if it was unset), so
+/// test execution order cannot leak state between tests.
+///
+/// Usage:
+/// ```ignore
+/// let _env = TestEnvGuard::new(&["HYZERO_RESIGN_CONSECUTIVE", "HYZERO_RESIGN_MIN_PLY"]);
+/// std::env::set_var("HYZERO_RESIGN_CONSECUTIVE", "2");
+/// ```
+#[cfg(test)]
+pub(crate) struct TestEnvGuard {
+    _lock: std::sync::MutexGuard<'static, ()>,
+    saved: Vec<(String, Option<String>)>,
+}
+
+#[cfg(test)]
+impl TestEnvGuard {
+    /// Lock the crate-wide env mutex and snapshot the current values of `keys`.
+    pub(crate) fn new(keys: &[&str]) -> Self {
+        let _lock = TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let saved = keys
+            .iter()
+            .map(|&k| (k.to_string(), std::env::var(k).ok()))
+            .collect();
+        Self { _lock, saved }
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestEnvGuard {
+    fn drop(&mut self) {
+        // Restore each snapshotted var so order-independence holds even on panic.
+        // Still serialized by the held TEST_ENV_LOCK guard.
+        for (key, value) in &self.saved {
+            match value {
+                Some(v) => std::env::set_var(key, v),
+                None => std::env::remove_var(key),
+            }
+        }
+    }
+}
