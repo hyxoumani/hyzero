@@ -1,7 +1,7 @@
 use crate::data::{ActionIndex, HiddenState, Policy};
 use crate::mcts::evaluator::Evaluator;
-use crate::mcts::node::MCTSNode;
-use crate::mcts::puct::select_child;
+use crate::mcts::node::{MCTSNode, MinMaxStats};
+use crate::mcts::puct::{select_child, select_child_normalized};
 
 // ---------------------------------------------------------------------------
 // MCTS trace — enabled by HYZERO_MCTS_TRACE=1 (or any non-empty, non-"0" value).
@@ -163,6 +163,34 @@ fn noise_alpha() -> f32 {
     })
 }
 
+/// First-Play Urgency reduction subtracted from the parent's normalized Q for
+/// unvisited children (canonical AlphaZero/MuZero). Default 0.25.
+const DEFAULT_FPU_REDUCTION: f32 = 0.25;
+
+/// True when MinMaxStats Q-normalization + FPU selection is enabled (cached).
+/// Gated by `HYZERO_MCTS_QNORM`; default ON. OFF for any empty / "0" value.
+fn qnorm_enabled() -> bool {
+    static CACHED: OnceLock<bool> = OnceLock::new();
+    *CACHED.get_or_init(|| {
+        std::env::var("HYZERO_MCTS_QNORM")
+            .map(|v| !v.is_empty() && v != "0")
+            .unwrap_or(true)
+    })
+}
+
+/// Read the FPU reduction from env (cached), clamped to `[0.0, 1.0]`.
+/// Overridable via `HYZERO_FPU`; default `DEFAULT_FPU_REDUCTION` (0.25).
+fn fpu_reduction() -> f32 {
+    static CACHED: OnceLock<f32> = OnceLock::new();
+    *CACHED.get_or_init(|| {
+        std::env::var("HYZERO_FPU")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok())
+            .map(|v| v.clamp(0.0, 1.0))
+            .unwrap_or(DEFAULT_FPU_REDUCTION)
+    })
+}
+
 /// Sample from a Dirichlet(alpha, ..., alpha) distribution of length `n`.
 ///
 /// Uses Gamma(alpha, 1) sampling via the Marsaglia-Tsang method for alpha < 1,
@@ -266,6 +294,9 @@ pub struct RootDiagnostics {
 pub struct MCTSTree {
     root: MCTSNode,
     config: MCTSConfig,
+    /// Running min/max of node Q-values for PUCT normalization. Reset at the
+    /// start of each `run_simulations` and updated during `backpropagate`.
+    min_max: MinMaxStats,
 }
 
 impl MCTSTree {
@@ -296,12 +327,18 @@ impl MCTSTree {
             }
         }
 
-        Self { root, config }
+        Self {
+            root,
+            config,
+            min_max: MinMaxStats::new(),
+        }
     }
 
     /// Run all simulations. Dispatches to either PUCT (default) or Gumbel-Top-k +
     /// sequential halving (when `config.gumbel_top_k.is_some()`).
     pub async fn run_simulations(&mut self, evaluator: &dyn Evaluator) {
+        // Fresh normalization window each search.
+        self.min_max = MinMaxStats::new();
         if self.config.gumbel_top_k.is_some() {
             self.run_simulations_gumbel(evaluator).await;
             return;
@@ -393,7 +430,10 @@ impl MCTSTree {
                         let prior = self.root.priors[i];
                         let expl = c * prior * (parent_visits as f32).sqrt() / (1.0 + cv as f32);
                         let score = q + expl;
-                        format!("{}:q={:.4},p={:.4},N={},expl={:.4},puct={:.4}", i, q, prior, cv, expl, score)
+                        format!(
+                            "{}:q={:.4},p={:.4},N={},expl={:.4},puct={:.4}",
+                            i, q, prior, cv, expl, score
+                        )
                     })
                     .collect::<Vec<_>>()
                     .join(" ");
@@ -414,7 +454,16 @@ impl MCTSTree {
                     break;
                 }
 
-                let child_idx = select_child(node, self.config.exploration_constant);
+                let child_idx = if qnorm_enabled() {
+                    select_child_normalized(
+                        node,
+                        self.config.exploration_constant,
+                        &self.min_max,
+                        fpu_reduction(),
+                    )
+                } else {
+                    select_child(node, self.config.exploration_constant)
+                };
                 path.push(child_idx);
 
                 match &node.children[child_idx] {
@@ -512,12 +561,7 @@ impl MCTSTree {
 
         // logit(a) = ln(prior) — used as the "policy logit" surrogate. Gumbel-Top-K
         // sampling on (logit + g) is equivalent to drawing from softmax(logit) once.
-        let logits: Vec<f32> = self
-            .root
-            .priors
-            .iter()
-            .map(|&p| p.max(1e-9).ln())
-            .collect();
+        let logits: Vec<f32> = self.root.priors.iter().map(|&p| p.max(1e-9).ln()).collect();
 
         // Sample one Gumbel value per legal action (shared across all sims).
         let gumbel_noise = crate::mcts::gumbel::sample_gumbel(n_legal);
@@ -526,14 +570,8 @@ impl MCTSTree {
         let mut scored: Vec<(usize, f32)> = (0..n_legal)
             .map(|i| (i, gumbel_noise[i] + logits[i]))
             .collect();
-        scored.sort_by(|a, b| {
-            b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
-        });
-        let mut considered: Vec<usize> = scored
-            .iter()
-            .take(k_initial)
-            .map(|&(i, _)| i)
-            .collect();
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        let mut considered: Vec<usize> = scored.iter().take(k_initial).map(|&(i, _)| i).collect();
 
         // Sequential halving: ceil(log2(K)) rounds. At each round, each surviving
         // candidate gets `total_sims / (num_rounds * |considered|)` sims (≥1).
@@ -542,11 +580,8 @@ impl MCTSTree {
         let mut sims_done: u32 = 0;
 
         while considered.len() > 1 && sims_done < total_sims {
-            let per_cand = crate::mcts::gumbel::sims_per_candidate(
-                total_sims,
-                num_rounds,
-                considered.len(),
-            );
+            let per_cand =
+                crate::mcts::gumbel::sims_per_candidate(total_sims, num_rounds, considered.len());
             // Snapshot the current considered list to iterate; halving mutates
             // `considered` only after the round completes.
             let round_set = considered.clone();
@@ -578,21 +613,16 @@ impl MCTSTree {
             let mut round_scored: Vec<(usize, f32)> = considered
                 .iter()
                 .map(|&i| {
-                    let q = self
-                        .root
-                        .children[i]
+                    let q = self.root.children[i]
                         .as_ref()
                         .map(|c| c.q_value())
                         .unwrap_or(0.0);
-                    let s = gumbel_noise[i]
-                        + logits[i]
-                        + crate::mcts::gumbel::sigma_q(q, max_visits);
+                    let s =
+                        gumbel_noise[i] + logits[i] + crate::mcts::gumbel::sigma_q(q, max_visits);
                     (i, s)
                 })
                 .collect();
-            round_scored.sort_by(|a, b| {
-                b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
-            });
+            round_scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
             let new_size = (considered.len() / 2).max(1);
             considered = round_scored
                 .iter()
@@ -648,7 +678,16 @@ impl MCTSTree {
                 break node.q_value();
             }
 
-            let child_idx = select_child(node, self.config.exploration_constant);
+            let child_idx = if qnorm_enabled() {
+                select_child_normalized(
+                    node,
+                    self.config.exploration_constant,
+                    &self.min_max,
+                    fpu_reduction(),
+                )
+            } else {
+                select_child(node, self.config.exploration_constant)
+            };
             path.push(child_idx);
 
             match &node.children[child_idx] {
@@ -735,8 +774,11 @@ impl MCTSTree {
 
         // Step 3: update each node's stats with the correct POV-stored G.
         // Root stores G_0 (own POV); depth-k node (k ≥ 1) stores G_{k-1} (parent's POV).
+        // After each update, fold the node's running Q into the MinMaxStats window
+        // used for PUCT normalization (selection-only; stored totals are untouched).
         self.root.visit_count += 1;
         self.root.total_value += g_values[0];
+        self.min_max.update(self.root.q_value());
 
         let mut node = &mut self.root;
         for (i, &idx) in path.iter().enumerate() {
@@ -745,6 +787,7 @@ impl MCTSTree {
             let child = node.children[idx].as_mut().unwrap();
             child.visit_count += 1;
             child.total_value += stored;
+            self.min_max.update(child.q_value());
             node = node.children[idx].as_mut().unwrap();
         }
     }
@@ -991,7 +1034,8 @@ mod tests {
         assert!(
             visited >= 8,
             "Gumbel should visit many candidates with sharp prior; only {} of {} had visits",
-            visited, n_legal,
+            visited,
+            n_legal,
         );
 
         // Top-prior move should NOT have all the visits — under PUCT it would.
@@ -1001,7 +1045,9 @@ mod tests {
         assert!(
             frac < 0.7,
             "Gumbel root visits over-concentrated on top prior: {}/{} = {:.2}",
-            top_visits, total_visits, frac,
+            top_visits,
+            total_visits,
+            frac,
         );
     }
 
@@ -1055,8 +1101,8 @@ mod tests {
         let e2e4: ActionIndex = 12 * 64 + 28; // 796
         let d2d4: ActionIndex = 11 * 64 + 27; // 731
         let c2c4: ActionIndex = 10 * 64 + 26; // 666
-        let g1f3: ActionIndex = 6 * 64 + 21;  // 405
-        let b1c3: ActionIndex = 1 * 64 + 18;  // 82
+        let g1f3: ActionIndex = 6 * 64 + 21; // 405
+        let b1c3: ActionIndex = 1 * 64 + 18; // 82
 
         // Unsorted order: descending by action ID (796, 731, 666, 405, 82)
         let unsorted: Vec<ActionIndex> = vec![e2e4, d2d4, c2c4, g1f3, b1c3];
@@ -1083,7 +1129,7 @@ mod tests {
                         num_simulations: num_sims,
                         exploration_constant: 1.5,
                         add_root_noise: true,
-            gumbel_top_k: None,
+                        gumbel_top_k: None,
                     };
                     let mut tree =
                         MCTSTree::new(HiddenState::new(64), &policy, 0.0, legal.clone(), config);
@@ -1096,7 +1142,9 @@ mod tests {
                         }
                     }
                 }
-                acc.iter().map(|&s| (s / num_trials as f64) as f32).collect::<Vec<f32>>()
+                acc.iter()
+                    .map(|&s| (s / num_trials as f64) as f32)
+                    .collect::<Vec<f32>>()
             }};
         }
 
@@ -1110,7 +1158,8 @@ mod tests {
             s.sort_unstable();
             s
         };
-        for (i, (&action, (&mu_u, &mu_s))) in sorted_ids.iter()
+        for (i, (&action, (&mu_u, &mu_s))) in sorted_ids
+            .iter()
             .zip(mean_unsorted.iter().zip(mean_sorted.iter()))
             .enumerate()
         {
@@ -1134,6 +1183,71 @@ mod tests {
             failures,
             mean_unsorted,
             mean_sorted,
+        );
+    }
+
+    /// Q-normalization is selection-only: folding each node's running Q into the
+    /// MinMaxStats window during backprop must NOT alter the stored `total_value`
+    /// or `visit_count`. This guards the sign-convention regressions
+    /// (`test_backpropagate_alternates_signs`, `test_backpropagate_includes_mating_reward`)
+    /// against normalization leaking into the backup math.
+    ///
+    /// The reverse recurrence `G_{k-1}=r_k−G_k` (γ=1) is reward-driven and
+    /// independent of `min_max`; here we drive a set of paths with known rewards
+    /// and assert every stored total equals the recurrence value exactly, while
+    /// `min_max` has nonetheless absorbed those Q-values (window non-degenerate).
+    #[tokio::test]
+    async fn qnorm_does_not_change_stored_total_value() {
+        let uniform_policy = vec![1.0 / NUM_ACTIONS as f32; NUM_ACTIONS];
+        let nil_config = MCTSConfig {
+            num_simulations: 0,
+            exploration_constant: 1.5,
+            add_root_noise: false,
+            gumbel_top_k: None,
+        };
+
+        let legal: Vec<ActionIndex> = (0..2).collect();
+        let mut tree = MCTSTree::new(
+            HiddenState::new(64),
+            &uniform_policy,
+            0.0,
+            legal,
+            nil_config,
+        );
+
+        // Build a D=2 path with a mating reward on the leaf edge.
+        let legal_d1: Vec<ActionIndex> = (0..2).collect();
+        let d1 = MCTSNode::new(HiddenState::new(64), &uniform_policy, legal_d1, 0.0);
+        tree.root.children[0] = Some(Box::new(d1));
+        let legal_d2: Vec<ActionIndex> = (0..2).collect();
+        let d2 = MCTSNode::new(HiddenState::new(64), &uniform_policy, legal_d2, 1.0);
+        tree.root.children[0].as_mut().unwrap().children[0] = Some(Box::new(d2));
+
+        let root_tv_before = tree.root.total_value;
+        tree.backpropagate(&[0, 0], 0.0);
+
+        // Stored totals follow the recurrence (γ=1, leaf value 0, edge reward +1):
+        //   G_2=0, G_1=+1, G_0=-1 → root+=-1, depth-1+=-1, depth-2+=+1.
+        assert!((tree.root.total_value - root_tv_before - (-1.0)).abs() < 1e-6);
+        let stored_d1 = tree.root.children[0].as_ref().unwrap().total_value;
+        let stored_d2 = tree.root.children[0].as_ref().unwrap().children[0]
+            .as_ref()
+            .unwrap()
+            .total_value;
+        assert!(
+            (stored_d1 - (-1.0)).abs() < 1e-6,
+            "depth-1 total altered by qnorm"
+        );
+        assert!(
+            (stored_d2 - 1.0).abs() < 1e-6,
+            "depth-2 total altered by qnorm"
+        );
+
+        // The window DID absorb the Q-values (so normalization would be active),
+        // proving the updates ran without touching stored totals.
+        assert!(
+            !tree.min_max.is_degenerate(),
+            "min_max should have a non-degenerate window after backprop"
         );
     }
 
