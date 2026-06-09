@@ -349,6 +349,27 @@ def _parse_loss_weight_env(name: str, default: float = 1.0) -> float:
     return clamped
 
 
+def _antisym_probe_n(default: int = 8) -> int:
+    """Parse HYZERO_ANTISYM_PROBE_N, clamping to [1, 64].
+
+    Caps how many batch samples the per-call ``[antisym]`` probe forwards through
+    h/f so the diagnostic cost stays bounded. Invalid input falls back to default.
+    """
+    raw = os.environ.get("HYZERO_ANTISYM_PROBE_N")
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except (ValueError, TypeError):
+        print(
+            f"[trainer] WARNING: HYZERO_ANTISYM_PROBE_N={raw!r} is not a valid int;"
+            f" using default {default}",
+            file=sys.stderr,
+        )
+        return default
+    return max(1, min(64, value))
+
+
 def _reinit_value_head(prediction_network: torch.nn.Module) -> None:
     """Re-randomize the value-output layers of the prediction network.
 
@@ -709,6 +730,32 @@ class Trainer:
                 _diag_print(f"[reward_stats] step={self.model_version} " + " | ".join(rwd_parts))
                 _diag_print(f"[policy_stats] step={self.model_version} " + " | ".join(pol_parts))
 
+                # Per-call value-antisymmetry probe (surfaced for baseline parsing).
+                # POV-antisymmetry requires v(flip(obs)) ≈ -v(obs) → mean(v+v_flip) ≈ 0;
+                # a nonzero mean_sum signals value-head degeneration. Capped at
+                # HYZERO_ANTISYM_PROBE_N (default 8) samples to bound the extra h/f cost.
+                # The stable [antisym] anchor line lets run_baseline.sh extract progress.
+                n_anti = min(_antisym_probe_n(), obs.shape[0])
+                anti_obs = obs[0:n_anti]                              # [N, 102, 8, 8]
+                anti_flipped = _flip_obs_planes(anti_obs)             # [N, 102, 8, 8]
+                anti_vals = self.f(self.h(anti_obs))[1].squeeze(-1)         # [N]
+                anti_vals_flip = self.f(self.h(anti_flipped))[1].squeeze(-1)  # [N]
+                anti_neg_flip = -anti_vals_flip                              # [N]
+                if n_anti > 1:
+                    av_mean = anti_vals.mean()
+                    anf_mean = anti_neg_flip.mean()
+                    anti_cov = ((anti_vals - av_mean) * (anti_neg_flip - anf_mean)).mean()
+                    anti_std_v = anti_vals.std(unbiased=False).clamp(min=1e-9)
+                    anti_std_nf = anti_neg_flip.std(unbiased=False).clamp(min=1e-9)
+                    anti_corr = (anti_cov / (anti_std_v * anti_std_nf)).item()
+                else:
+                    anti_corr = float("nan")
+                anti_mean_sum = (anti_vals + anti_vals_flip).mean().item()
+                _diag_print(
+                    f"[antisym] step={self.model_version}"
+                    f" mean_sum={anti_mean_sum:.4f} corr={anti_corr:.4f} (N={n_anti})"
+                )
+
                 # Periodic probes every 50 calls.
                 if self.model_version % 50 == 0:
                     # 2. Color-symmetry probe on real obs from the current batch.
@@ -844,11 +891,25 @@ class Trainer:
             if k_steps > 0:
                 consistency_loss = consistency_loss / k_steps
 
+        # Optional value-antisymmetry regularizer (flag-gated, default OFF).
+        # POV-antisymmetry of the value head requires v(flip(obs)) ≈ -v(obs), i.e.
+        #   f(h(obs)) + f(h(flip(obs))) ≈ 0.
+        # Penalize the squared sum to pull the head toward that symmetry. Gated on
+        # HYZERO_ANTISYM_LOSS_WEIGHT (default 0.0): at weight 0 the whole branch is
+        # skipped — zero extra forward passes and a total_loss identical to before.
+        antisym_weight = _parse_loss_weight_env("HYZERO_ANTISYM_LOSS_WEIGHT", default=0.0)
+        antisym_loss = torch.tensor(0.0, device=self.device)
+        if antisym_weight > 0:
+            anti_v = self.f(self.h(obs))[1].squeeze(-1)                  # [B]
+            anti_v_flip = self.f(self.h(_flip_obs_planes(obs)))[1].squeeze(-1)  # [B]
+            antisym_loss = ((anti_v + anti_v_flip) ** 2).mean()
+
         total_loss = (
             self.policy_loss_weight * avg_policy_loss
             + self.value_loss_weight * avg_value_loss
             + self.reward_loss_weight * avg_reward_loss
             + consistency_weight * consistency_loss
+            + antisym_weight * antisym_loss
         )
 
         total_loss.backward()

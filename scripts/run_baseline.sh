@@ -171,6 +171,17 @@ ERRORS=$(awk 'tolower($0) ~ /error|panic/{n++} END{print n+0}' "$LOG_FILE")
 CHECKPOINTS=$(awk '/\[py_training\].*Checkpoint saved/{n++} END{print n+0}' "$LOG_FILE")
 AVG_STEPS=$(awk '/\[py_training\].*Game received/{split($0,a,"received: "); split(a[2],b," "); sum+=b[1]; n++} END{if(n>0) printf "%.1f", sum/n; else print "0"}' "$LOG_FILE")
 
+# Extract value-antisymmetry metric from [antisym] lines (per-train_batch probe).
+# Format: [antisym] step={v} mean_sum={f} corr={f} (N={n})
+# mean_sum trending toward 0 = value head approaching POV-antisymmetry. Take the
+# latest line as the run's standing. Falls back to 0.0 on runs predating the field.
+LAST_ANTISYM_MEAN_SUM=$(awk '/\[antisym\]/{
+    for (i=1; i<=NF; i++) {
+        if ($i ~ /^mean_sum=/) { split($i, a, "="); ms = a[2] }
+    }
+} END{print ms+0}' "$LOG_FILE")
+LAST_ANTISYM_MEAN_SUM=${LAST_ANTISYM_MEAN_SUM:-0.0}
+
 # Extract eval metrics from ladder_match lines
 # Format: [eval] v{v} cycle={c} ladder_wins={w} ... decisive_ratio is computed here
 EVAL_CYCLES=$(awk '/\[eval\].*ladder_match/{n++} END{print n+0}' "$LOG_FILE")
@@ -301,6 +312,7 @@ cat > "$BASELINE_FILE" << EOF
         "last_loss": $LAST_LOSS,
         "last_policy_loss": $LAST_POLICY,
         "avg_game_length": $AVG_STEPS,
+        "last_antisym_mean_sum": $LAST_ANTISYM_MEAN_SUM,
         "last_win_rate": $DECISIVE_RATIO,
         "last_candidate_elo": $LAST_CANDIDATE_ELO,
         "eval_cycles": $EVAL_CYCLES,

@@ -472,6 +472,9 @@ async fn main() {
             exploration_constant: 1.5,
             temperature_moves: config.temperature_moves,
             replay_dir: replay_dir.clone(),
+            // Self-play must never adjudicate (passivity-attractor guard).
+            adjudicate_at_cap: false,
+            adjudication_material_margin: 5,
         },
     };
 

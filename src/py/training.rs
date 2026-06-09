@@ -218,18 +218,32 @@ pub fn assemble_batch_arrays(samples: &[TrainingSample], unroll_k: usize) -> Bat
             let root_value_target = flip_sign * step.root_value;
             // Conditional β: checkmate games use pure outcome (β=1.0) so the value head
             // sees the full ±1 signal; non-checkmate games keep the configured β (default
-            // 0.3) to bootstrap through root_value. Rationale: with material shaping OFF
+            // 0.1) to bootstrap through root_value. Rationale: with material shaping OFF
             // (the default), non-checkmate outcomes are 0.0 — a flat β=1.0 would collapse
             // every drawn game to target=0, wasting the information that root_value
             // carries. Gate with HYZERO_CONDITIONAL_BETA=1 (default false to preserve
-            // historical behavior).
+            // historical behavior). β/conditional-β retain their meaning ONLY on the
+            // legacy path (no TD target for this step); see the TD branch below.
             let effective_beta: f32 = if conditional_beta_enabled() && !sample.is_draw {
                 1.0
             } else {
                 beta
             };
-            target_values[bi * kp1 + k] =
-                (1.0 - effective_beta) * root_value_target + effective_beta * outcome_in_step_perspective;
+            // n-step TD value target (computed at sample time in replay_buffer.rs from the
+            // full trajectory). When present, it supersedes the β-blend: `G_t` already
+            // bootstraps toward the eventual outcome through its discounted tail (the
+            // terminal-bootstrap branch literally substitutes game_outcome), so re-adding
+            // `β·outcome` would double-count. Therefore β collapses to 0 and the target is
+            // exactly `flip_sign · G_t` (the same flip_sign applied for color-aug; `G_t` is
+            // already POV-correct and outcome-aware). When absent (TD disabled or legacy
+            // path) the β-blend below is byte-for-byte unchanged.
+            target_values[bi * kp1 + k] = match sample.td_targets.get(k).copied().flatten() {
+                Some(g) => flip_sign * g,
+                None => {
+                    (1.0 - effective_beta) * root_value_target
+                        + effective_beta * outcome_in_step_perspective
+                }
+            };
             // step.reward is only non-zero on the trajectory's last step; apply the same
             // POV flip so the reward head sees a consistent sign convention.
             let reward_target = flip_sign * step.reward;
@@ -654,6 +668,7 @@ mod tests {
                 .collect(),
             game_outcome: 1.0,
             is_draw: false,
+            td_targets: Vec::new(),
         }
     }
 
@@ -750,6 +765,7 @@ mod tests {
             steps: vec![step_at_s0, step_at_s1],
             game_outcome: 0.0,
             is_draw: false,
+            td_targets: Vec::new(),
         };
 
         // Run many trials to cover both apply_flip paths (50/50 random) — the invariant
@@ -817,6 +833,7 @@ mod tests {
             steps: (0..kp1).map(|_| step.clone()).collect(),
             game_outcome: 1.0,
             is_draw: false,
+            td_targets: Vec::new(),
         };
 
         let arrays = assemble_batch_arrays(&[sample], k);
@@ -1015,6 +1032,7 @@ mod tests {
             ],
             game_outcome: 1.0, // White wins (checkmate)
             is_draw: false,
+            td_targets: Vec::new(),
         };
 
         // β=0.1; root_value=0.0; game_outcome=1.0; root_side_sign=+1.
@@ -1057,6 +1075,7 @@ mod tests {
             ],
             game_outcome: -1.0, // Black wins (checkmate)
             is_draw: false,
+            td_targets: Vec::new(),
         };
 
         // β=0.1; root_value=0.0; game_outcome=-1.0; root_side_sign=-1.
@@ -1093,6 +1112,7 @@ mod tests {
             steps: (0..kp1).map(|_| step.clone()).collect(),
             game_outcome: 0.0,
             is_draw: true,
+            td_targets: Vec::new(),
         };
 
         // β=0.1; root_value=0.5; game_outcome=0.0 (draw); outcome term = 0.
@@ -1152,6 +1172,7 @@ mod tests {
             steps,
             game_outcome: 1.0, // White wins (checkmate), but γ=0 so outcome shouldn't matter
             is_draw: false,
+            td_targets: Vec::new(),
         };
 
         // With γ=0.0, target_rewards[k] = step.reward for all k (unflipped), or
@@ -1210,6 +1231,7 @@ mod tests {
             ],
             game_outcome: 1.0, // White wins (checkmate)
             is_draw: false,
+            td_targets: Vec::new(),
         };
 
         // γ=0.5; step.reward=0.0; game_outcome=1.0; root_side_sign=+1.
@@ -1256,6 +1278,7 @@ mod tests {
             steps: vec![step.clone(), step.clone()],
             game_outcome: 1.0,
             is_draw: false,
+            td_targets: Vec::new(),
         };
 
         let arrays = assemble_batch_arrays(&[sample], k);
@@ -1274,6 +1297,7 @@ mod tests {
             steps: vec![draw_step.clone(), draw_step.clone()],
             game_outcome: 0.0,
             is_draw: true,
+            td_targets: Vec::new(),
         };
 
         let draw_arrays = assemble_batch_arrays(&[draw_sample], k);
@@ -1289,6 +1313,98 @@ mod tests {
         std::env::remove_var("HYZERO_CONDITIONAL_BETA");
         std::env::remove_var("HYZERO_DISABLE_COLOR_AUG");
         std::env::remove_var("HYZERO_VALUE_OUTCOME_BETA");
+    }
+
+    /// When a step carries a TD target, the value target equals `flip_sign·G`
+    /// REGARDLESS of β: the TD path forces β→0 and overrides root_value/outcome.
+    ///
+    /// We set β=1.0 (which on the legacy path would make the target equal the outcome,
+    /// not the TD return) and provide root_value=0.5 plus a distinct TD target G=0.42.
+    /// With color aug disabled (flip_sign=1.0) the value target must be exactly 0.42,
+    /// proving β collapsed to 0 and the TD value overrode both root_value and outcome.
+    /// FAILS without the TD override + β→0 branch (legacy would yield the outcome term).
+    #[test]
+    fn td_target_overrides_root_value_and_zeroes_beta() {
+        let _guard = reward_gamma_env_lock().lock().unwrap();
+        // SAFETY: protected by reward_gamma_env_lock(); no concurrent env-var access.
+        unsafe {
+            std::env::set_var("HYZERO_DISABLE_COLOR_AUG", "1");
+            std::env::set_var("HYZERO_VALUE_OUTCOME_BETA", "1.0");
+        }
+
+        let k = 1usize;
+        // root_value=0.5, game_outcome=1.0 (White wins) — both distinct from G=0.42 so
+        // any leakage from the legacy blend would change the result.
+        let step = make_step_with_side(true, 0.5);
+        let g0 = 0.42f32;
+        let sample = TrainingSample {
+            steps: vec![step.clone(), step.clone()],
+            game_outcome: 1.0,
+            is_draw: false,
+            td_targets: vec![Some(g0), Some(-0.17)],
+        };
+
+        let arrays = assemble_batch_arrays(&[sample], k);
+
+        std::env::remove_var("HYZERO_DISABLE_COLOR_AUG");
+        std::env::remove_var("HYZERO_VALUE_OUTCOME_BETA");
+
+        // flip_sign=1.0 (aug disabled): target_values[0] must equal G_0=0.42 exactly,
+        // not the β=1.0 legacy outcome (which would be 1.0).
+        assert!(
+            (arrays.target_values[0] - g0).abs() < 1e-6,
+            "expected target_value[0]={g0} (TD override, β→0), got {}",
+            arrays.target_values[0]
+        );
+    }
+
+    /// When a step has `None` for its TD target, the legacy β-blend value target is
+    /// preserved byte-for-byte (TD-disabled / legacy path is unchanged).
+    #[test]
+    fn legacy_none_td_target_preserves_old_value_target() {
+        let _guard = reward_gamma_env_lock().lock().unwrap();
+        // SAFETY: protected by reward_gamma_env_lock(); no concurrent env-var access.
+        unsafe {
+            std::env::set_var("HYZERO_DISABLE_COLOR_AUG", "1");
+        }
+        std::env::remove_var("HYZERO_VALUE_OUTCOME_BETA"); // default β=0.1
+        std::env::remove_var("HYZERO_CONDITIONAL_BETA");
+
+        let k = 1usize;
+        // root_value=0.5, game_outcome=1.0 (White wins, White to move at k=0).
+        // Legacy target at k=0 = (1-0.1)*0.5 + 0.1*1.0 = 0.45 + 0.1 = 0.55.
+        let step = make_step_with_side(true, 0.5);
+
+        // td_targets empty ⇒ every step is None ⇒ legacy path.
+        let sample_empty = TrainingSample {
+            steps: vec![step.clone(), step.clone()],
+            game_outcome: 1.0,
+            is_draw: false,
+            td_targets: Vec::new(),
+        };
+        let arrays_empty = assemble_batch_arrays(&[sample_empty], k);
+
+        // Explicit None entries must behave identically to an empty vec.
+        let sample_none = TrainingSample {
+            steps: vec![step.clone(), step.clone()],
+            game_outcome: 1.0,
+            is_draw: false,
+            td_targets: vec![None, None],
+        };
+        let arrays_none = assemble_batch_arrays(&[sample_none], k);
+
+        std::env::remove_var("HYZERO_DISABLE_COLOR_AUG");
+
+        assert!(
+            (arrays_empty.target_values[0] - 0.55).abs() < 1e-6,
+            "legacy β-blend expected 0.55, got {}",
+            arrays_empty.target_values[0]
+        );
+        assert!(
+            (arrays_none.target_values[0] - 0.55).abs() < 1e-6,
+            "explicit-None legacy β-blend expected 0.55, got {}",
+            arrays_none.target_values[0]
+        );
     }
 
     #[test]
@@ -1402,6 +1518,7 @@ mod tests {
             steps,
             game_outcome: -1.0, // white-absolute: Black wins
             is_draw: false,
+            td_targets: Vec::new(),
         };
 
         // With γ=0.0 and aug disabled, target_rewards[k] = flip_sign * step.reward.
@@ -1477,6 +1594,7 @@ mod tests {
                 steps: vec![root_step.clone(), next_step.clone()],
                 game_outcome,
                 is_draw: false,
+                td_targets: Vec::new(),
             };
             let arrays = assemble_batch_arrays(&[sample], k);
 
@@ -1657,11 +1775,13 @@ mod tests {
             steps: white_steps,
             game_outcome: 0.0, // draw so value targets cancel out
             is_draw: true,
+            td_targets: Vec::new(),
         };
         let black_sample = TrainingSample {
             steps: black_steps,
             game_outcome: 0.0,
             is_draw: true,
+            td_targets: Vec::new(),
         };
 
         // Run a single assembly (apply_flip=false guaranteed by env var).
