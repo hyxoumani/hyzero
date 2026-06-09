@@ -37,6 +37,104 @@ fn gumbel_top_k() -> Option<usize> {
     })
 }
 
+// --- Value-based resignation (HYZERO_RESIGN* gates) ---
+//
+// Read per-call from the environment (mirroring `material_shaping_enabled` and
+// `HYZERO_DECISIVE_SAMPLE_FRAC` in replay_buffer.rs) so env-controlled tests can
+// vary them within one process; serialize such tests via the module `Mutex`.
+
+/// Env-gate: true (DEFAULT) unless HYZERO_RESIGN is "0"/"false"/"no"/empty.
+/// When enabled, self-play games end early once the side-to-move's root_value
+/// stays at/below `resign_threshold()` for `resign_plies()` consecutive plies,
+/// awarding the opponent a win. Resignation is VALUE-based, not material-based:
+/// passive play that avoids checkmate still drives root_value negative, so it
+/// cannot be gamed by shuffling to preserve material (passivity-attractor guard,
+/// see the game-outcome comment block in `play_game`).
+fn resign_enabled() -> bool {
+    match std::env::var("HYZERO_RESIGN") {
+        Ok(v) => {
+            let s = v.trim().to_ascii_lowercase();
+            !(s.is_empty() || s == "0" || s == "false" || s == "no")
+        }
+        Err(_) => true,
+    }
+}
+
+/// Root-value threshold below which a ply counts toward resignation.
+/// `HYZERO_RESIGN_THRESHOLD`, default -0.90, clamped to [-1.0, -0.5].
+fn resign_threshold() -> f32 {
+    std::env::var("HYZERO_RESIGN_THRESHOLD")
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+        .map(|v| v.clamp(-1.0, -0.5))
+        .unwrap_or(-0.90)
+}
+
+/// Number of consecutive losing plies required before resigning.
+/// `HYZERO_RESIGN_CONSECUTIVE`, default 4 (clamped to >= 1).
+fn resign_plies() -> u32 {
+    std::env::var("HYZERO_RESIGN_CONSECUTIVE")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .filter(|&n| n >= 1)
+        .unwrap_or(4)
+}
+
+/// Minimum ply before resignation can trigger. `HYZERO_RESIGN_MIN_PLY`,
+/// default 30 — never resign during the high-temperature exploration window.
+fn resign_min_ply() -> u32 {
+    std::env::var("HYZERO_RESIGN_MIN_PLY")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(30)
+}
+
+// --- Annealed self-play temperature (HYZERO_TEMP_ANNEAL* gates) ---
+
+/// Env-gate: true (DEFAULT) unless HYZERO_TEMP_ANNEAL is "0"/"false"/"no"/empty.
+/// When enabled, self-play temperature linearly anneals 1.0 → 0.01 over
+/// `temp_anneal_plies()` plies once past `temperature_moves`, instead of the
+/// hard step to 0.01.
+fn temp_anneal_enabled() -> bool {
+    match std::env::var("HYZERO_TEMP_ANNEAL") {
+        Ok(v) => {
+            let s = v.trim().to_ascii_lowercase();
+            !(s.is_empty() || s == "0" || s == "false" || s == "no")
+        }
+        Err(_) => true,
+    }
+}
+
+/// Number of plies over which temperature anneals from 1.0 to 0.01 after the
+/// exploration window. `HYZERO_TEMP_ANNEAL_PLIES`, default 60 (clamped >= 1).
+fn temp_anneal_plies() -> u32 {
+    std::env::var("HYZERO_TEMP_ANNEAL_PLIES")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .filter(|&n| n >= 1)
+        .unwrap_or(60)
+}
+
+/// Compute the self-play temperature for `turn_count` given the
+/// `temperature_moves` exploration window. Within the window: 1.0. Past it,
+/// when annealing is enabled, linearly interpolate 1.0 → 0.01 over
+/// `temp_anneal_plies()` plies, then hold 0.01. When annealing is disabled,
+/// preserve the original hard step to 0.01.
+fn selfplay_temperature(turn_count: usize, temperature_moves: u32) -> f32 {
+    let tm = temperature_moves as usize;
+    if turn_count < tm {
+        return 1.0;
+    }
+    if !temp_anneal_enabled() {
+        return 0.01;
+    }
+    let span = temp_anneal_plies() as f32;
+    let past = (turn_count - tm) as f32;
+    let frac = (past / span).min(1.0);
+    // Linear anneal from 1.0 down to 0.01.
+    1.0 + frac * (0.01 - 1.0)
+}
+
 // --- MCTS summary log (HYZERO_MCTS_TRACE gate) ---
 
 /// Cached env-gate: true if HYZERO_MCTS_TRACE is set and non-zero.
@@ -236,6 +334,14 @@ pub struct GameConfig {
     /// `None` (default) disables replay capture entirely — zero overhead when
     /// off. The viewer (`cargo run --bin replay -- <file>`) reads these files.
     pub replay_dir: Option<Arc<PathBuf>>,
+    /// Eval-only: when true, `play_game_dual` adjudicates a non-checkmate game
+    /// at the move cap by awarding ±1 to the side ahead by at least
+    /// `adjudication_material_margin` material. OFF by default — self-play must
+    /// never adjudicate (material adjudication caused a passivity attractor).
+    pub adjudicate_at_cap: bool,
+    /// Material lead (white-absolute, standard piece values) required to award a
+    /// decisive result when `adjudicate_at_cap` is enabled.
+    pub adjudication_material_margin: i32,
 }
 
 impl Default for GameConfig {
@@ -245,6 +351,8 @@ impl Default for GameConfig {
             exploration_constant: 1.5,
             temperature_moves: 30,
             replay_dir: None,
+            adjudicate_at_cap: false,
+            adjudication_material_margin: 5,
         }
     }
 }
@@ -382,7 +490,13 @@ pub async fn play_game_dual(
     let game_outcome = match board.result() {
         GameResult::Checkmate(Color::White) => 1.0,
         GameResult::Checkmate(Color::Black) => -1.0,
-        _ => 0.0,
+        // Non-checkmate terminal (incl. the move cap): adjudicate when enabled,
+        // else a draw. Delegated to a pure helper so the branch is unit-testable.
+        _ => adjudicate_non_checkmate(
+            &board,
+            config.adjudicate_at_cap,
+            config.adjudication_material_margin,
+        ),
     };
 
     DualGameOutcome {
@@ -420,6 +534,15 @@ pub async fn play_game(
     };
 
     let mut moves: Vec<String> = Vec::new();
+
+    // Value-based resignation state. Counts consecutive plies where the
+    // side-to-move's root_value is at/below `resign_threshold()`. When it
+    // reaches `resign_plies()` (and we are past `resign_min_ply()`), the game
+    // ends with the opponent of the resigning side awarded a win. `resigned_side`
+    // records which color resigned; converted to a White-absolute outcome after
+    // the loop.
+    let mut consecutive_losing_plies: u32 = 0;
+    let mut resigned_side: Option<Color> = None;
 
     loop {
         if board.result() != GameResult::Ongoing {
@@ -494,12 +617,9 @@ pub async fn play_game(
             trace_summary(model_version, turn_count, &legal_actions, &policy, &visit_distribution);
         }
 
-        // Select action based on temperature
-        let temperature = if turn_count < config.temperature_moves as usize {
-            1.0
-        } else {
-            0.01
-        };
+        // Select action based on temperature (annealed past the exploration
+        // window when HYZERO_TEMP_ANNEAL is on; hard step to 0.01 when off).
+        let temperature = selfplay_temperature(turn_count, config.temperature_moves);
         // selected_action is in current-player (flipped) coordinate space for Black.
         let selected_action = tree.select_action(temperature);
 
@@ -535,6 +655,25 @@ pub async fn play_game(
             white_to_move: side_to_move == Color::White,
         });
 
+        // Value-based resignation. `root_value` is in the current side-to-move's
+        // POV, so a value at/below the (negative) threshold means the side to
+        // move believes it is losing badly. Track consecutive such plies; once
+        // they reach `resign_plies()` (and we are past `resign_min_ply()`), the
+        // side to move resigns and the opponent is awarded the win. Material is
+        // never consulted — passive play that avoids mate still drives
+        // root_value negative, so the passivity attractor cannot game this.
+        if resign_enabled() {
+            if root_value <= resign_threshold() {
+                consecutive_losing_plies += 1;
+            } else {
+                consecutive_losing_plies = 0;
+            }
+            if turn_count >= resign_min_ply() as usize && consecutive_losing_plies >= resign_plies()
+            {
+                resigned_side = Some(side_to_move);
+            }
+        }
+
         // Snapshot position before applying the move (for history encoding on next turn)
         let snapshot = board_to_snapshot(&board);
 
@@ -563,6 +702,12 @@ pub async fn play_game(
             Color::White
         };
         turn_count += 1;
+
+        // End the game immediately on resignation (the resigning side's last
+        // move and step are already recorded above).
+        if resigned_side.is_some() {
+            break;
+        }
     }
 
     // Game outcome.
@@ -573,24 +718,31 @@ pub async fn play_game(
     // alone (without early termination on material imbalance) is a weaker incentive:
     // preserving material only pays off IF you survive to a real terminal, so passive
     // play still risks getting checkmated.
-    let (game_outcome, is_draw) = match board.result() {
-        GameResult::Checkmate(Color::White) => (1.0f32, false),
-        GameResult::Checkmate(Color::Black) => (-1.0f32, false),
-        _ => {
-            // All non-checkmate terminals: stalemate, repetition, 50-move, cap, insufficient material.
-            // Default (AlphaZero-style): outcome = 0.0 — pure-outcome signal; only real
-            // checkmates produce non-zero value targets. Material shaping is OFF unless
-            // explicitly opted in via HYZERO_MATERIAL_SHAPING=1. Shaping was historically
-            // the cause of (a) the PGN-result labeling bug (shaped draws got labeled 1-0 /
-            // 0-1 based on the tanh(Δ) threshold) and (b) shuffle-attractor reinforcement
-            // where material-leading sides got +0.8 value targets for drawing by
-            // repetition, teaching the value head to reward passive play.
-            if material_shaping_enabled() {
-                let delta = compute_material_diff(&board);
-                let scale = material_shaping_scale();
-                ((delta as f32 / scale).tanh(), true)
-            } else {
-                (0.0f32, true)
+    let (game_outcome, is_draw) = if let Some(loser) = resigned_side {
+        // Value-based resignation: the side that resigned loses, opponent wins.
+        // White-absolute: White resigns → -1.0 (Black wins); Black resigns → +1.0.
+        let outcome = if loser == Color::White { -1.0f32 } else { 1.0f32 };
+        (outcome, false)
+    } else {
+        match board.result() {
+            GameResult::Checkmate(Color::White) => (1.0f32, false),
+            GameResult::Checkmate(Color::Black) => (-1.0f32, false),
+            _ => {
+                // All non-checkmate terminals: stalemate, repetition, 50-move, cap, insufficient material.
+                // Default (AlphaZero-style): outcome = 0.0 — pure-outcome signal; only real
+                // checkmates produce non-zero value targets. Material shaping is OFF unless
+                // explicitly opted in via HYZERO_MATERIAL_SHAPING=1. Shaping was historically
+                // the cause of (a) the PGN-result labeling bug (shaped draws got labeled 1-0 /
+                // 0-1 based on the tanh(Δ) threshold) and (b) shuffle-attractor reinforcement
+                // where material-leading sides got +0.8 value targets for drawing by
+                // repetition, teaching the value head to reward passive play.
+                if material_shaping_enabled() {
+                    let delta = compute_material_diff(&board);
+                    let scale = material_shaping_scale();
+                    ((delta as f32 / scale).tanh(), true)
+                } else {
+                    (0.0f32, true)
+                }
             }
         }
     };
@@ -912,12 +1064,40 @@ fn compute_material_diff(board: &GameBoard) -> i32 {
     delta
 }
 
+/// Eval-only adjudication for a non-checkmate terminal (used by `play_game_dual`).
+/// When `enabled`, award +1.0 to White / -1.0 to Black if that side is ahead by
+/// at least `margin` material; otherwise 0.0 (draw). When disabled, always 0.0.
+/// Eval outcomes never enter training targets, so adjudication here is safe and
+/// the passivity-attractor risk that bars it from self-play does not apply.
+fn adjudicate_non_checkmate(board: &GameBoard, enabled: bool, margin: i32) -> f32 {
+    if !enabled {
+        return 0.0;
+    }
+    let delta = compute_material_diff(board);
+    if delta >= margin {
+        1.0
+    } else if delta <= -margin {
+        -1.0
+    } else {
+        0.0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::data::{BoardObservation, HiddenState, Policy, NUM_ACTIONS};
     use crate::mcts::evaluator::Evaluator;
     use async_trait::async_trait;
+
+    /// Serialize tests that mutate the HYZERO_RESIGN*/HYZERO_TEMP_ANNEAL* env
+    /// vars. Rust tests run in parallel by default and these vars are read
+    /// per-call from the process-global environment, so concurrent mutation
+    /// would race. Mirrors the lock pattern in replay_buffer.rs.
+    fn env_lock() -> &'static std::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    }
 
     /// Regression: legal_actions ordering after POV-flip must be color-symmetric.
     ///
@@ -979,6 +1159,35 @@ mod tests {
         }
     }
 
+    /// Evaluator that always thinks the side to move is hopelessly losing:
+    /// `root_setup` returns root value -1.0 (side-to-move POV) and `expand_leaf`
+    /// returns leaf value +1.0 (child/opponent POV, reward 0). With the backup
+    /// recurrence `G_0 = r - value`, every simulation pushes the root Q toward
+    /// -1.0, so `tree.root_value()` sits well below the resignation threshold —
+    /// letting the resignation tests fire deterministically.
+    struct LosingEvaluator;
+
+    #[async_trait]
+    impl Evaluator for LosingEvaluator {
+        async fn root_setup(
+            &self,
+            _obs: &BoardObservation,
+            _legal_mask: &[bool],
+        ) -> (HiddenState, Policy, f32) {
+            let policy = vec![1.0 / NUM_ACTIONS as f32; NUM_ACTIONS];
+            (HiddenState::new(64), policy, -1.0)
+        }
+
+        async fn expand_leaf(
+            &self,
+            _hs: &HiddenState,
+            _action: ActionIndex,
+        ) -> (HiddenState, f32, Policy, f32) {
+            let policy = vec![1.0 / NUM_ACTIONS as f32; NUM_ACTIONS];
+            (HiddenState::new(64), 0.0, policy, 1.0)
+        }
+    }
+
     #[test]
     fn test_legal_moves_starting_position() {
         let precomputed = Arc::new(PrecomputedItems::begin_precomputing());
@@ -1006,6 +1215,8 @@ mod tests {
             exploration_constant: 1.5,
             temperature_moves: 5,
             replay_dir: None,
+            adjudicate_at_cap: false,
+            adjudication_material_margin: 5,
         };
 
         let trajectory = play_game(precomputed, evaluator, 1, config).await;
@@ -1106,6 +1317,8 @@ mod tests {
             exploration_constant: 1.5,
             temperature_moves: 0,
             replay_dir: None,
+            adjudicate_at_cap: false,
+            adjudication_material_margin: 5,
         };
 
         const N: usize = 2000;
@@ -1164,6 +1377,8 @@ mod tests {
             exploration_constant: 1.5,
             temperature_moves: 5,
             replay_dir: None,
+            adjudicate_at_cap: false,
+            adjudication_material_margin: 5,
         };
 
         let outcome = play_game_dual(precomputed, white_evaluator, black_evaluator, config).await;
@@ -1297,6 +1512,8 @@ mod tests {
             exploration_constant: 1.5,
             temperature_moves: 0, // greedy — faster termination
             replay_dir: None,
+            adjudicate_at_cap: false,
+            adjudication_material_margin: 5,
         };
 
         // Play many games until we see a decisive result (Black wins), then verify
@@ -1331,4 +1548,190 @@ mod tests {
         let _ = found_decisive;
     }
 
+    /// With resignation enabled and a hopeless evaluator, the consecutive-losing
+    /// counter must end the game decisively after exactly `resign_plies` plies.
+    /// Uses min_ply=0, consecutive=2 so resignation fires at ply 2 — before any
+    /// chess terminal is reachable (the fastest mate is 4 plies), making the
+    /// outcome and length deterministic. FAILS without the counter logic (the
+    /// game would otherwise run on as a draw).
+    #[tokio::test]
+    // Deliberate: hold the std Mutex across the await to serialize env mutation
+    // for the whole game (the env knobs are read per-ply inside play_game).
+    #[allow(clippy::await_holding_lock)]
+    async fn resigns_after_consecutive_losing_plies_below_threshold() {
+        use std::env;
+        let _guard = env_lock().lock().unwrap();
+        // SAFETY: env mutation serialized by env_lock for this test's duration.
+        unsafe {
+            env::remove_var("HYZERO_RESIGN"); // default ON
+            env::remove_var("HYZERO_RESIGN_THRESHOLD"); // default -0.90
+            env::set_var("HYZERO_RESIGN_CONSECUTIVE", "2");
+            env::set_var("HYZERO_RESIGN_MIN_PLY", "0");
+        }
+
+        let precomputed = Arc::new(PrecomputedItems::begin_precomputing());
+        let evaluator: Arc<dyn Evaluator> = Arc::new(LosingEvaluator);
+        let config = GameConfig {
+            num_simulations: 2,
+            exploration_constant: 1.5,
+            temperature_moves: 0,
+            replay_dir: None,
+            adjudicate_at_cap: false,
+            adjudication_material_margin: 5,
+        };
+
+        let trajectory = play_game(precomputed, evaluator, 1, config).await;
+
+        unsafe {
+            env::remove_var("HYZERO_RESIGN_CONSECUTIVE");
+            env::remove_var("HYZERO_RESIGN_MIN_PLY");
+        }
+
+        // Resignation fires at ply index 1 (the 2nd losing ply): step 0 = White,
+        // step 1 = Black, so Black resigns and White wins (+1.0). Two steps total.
+        assert_eq!(
+            trajectory.steps.len(),
+            2,
+            "expected resignation after exactly 2 losing plies",
+        );
+        assert!(
+            !trajectory.is_draw && trajectory.game_outcome == 1.0,
+            "Black resigns at ply 1 → White wins (+1.0); got outcome={} is_draw={}",
+            trajectory.game_outcome,
+            trajectory.is_draw,
+        );
+    }
+
+    /// The min-ply gate must suppress resignation entirely until `resign_min_ply`,
+    /// even when every ply is below threshold (consecutive=1). With min_ply=3 the
+    /// game cannot resign on plies 0..2, so it survives to ply 3 — still before
+    /// the 4-ply fastest mate, keeping the result deterministic. FAILS without
+    /// the gate (resignation would fire on the very first ply, length 1).
+    #[tokio::test]
+    // Deliberate: hold the std Mutex across the await to serialize env mutation
+    // for the whole game (the env knobs are read per-ply inside play_game).
+    #[allow(clippy::await_holding_lock)]
+    async fn does_not_resign_before_min_ply() {
+        use std::env;
+        let _guard = env_lock().lock().unwrap();
+        // SAFETY: env mutation serialized by env_lock for this test's duration.
+        unsafe {
+            env::remove_var("HYZERO_RESIGN");
+            env::remove_var("HYZERO_RESIGN_THRESHOLD");
+            env::set_var("HYZERO_RESIGN_CONSECUTIVE", "1");
+            env::set_var("HYZERO_RESIGN_MIN_PLY", "3");
+        }
+
+        let precomputed = Arc::new(PrecomputedItems::begin_precomputing());
+        let evaluator: Arc<dyn Evaluator> = Arc::new(LosingEvaluator);
+        let config = GameConfig {
+            num_simulations: 2,
+            exploration_constant: 1.5,
+            temperature_moves: 0,
+            replay_dir: None,
+            adjudicate_at_cap: false,
+            adjudication_material_margin: 5,
+        };
+
+        let trajectory = play_game(precomputed, evaluator, 1, config).await;
+
+        unsafe {
+            env::remove_var("HYZERO_RESIGN_CONSECUTIVE");
+            env::remove_var("HYZERO_RESIGN_MIN_PLY");
+        }
+
+        // The gate holds resignation until turn_count >= 3, so the game records
+        // plies 0..3 (4 steps) before resigning, instead of resigning at ply 0.
+        assert_eq!(
+            trajectory.steps.len(),
+            4,
+            "min-ply gate must suppress resignation until ply 3 (got {} steps)",
+            trajectory.steps.len(),
+        );
+    }
+
+    /// Temperature must linearly anneal from 1.0 to 0.01 across the configured
+    /// window after `temperature_moves`, rather than the old hard step. FAILS
+    /// without the anneal (the old code jumps straight to 0.01 past the window).
+    #[test]
+    fn temperature_anneals_linearly_within_window() {
+        use std::env;
+        let _guard = env_lock().lock().unwrap();
+        // SAFETY: env mutation serialized by env_lock for this test's duration.
+        unsafe {
+            env::remove_var("HYZERO_TEMP_ANNEAL"); // default ON
+            env::set_var("HYZERO_TEMP_ANNEAL_PLIES", "100");
+        }
+
+        let temperature_moves = 30u32;
+        // Inside the exploration window: full temperature.
+        assert!((selfplay_temperature(0, temperature_moves) - 1.0).abs() < 1e-6);
+        assert!((selfplay_temperature(29, temperature_moves) - 1.0).abs() < 1e-6);
+        // At the window edge the anneal starts at 1.0.
+        assert!((selfplay_temperature(30, temperature_moves) - 1.0).abs() < 1e-6);
+        // Halfway through the 100-ply anneal: midpoint between 1.0 and 0.01.
+        let mid = selfplay_temperature(80, temperature_moves);
+        let expected_mid = 1.0 + 0.5 * (0.01 - 1.0);
+        assert!(
+            (mid - expected_mid).abs() < 1e-4,
+            "expected mid-anneal temp {expected_mid}, got {mid}",
+        );
+        // Past the full anneal span: clamped to the floor 0.01.
+        assert!((selfplay_temperature(200, temperature_moves) - 0.01).abs() < 1e-4);
+
+        // With annealing OFF, the old hard step is preserved.
+        unsafe {
+            env::set_var("HYZERO_TEMP_ANNEAL", "0");
+        }
+        assert!((selfplay_temperature(29, temperature_moves) - 1.0).abs() < 1e-6);
+        assert!((selfplay_temperature(31, temperature_moves) - 0.01).abs() < 1e-6);
+
+        unsafe {
+            env::remove_var("HYZERO_TEMP_ANNEAL");
+            env::remove_var("HYZERO_TEMP_ANNEAL_PLIES");
+        }
+    }
+
+    /// Eval cap-adjudication: when enabled and one side is clearly ahead on
+    /// material at a non-checkmate terminal, the game is awarded a decisive
+    /// result. Exercises `adjudicate_non_checkmate`, the exact seam invoked by
+    /// `play_game_dual`'s cap/terminal branch. FAILS without the adjudication
+    /// branch (the default path returns 0.0). With adjudication OFF the same
+    /// material lead must still draw.
+    #[test]
+    fn dual_game_adjudicates_material_lead_at_cap() {
+        let precomputed = Arc::new(PrecomputedItems::begin_precomputing());
+        // White up a full queen (delta +9 ≥ margin 5), no checkmate present.
+        let (board, _, _) = board_from_fen("4k3/8/8/8/8/8/8/3QK3 w - - 0 1", precomputed)
+            .expect("invalid FEN");
+
+        // Enabled → decisive for the side ahead.
+        assert_eq!(
+            adjudicate_non_checkmate(&board, true, 5),
+            1.0,
+            "white up a queen should adjudicate to +1.0 when enabled",
+        );
+        // Disabled (self-play default) → still a draw, never adjudicated.
+        assert_eq!(
+            adjudicate_non_checkmate(&board, false, 5),
+            0.0,
+            "adjudication OFF must keep a non-checkmate game a draw",
+        );
+    }
+
+    /// Eval cap-adjudication must NOT award a decisive result when the material
+    /// lead is within the margin — a near-balanced non-checkmate game stays a
+    /// draw even with adjudication enabled.
+    #[test]
+    fn dual_game_draws_when_material_within_margin() {
+        let precomputed = Arc::new(PrecomputedItems::begin_precomputing());
+        // White up only a pawn (delta +1 < margin 5).
+        let (board, _, _) =
+            board_from_fen("4k3/8/8/8/8/8/4P3/4K3 w - - 0 1", precomputed).expect("invalid FEN");
+        assert_eq!(
+            adjudicate_non_checkmate(&board, true, 5),
+            0.0,
+            "a within-margin material lead should stay a draw",
+        );
+    }
 }

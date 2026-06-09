@@ -124,6 +124,8 @@ mod tests {
                 exploration_constant: 1.5,
                 temperature_moves: 2,
                 replay_dir: None,
+                adjudicate_at_cap: false,
+                adjudication_material_margin: 5,
             },
         };
 

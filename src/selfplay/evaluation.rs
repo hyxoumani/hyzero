@@ -255,6 +255,10 @@ impl EvaluationTask {
                 exploration_constant: 1.5,
                 temperature_moves: self.config.temperature_moves,
                 replay_dir: None,
+                // Subtask 2 build-green stub: defaults until subtask 3 wires these
+                // to HYZERO_EVAL_ADJUDICATE / HYZERO_EVAL_ADJ_MARGIN.
+                adjudicate_at_cap: false,
+                adjudication_material_margin: 5,
             };
 
             let gps = self.config.games_per_side;
