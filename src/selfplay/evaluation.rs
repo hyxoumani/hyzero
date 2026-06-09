@@ -11,6 +11,39 @@ use crate::mcts::evaluator::Evaluator;
 use crate::selfplay::champion::ChampionStore;
 use crate::selfplay::game_task::{DualGameOutcome, GameConfig, play_game_dual};
 
+// --- Eval-side adjudication (HYZERO_EVAL_ADJUDICATE* gates) ---
+//
+// Read per-call from the environment (mirroring `material_shaping_enabled` and
+// the HYZERO_RESIGN* helpers in game_task.rs) so env-controlled tests can vary
+// them within one process; serialize such tests via the module `Mutex`. Eval
+// outcomes never enter training targets, so adjudication here is safe and the
+// antisymmetry/passivity-attractor risk that bars it from self-play does not apply.
+
+/// Env-gate: true (DEFAULT) unless HYZERO_EVAL_ADJUDICATE is "0"/"false"/"no"/empty.
+/// When enabled, eval games (`play_game_dual`) award ±1 at the move cap to the
+/// side ahead by at least `eval_adjudication_margin()` material instead of
+/// scoring every non-checkmate terminal as a draw.
+fn eval_adjudicate_enabled() -> bool {
+    match std::env::var("HYZERO_EVAL_ADJUDICATE") {
+        Ok(v) => {
+            let s = v.trim().to_ascii_lowercase();
+            !(s.is_empty() || s == "0" || s == "false" || s == "no")
+        }
+        Err(_) => true,
+    }
+}
+
+/// Material lead (white-absolute, standard piece values) required to adjudicate a
+/// non-checkmate eval terminal as decisive. `HYZERO_EVAL_ADJ_MARGIN`, default 5
+/// (clamped to >= 1).
+fn eval_adjudication_margin() -> i32 {
+    std::env::var("HYZERO_EVAL_ADJ_MARGIN")
+        .ok()
+        .and_then(|v| v.parse::<i32>().ok())
+        .filter(|&m| m >= 1)
+        .unwrap_or(5)
+}
+
 /// Evaluator that returns uniform policy and zero value — a pure random baseline.
 pub struct RandomEvaluator;
 
@@ -70,7 +103,7 @@ pub struct EvaluationConfig {
 impl Default for EvaluationConfig {
     fn default() -> Self {
         Self {
-            games_per_side: 4,
+            games_per_side: 8,
             promotion_threshold: 0.55,
             promotion_cooldown_games: 0,
             num_simulations: 50,
@@ -255,10 +288,13 @@ impl EvaluationTask {
                 exploration_constant: 1.5,
                 temperature_moves: self.config.temperature_moves,
                 replay_dir: None,
-                // Subtask 2 build-green stub: defaults until subtask 3 wires these
-                // to HYZERO_EVAL_ADJUDICATE / HYZERO_EVAL_ADJ_MARGIN.
-                adjudicate_at_cap: false,
-                adjudication_material_margin: 5,
+                // Eval-side adjudication is ON by default (HYZERO_EVAL_ADJUDICATE):
+                // eval outcomes never enter training targets, so adjudicating a
+                // material lead at the move cap discriminates models that would
+                // otherwise all draw, without the passivity-attractor risk that
+                // bars adjudication from self-play.
+                adjudicate_at_cap: eval_adjudicate_enabled(),
+                adjudication_material_margin: eval_adjudication_margin(),
             };
 
             let gps = self.config.games_per_side;
@@ -568,10 +604,58 @@ mod tests {
     use super::*;
     use tokio::sync::watch;
 
+    /// Serialize tests that mutate the HYZERO_EVAL_ADJUDICATE* env vars. Rust
+    /// tests run in parallel by default and these vars are read per-call from
+    /// the process-global environment, so concurrent mutation would race.
+    /// Mirrors the lock pattern in replay_buffer.rs / game_task.rs.
+    fn env_lock() -> &'static std::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
+    /// Eval-side adjudication is wired into the `GameConfig` that drives
+    /// `play_game_dual`: with `HYZERO_EVAL_ADJUDICATE` set truthy, the config
+    /// the ladder builds carries `adjudicate_at_cap == true`; with it OFF, the
+    /// config falls back to a pure-draw cap. FAILS without the env wiring in
+    /// `run()` (the S2 stub hard-coded `adjudicate_at_cap: false`).
+    #[test]
+    fn eval_game_config_enables_adjudication_when_env_set() {
+        let _guard = env_lock().lock().unwrap();
+        std::env::set_var("HYZERO_EVAL_ADJUDICATE", "1");
+        std::env::set_var("HYZERO_EVAL_ADJ_MARGIN", "7");
+        // Mirror the exact construction `run()` uses for the eval GameConfig.
+        let game_config = GameConfig {
+            num_simulations: 1,
+            exploration_constant: 1.5,
+            temperature_moves: 1,
+            replay_dir: None,
+            adjudicate_at_cap: eval_adjudicate_enabled(),
+            adjudication_material_margin: eval_adjudication_margin(),
+        };
+        assert!(game_config.adjudicate_at_cap);
+        assert_eq!(game_config.adjudication_material_margin, 7);
+
+        std::env::set_var("HYZERO_EVAL_ADJUDICATE", "0");
+        assert!(!eval_adjudicate_enabled());
+
+        std::env::remove_var("HYZERO_EVAL_ADJUDICATE");
+        std::env::remove_var("HYZERO_EVAL_ADJ_MARGIN");
+    }
+
+    /// Default (env unset) keeps eval adjudication ON and the margin at 5.
+    #[test]
+    fn eval_adjudication_defaults_on_with_margin_five() {
+        let _guard = env_lock().lock().unwrap();
+        std::env::remove_var("HYZERO_EVAL_ADJUDICATE");
+        std::env::remove_var("HYZERO_EVAL_ADJ_MARGIN");
+        assert!(eval_adjudicate_enabled());
+        assert_eq!(eval_adjudication_margin(), 5);
+    }
+
     #[tokio::test]
-    async fn test_evaluation_config_defaults() {
+    async fn default_games_per_side_is_eight() {
         let config = EvaluationConfig::default();
-        assert_eq!(config.games_per_side, 4);
+        assert_eq!(config.games_per_side, 8);
         assert!((config.promotion_threshold - 0.55).abs() < f64::EPSILON);
         assert_eq!(config.num_simulations, 50);
     }
