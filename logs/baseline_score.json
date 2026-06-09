@@ -1,20 +1,21 @@
 {
-    "score": 8.2160,
-    "timestamp": "20260504_192839",
-    "git_commit": "a071e99",
+    "score": 5.2918,
+    "timestamp": "20260608_203704",
+    "git_commit": "df794b3",
     "duration_s": 1800,
     "metrics": {
-        "games_completed": 162,
-        "training_steps": 2480,
-        "first_loss": 8.5131,
-        "last_loss": 0.0,
-        "last_policy_loss": 0.0000,
-        "avg_game_length": 33.4,
-        "last_win_rate": 0.5,
+        "games_completed": 43,
+        "training_steps": 624,
+        "first_loss": 9.0004,
+        "last_loss": 2.0915,
+        "last_policy_loss": 2.0252,
+        "avg_game_length": 123.3,
+        "last_win_rate": 0.438,
+        "last_candidate_elo": 1500,
         "eval_cycles": 2,
         "promotions": 0,
         "max_champion_version": 0,
-        "checkpoints": 49,
+        "checkpoints": 12,
         "errors": 0
     },
     "config": {
@@ -22,7 +23,7 @@
         "promotion_threshold": 0.55,
         "champion_score_weight": 2.0,
         "eval_sims": 100,
-        "concurrent_games": 162,
+        "concurrent_games": 43,
         "batch_size": 64,
         "simulations": 200,
         "device": "cuda",
@@ -31,5 +32,5 @@
         "tablebase_cache": "data/syzygy/cache_tb_plus_mates.pkl",
         "tablebase_frac": 0.45
     },
-    "log_file": "logs/baseline_20260504_192839.log"
+    "log_file": "logs/baseline_20260608_203704.log"
 }
