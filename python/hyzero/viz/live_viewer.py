@@ -115,16 +115,51 @@ def parse_game_block(block: str) -> Optional[Dict[str, Any]]:
     }
 
 
+def _castle_uci_for_king_to_rook(board: "chess.Board", token: str) -> Optional[str]:
+    """If ``token`` is a king move onto its own rook square, return the standard
+    two-square castling UCI (e.g. ``e1h1`` -> ``e1g1``), else ``None``.
+
+    hyzero encodes castling as king-to-rook-square (king captures own rook), which
+    ``python-chess`` only accepts in chess960 mode. Standard mode wants the king's
+    two-square destination, so translate before giving up on the move.
+    """
+    if not token or len(token) != 4:
+        return None
+    try:
+        mv = chess.Move.from_uci(token)
+    except Exception:
+        return None
+    king = board.piece_at(mv.from_square)
+    rook = board.piece_at(mv.to_square)
+    if king is None or king.piece_type != chess.KING:
+        return None
+    if rook is None or rook.piece_type != chess.ROOK or rook.color != king.color:
+        return None
+    # King's standard castling destination is two files toward the rook.
+    from_file = chess.square_file(mv.from_square)
+    to_file = chess.square_file(mv.to_square)
+    rank = chess.square_rank(mv.from_square)
+    dest_file = from_file + (2 if to_file > from_file else -2)
+    return chess.square_name(mv.from_square) + chess.square_name(
+        chess.square(dest_file, rank)
+    )
+
+
 def _try_push(board: "chess.Board", token: str) -> bool:
-    """Push a UCI token, retrying without a stray promotion suffix.
+    """Push a UCI token, retrying without a stray promotion suffix or as castling.
 
     hyzero occasionally emits a promotion suffix on a non-pawn move (e.g.
-    ``f7d8q`` for a knight); strip the trailing piece letter and retry so the
-    rest of the game still replays.
+    ``f7d8q`` for a knight); strip the trailing piece letter and retry. It also
+    encodes castling as king-to-rook-square (``e1h1``), which standard-mode
+    python-chess rejects; translate that to the king's two-square move and retry.
+    Either fixup keeps the rest of the game replaying instead of aborting.
     """
     candidates = [token]
     if token and token[-1] in "qrbn":
         candidates.append(token[:-1])
+    castle = _castle_uci_for_king_to_rook(board, token)
+    if castle is not None:
+        candidates.append(castle)
     for cand in candidates:
         try:
             board.push_uci(cand)
@@ -134,14 +169,30 @@ def _try_push(board: "chess.Board", token: str) -> bool:
     return False
 
 
-def replay_fens(moves: List[str]) -> List[str]:
+def _new_board(start_fen: Optional[str]) -> "chess.Board":
+    """Build a board from ``start_fen`` (a ``[FEN]`` header) or the standard start.
+
+    An unparseable FEN falls back to the standard start so a bad header never
+    breaks replay entirely.
+    """
+    if start_fen:
+        try:
+            return chess.Board(start_fen)
+        except Exception:
+            pass
+    return chess.Board()
+
+
+def replay_fens(moves: List[str], start_fen: Optional[str] = None) -> List[str]:
     """Replay UCI moves into a per-ply FEN list (start position first).
 
-    Replay stops at the first illegal move and returns the FENs gathered so far,
-    so an engine-illegal tail move never breaks the whole game. The list always
-    has at least the start position, so callers never see an empty ``fens``.
+    Starts from ``start_fen`` when given (a PGN ``[FEN]`` header for a diverse
+    start), else the standard initial position. Replay stops at the first illegal
+    move and returns the FENs gathered so far, so an engine-illegal tail move
+    never breaks the whole game. The list always has at least the start position,
+    so callers never see an empty ``fens``.
     """
-    board = chess.Board()
+    board = _new_board(start_fen)
     fens = [board.fen()]
     for tok in moves:
         if not _try_push(board, tok):
@@ -175,6 +226,7 @@ def parse_pgn_file(path: str) -> List[Dict[str, Any]]:
             continue
         if parsed is None:
             continue
+        start_fen = parsed["headers"].get("FEN")
         game: Dict[str, Any] = {
             "headers": parsed["headers"],
             "event": parsed["headers"].get("Event", ""),
@@ -182,12 +234,28 @@ def parse_pgn_file(path: str) -> List[Dict[str, Any]]:
             "black": parsed["headers"].get("Black", ""),
             "result": parsed["result"],
             "moves": parsed["moves"],
+            "start_fen": start_fen,
+            "replay_note": "",
         }
         if HAVE_CHESS:
             try:
-                game["fens"] = replay_fens(parsed["moves"])
+                game["fens"] = replay_fens(parsed["moves"], start_fen)
             except Exception:
-                game["fens"] = [chess.Board().fen()]
+                game["fens"] = [_new_board(start_fen).fen()]
+            # Legacy games written before the FEN-header fix can begin from a
+            # diverse start with no [FEN] header, so the very first move is
+            # illegal from the standard start and replay yields only the start
+            # position. Flag that explicitly so the page shows a note instead of
+            # a silent "0 / 0". A genuine single-position game (no moves) is not
+            # flagged.
+            if (
+                start_fen is None
+                and parsed["moves"]
+                and len(game["fens"]) == 1
+            ):
+                game["replay_note"] = (
+                    "replay unavailable (no FEN header — game predates fix)"
+                )
         games.append(game)
     return games
 
@@ -285,6 +353,7 @@ def build_game_payload(logs_dir: str, key: str, idx: int) -> Optional[Dict[str, 
         "black": g.get("black", ""),
         "result": g.get("result", "*"),
         "moves": g.get("moves", []),
+        "replay_note": g.get("replay_note", ""),
     }
     if HAVE_CHESS:
         payload["fens"] = g.get("fens", [])
@@ -391,6 +460,7 @@ PAGE_HTML = r"""<!doctype html>
   #status { font-size: 12px; opacity: 0.7; }
   #plyinfo { font-size: 13px; min-width: 90px; text-align: center; }
   #nochess { color: #c0392b; font-size: 13px; }
+  #replaynote { color: #c07a02; font-size: 13px; min-height: 1em; }
   #errbar { display: none; background: #c0392b; color: #fff; font-size: 12px;
             padding: 6px 10px; white-space: pre-wrap; }
 </style>
@@ -411,6 +481,7 @@ PAGE_HTML = r"""<!doctype html>
 </div>
 <div id="main">
   <div id="nochess" hidden>python-chess not available — board disabled, showing moves only</div>
+  <div id="replaynote"></div>
   <div class="board" id="board"></div>
   <div class="controls">
     <button id="first">⏮</button>
@@ -488,6 +559,8 @@ function renderBoard(fen) {
 function renderCurrent() {
   const plyEl = document.getElementById("plyinfo");
   const movesEl = document.getElementById("moves");
+  const noteEl = document.getElementById("replaynote");
+  noteEl.textContent = (detail && detail.replay_note) ? detail.replay_note : "";
   if (!detail) { plyEl.textContent = "–"; movesEl.textContent = ""; renderBoard(START_FEN); return; }
   const fens = (haveChess && detail.fens) ? detail.fens : null;
   if (fens && fens.length) {

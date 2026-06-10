@@ -275,6 +275,125 @@ def test_parse_cache_invalidates_when_game_appended(tmp_path):
     assert second[2]["event"] == "Eval Cycle 1 Game 3"
 
 
+# A game that started from a non-standard position, written with the new
+# [SetUp]/[FEN] headers. The first move (a queen on c8) is illegal from the
+# standard start but legal from this FEN, so replay must honor the header.
+CUSTOM_START_GAME = (
+    '[Event "Eval Cycle 1 Game 2"]\n'
+    '[White "challenger"]\n'
+    '[Black "champion"]\n'
+    '[Result "1-0"]\n'
+    '[Termination "checkmate"]\n'
+    '[SetUp "1"]\n'
+    '[FEN "2Q1k3/8/8/8/8/8/8/4K3 w - - 0 1"]\n'
+    "\n"
+    "1. c8c7 1-0\n"
+    "\n"
+)
+
+
+def test_parse_game_block_extracts_fen_header():
+    """A [FEN] header on a diverse-start game is captured for replay."""
+    block = lv.split_games(CUSTOM_START_GAME)[0]
+    parsed = lv.parse_game_block(block)
+    assert parsed is not None
+    assert parsed["headers"]["SetUp"] == "1"
+    assert parsed["headers"]["FEN"] == "2Q1k3/8/8/8/8/8/8/4K3 w - - 0 1"
+
+
+def test_replay_honors_fen_header_for_custom_start():
+    """replay_fens starts from the [FEN] header so a diverse-start game's first
+    move (illegal from the standard start) replays cleanly."""
+    if not lv.HAVE_CHESS:
+        import pytest
+
+        pytest.skip("python-chess not available")
+    start = "2Q1k3/8/8/8/8/8/8/4K3 w - - 0 1"
+    fens = lv.replay_fens(["c8c7"], start)
+    assert len(fens) == 2  # start + one legal move
+    assert fens[0].startswith("2Q1k3/8/8/8/8/8/8/4K3 w")
+
+
+def test_game_payload_replays_custom_start_from_fen_header(tmp_path):
+    """A diverse-start game with a [FEN] header replays fully (no 0/0) and carries
+    no legacy note."""
+    if not lv.HAVE_CHESS:
+        import pytest
+
+        pytest.skip("python-chess not available")
+    (tmp_path / "eval_games.pgn").write_text(CUSTOM_START_GAME, encoding="utf-8")
+    payload = lv.build_game_payload(str(tmp_path), "eval", 0)
+    assert payload is not None
+    assert len(payload["fens"]) == 2  # replayed past the start
+    assert payload["replay_note"] == ""
+
+
+def test_legacy_custom_start_without_fen_header_gets_replay_note(tmp_path):
+    """A legacy diverse-start game with NO [FEN] header (first move illegal from
+    the standard start) is flagged with a visible note instead of a silent 0/0."""
+    if not lv.HAVE_CHESS:
+        import pytest
+
+        pytest.skip("python-chess not available")
+    legacy = (
+        '[Event "Eval Cycle 1 Game 2"]\n'
+        '[White "challenger"]\n'
+        '[Black "champion"]\n'
+        '[Result "1-0"]\n'
+        '[Termination "checkmate"]\n'
+        "\n"
+        "1. c8c7 1-0\n"  # no FEN header -> illegal from the standard start
+        "\n"
+    )
+    (tmp_path / "eval_games.pgn").write_text(legacy, encoding="utf-8")
+    payload = lv.build_game_payload(str(tmp_path), "eval", 0)
+    assert payload is not None
+    assert len(payload["fens"]) == 1  # only the start position
+    assert "no FEN header" in payload["replay_note"]
+
+
+def test_standard_start_game_has_no_replay_note(tmp_path):
+    """A normal standard-start game replays and carries no legacy note."""
+    if not lv.HAVE_CHESS:
+        import pytest
+
+        pytest.skip("python-chess not available")
+    (tmp_path / "selfplay_sample.pgn").write_text(TWO_GAMES, encoding="utf-8")
+    payload = lv.build_game_payload(str(tmp_path), "selfplay", 0)
+    assert payload is not None
+    assert len(payload["fens"]) == 5  # start + 4 plies
+    assert payload["replay_note"] == ""
+
+
+def test_replay_translates_castling_king_to_rook_uci():
+    """Castling encoded as king-to-own-rook-square (e1h1) is translated to the
+    standard two-square king move (e1g1) so it replays in standard mode."""
+    if not lv.HAVE_CHESS:
+        import pytest
+
+        pytest.skip("python-chess not available")
+    # White: e1 king + h1 rook, kingside castling rights. e1h1 = O-O.
+    start = "4k3/8/8/8/8/8/8/4K2R w K - 0 1"
+    fens = lv.replay_fens(["e1h1"], start)
+    assert len(fens) == 2
+    # After O-O the white king is on g1 and rook on f1.
+    placement = fens[1].split(" ")[0]
+    assert placement.endswith("5RK1")
+
+
+def test_replay_translates_queenside_castling_king_to_rook_uci():
+    """Queenside castling as king-to-rook (e1a1) translates to e1c1."""
+    if not lv.HAVE_CHESS:
+        import pytest
+
+        pytest.skip("python-chess not available")
+    start = "4k3/8/8/8/8/8/8/R3K3 w Q - 0 1"
+    fens = lv.replay_fens(["e1a1"], start)
+    assert len(fens) == 2
+    placement = fens[1].split(" ")[0]
+    assert placement.endswith("2KR4")
+
+
 def test_mid_write_movetext_tail_parses_as_shorter_game(tmp_path):
     """A trailing game with finished headers but a half-written movetext tail
     parses as a shorter game whose replay stops cleanly at the truncation."""
