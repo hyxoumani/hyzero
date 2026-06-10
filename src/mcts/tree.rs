@@ -132,35 +132,66 @@ fn top_k_actions(policy: &[f32], k: usize) -> Vec<crate::data::ActionIndex> {
 }
 
 /// Exploration fraction for Dirichlet noise at the root.
-/// Default 0.25 (AlphaZero chess). Overridable via `HYZERO_DIRICHLET_EPSILON`.
+/// Default 0.25 (AlphaZero chess). Overridable via `HYZERO_DIRICHLET_EPS`.
 const DEFAULT_NOISE_EPSILON: f32 = 0.25;
 /// Dirichlet concentration parameter (alpha) for chess.
 /// AlphaZero paper: 0.3 for chess, 0.15 for shogi, 0.03 for Go.
 /// Overridable via `HYZERO_DIRICHLET_ALPHA`.
 const DEFAULT_NOISE_ALPHA: f32 = 0.3;
 
-/// Read Dirichlet ε from env (cached) — fraction of root prior replaced by noise.
-fn noise_epsilon() -> f32 {
-    static CACHED: OnceLock<f32> = OnceLock::new();
-    *CACHED.get_or_init(|| {
-        std::env::var("HYZERO_DIRICHLET_EPSILON")
-            .ok()
-            .and_then(|v| v.parse::<f32>().ok())
-            .filter(|v| (0.0..=1.0).contains(v))
-            .unwrap_or(DEFAULT_NOISE_EPSILON)
-    })
+/// Parse the Dirichlet ε override from a raw env value. Valid range is
+/// `[0.0, 1.0]`; anything unparseable or out of range falls back to
+/// `DEFAULT_NOISE_EPSILON` with a stderr warning. Factored out (separate from
+/// the cached reader) so unit tests can exercise parsing without racing the
+/// process-global `OnceLock` cache or env vars.
+fn parse_noise_epsilon(raw: Option<String>) -> f32 {
+    match raw {
+        None => DEFAULT_NOISE_EPSILON,
+        Some(v) => match v.parse::<f32>() {
+            Ok(eps) if (0.0..=1.0).contains(&eps) => eps,
+            _ => {
+                eprintln!(
+                    "[mcts] HYZERO_DIRICHLET_EPS={v:?} invalid (want 0.0..=1.0); \
+                     using default {DEFAULT_NOISE_EPSILON}"
+                );
+                DEFAULT_NOISE_EPSILON
+            }
+        },
+    }
 }
 
-/// Read Dirichlet α from env (cached) — concentration of the noise distribution.
+/// Parse the Dirichlet α override from a raw env value. Must be `> 0.0`;
+/// anything unparseable or non-positive falls back to `DEFAULT_NOISE_ALPHA`
+/// with a stderr warning. Factored out for the same testability reason as
+/// `parse_noise_epsilon`.
+fn parse_noise_alpha(raw: Option<String>) -> f32 {
+    match raw {
+        None => DEFAULT_NOISE_ALPHA,
+        Some(v) => match v.parse::<f32>() {
+            Ok(alpha) if alpha > 0.0 => alpha,
+            _ => {
+                eprintln!(
+                    "[mcts] HYZERO_DIRICHLET_ALPHA={v:?} invalid (want > 0.0); \
+                     using default {DEFAULT_NOISE_ALPHA}"
+                );
+                DEFAULT_NOISE_ALPHA
+            }
+        },
+    }
+}
+
+/// Read Dirichlet ε from env (cached) — fraction of root prior replaced by
+/// noise. Read once at startup, not per-search.
+fn noise_epsilon() -> f32 {
+    static CACHED: OnceLock<f32> = OnceLock::new();
+    *CACHED.get_or_init(|| parse_noise_epsilon(std::env::var("HYZERO_DIRICHLET_EPS").ok()))
+}
+
+/// Read Dirichlet α from env (cached) — concentration of the noise
+/// distribution. Read once at startup, not per-search.
 fn noise_alpha() -> f32 {
     static CACHED: OnceLock<f32> = OnceLock::new();
-    *CACHED.get_or_init(|| {
-        std::env::var("HYZERO_DIRICHLET_ALPHA")
-            .ok()
-            .and_then(|v| v.parse::<f32>().ok())
-            .filter(|v| *v > 0.0)
-            .unwrap_or(DEFAULT_NOISE_ALPHA)
-    })
+    *CACHED.get_or_init(|| parse_noise_alpha(std::env::var("HYZERO_DIRICHLET_ALPHA").ok()))
 }
 
 /// First-Play Urgency reduction subtracted from the parent's normalized Q for
@@ -1488,5 +1519,60 @@ mod tests {
         // this -1 and push search toward the OTHER child (not losing to mate).
         let d1_q = d1.q_value();
         assert!(d1_q < 0.0, "d1.q_value should be negative; got {}", d1_q);
+    }
+
+    // ── Dirichlet noise env-knob parsing ──────────────────────────────────
+    // These drive the pure `parse_noise_*` helpers (not the cached readers) so
+    // they neither race the process-global `OnceLock` cache nor mutate env vars.
+
+    #[test]
+    fn dirichlet_eps_defaults_when_unset() {
+        assert!((parse_noise_epsilon(None) - DEFAULT_NOISE_EPSILON).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn dirichlet_alpha_defaults_when_unset() {
+        assert!((parse_noise_alpha(None) - DEFAULT_NOISE_ALPHA).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn dirichlet_eps_parses_override() {
+        assert!((parse_noise_epsilon(Some("0.10".to_string())) - 0.10).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn dirichlet_alpha_parses_override() {
+        assert!((parse_noise_alpha(Some("0.15".to_string())) - 0.15).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn dirichlet_eps_falls_back_on_unparseable() {
+        assert!(
+            (parse_noise_epsilon(Some("not-a-number".to_string())) - DEFAULT_NOISE_EPSILON).abs()
+                < f32::EPSILON
+        );
+    }
+
+    #[test]
+    fn dirichlet_eps_falls_back_when_above_one() {
+        assert!(
+            (parse_noise_epsilon(Some("1.5".to_string())) - DEFAULT_NOISE_EPSILON).abs()
+                < f32::EPSILON
+        );
+    }
+
+    #[test]
+    fn dirichlet_eps_falls_back_when_negative() {
+        assert!(
+            (parse_noise_epsilon(Some("-0.1".to_string())) - DEFAULT_NOISE_EPSILON).abs()
+                < f32::EPSILON
+        );
+    }
+
+    #[test]
+    fn dirichlet_alpha_falls_back_when_non_positive() {
+        assert!(
+            (parse_noise_alpha(Some("0.0".to_string())) - DEFAULT_NOISE_ALPHA).abs() < f32::EPSILON
+        );
     }
 }
