@@ -254,7 +254,7 @@ async fn main() {
     //    starting from RandomBackend.
     let resume_path_str = resume_checkpoint_path();
     let resume_path = std::path::Path::new(&resume_path_str).to_path_buf();
-    let (champion_store_evaluator, champion_store_version, champion_backend_handle) =
+    let (champion_store_evaluator, champion_store_version, champion_backend_handle, champion_error_flag) =
         if resume_path.exists() {
             // Determine starting version from archived best_vNNN.pt files.
             let starting_version = match find_latest_archive_version() {
@@ -336,16 +336,21 @@ async fn main() {
                     // teardown can never strand mid-cycle work.
                     std::mem::forget(champion_tx.clone());
 
-                    let champion_eval: Arc<dyn Evaluator> = Arc::new(
-                        ChannelEvaluator::with_channels(champion_tx, champion_hidden_channels),
-                    );
+                    // Capture the champion evaluator's sticky error-flag handle so
+                    // the bootstrap (empty-pool) eval path can skip a promotion
+                    // decision when this champion's batcher dies mid-cycle and its
+                    // games degrade to neutral evals.
+                    let champion_channel_eval =
+                        ChannelEvaluator::with_channels(champion_tx, champion_hidden_channels);
+                    let champion_error_flag = Some(champion_channel_eval.error_flag());
+                    let champion_eval: Arc<dyn Evaluator> = Arc::new(champion_channel_eval);
 
                     println!(
                         "[selfplay] Loaded champion from {} (version={starting_version})",
                         resume_path.display()
                     );
 
-                    (champion_eval, starting_version, champion_handle)
+                    (champion_eval, starting_version, champion_handle, champion_error_flag)
                 }
                 Err(e) => {
                     eprintln!(
@@ -360,7 +365,8 @@ async fn main() {
                     println!(
                         "[selfplay] No existing resume checkpoint; starting with RandomEvaluator (version=0)"
                     );
-                    (eval, 0, champion_handle)
+                    // RandomEvaluator has no inference batcher to die → no flag.
+                    (eval, 0, champion_handle, None)
                 }
             }
         } else {
@@ -372,7 +378,8 @@ async fn main() {
                 "[selfplay] No existing resume checkpoint at {}; starting with RandomEvaluator (version=0)",
                 resume_path.display()
             );
-            (eval, 0, champion_handle)
+            // RandomEvaluator has no inference batcher to die → no flag.
+            (eval, 0, champion_handle, None)
         };
 
     // 6. Spawn training thread backed by the Python Trainer.
@@ -509,8 +516,13 @@ async fn main() {
     ));
 
     // 10. Spawn evaluation ladder task.
-    let challenger_eval: Arc<dyn Evaluator> =
-        Arc::new(ChannelEvaluator::with_channels(inference_tx, hidden_channels));
+    // Build the concrete challenger evaluator first so its sticky error-flag handle
+    // can be registered with the eval task: a cycle whose challenger recovered an
+    // inference call to neutral (dead batcher) must skip its promotion decision
+    // rather than record a garbage promotion.
+    let challenger_channel_eval = ChannelEvaluator::with_channels(inference_tx, hidden_channels);
+    let challenger_error_flag = challenger_channel_eval.error_flag();
+    let challenger_eval: Arc<dyn Evaluator> = Arc::new(challenger_channel_eval);
     let eval_config = EvaluationConfig {
         games_per_side: config.games_per_side,
         promotion_threshold: config.promotion_threshold,
@@ -545,7 +557,8 @@ async fn main() {
         eval_config,
     )
     .with_champion_backend(champion_backend_handle)
-    .with_opponent(opponent_evaluator, opponent_server_handle);
+    .with_opponent(opponent_evaluator, opponent_server_handle)
+    .with_error_flags(Some(challenger_error_flag), champion_error_flag);
 
     let mut eval_task = eval_task_obj;
     tokio::spawn(async move {

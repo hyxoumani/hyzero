@@ -155,6 +155,19 @@ pub struct EvaluationTask {
     config: EvaluationConfig,
     cycle: u64,
     total_games_since_last_promotion: usize,
+    /// Sticky error-flag handle of the challenger `ChannelEvaluator`, when it is
+    /// one. Set whenever the challenger recovered an inference call to a neutral
+    /// result during a cycle's games. Checked (and cleared) after the games so a
+    /// cycle whose challenger evals were degraded does NOT reach a promotion
+    /// decision. `None` when the challenger is not a `ChannelEvaluator` (e.g. tests
+    /// using `RandomEvaluator`), in which case it contributes no degradation.
+    challenger_error_flag: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// Sticky error-flag handle of the bootstrap champion `ChannelEvaluator`, when
+    /// it is one. Only the empty-pool (bootstrap) path plays games through the
+    /// live champion; a dead champion batcher there yields neutral champion evals
+    /// that would let the challenger win trivially, so its degradation must also
+    /// block the promotion decision. `None` for a `RandomEvaluator` champion.
+    champion_error_flag: Option<Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl EvaluationTask {
@@ -179,7 +192,24 @@ impl EvaluationTask {
             config,
             cycle: 0,
             total_games_since_last_promotion: 0,
+            challenger_error_flag: None,
+            champion_error_flag: None,
         }
+    }
+
+    /// Register the challenger and (optional) bootstrap-champion sticky error-flag
+    /// handles. After each cycle's games the loop reads-and-clears these; if either
+    /// fired, the cycle is degraded by inference errors and the promotion decision
+    /// is skipped (the loop re-arms for the next version). Pass `None` for an
+    /// evaluator that is not a `ChannelEvaluator` and so cannot report recoveries.
+    pub fn with_error_flags(
+        mut self,
+        challenger: Option<Arc<std::sync::atomic::AtomicBool>>,
+        champion: Option<Arc<std::sync::atomic::AtomicBool>>,
+    ) -> Self {
+        self.challenger_error_flag = challenger;
+        self.champion_error_flag = champion;
+        self
     }
 
     /// Attach the swappable champion backend handle so promotion can hot-swap weights.
@@ -583,6 +613,35 @@ impl EvaluationTask {
                 opps = opponents_label,
                 ps_score = pool_score,
             );
+
+            // Error-degradation gate (re-arm without promoting). If any eval
+            // evaluator recovered an inference call to a neutral result during
+            // this cycle's games — a batcher genuinely died mid-cycle (OOM /
+            // backend panic; the champion keepalive makes this abnormal, not
+            // impossible) — the games no longer reflect the real models: champion
+            // evals collapse to neutral, the challenger wins trivially, and the
+            // gate would record a garbage promotion. Such a cycle must NOT reach a
+            // promotion decision. Read-and-clear BOTH flags (no short-circuit) so a
+            // single degraded cycle does not poison later ones, then skip to the
+            // next loop iteration (re-arm). Self-play games keep the existing
+            // neutral-degradation behavior — their output feeds replay, not this
+            // champion gate — so only the eval evaluators are inspected here.
+            let challenger_degraded = self
+                .challenger_error_flag
+                .as_ref()
+                .map(|f| f.swap(false, std::sync::atomic::Ordering::AcqRel))
+                .unwrap_or(false);
+            let champion_degraded = self
+                .champion_error_flag
+                .as_ref()
+                .map(|f| f.swap(false, std::sync::atomic::Ordering::AcqRel))
+                .unwrap_or(false);
+            if challenger_degraded || champion_degraded {
+                eprintln!(
+                    "[eval] WARN: cycle degraded by inference errors, skipping promotion decision"
+                );
+                continue;
+            }
 
             // Promotion gate: bootstrap (empty-pool) uses legacy win-rate; pool
             // path uses Elo. The bootstrap branch is single-shot — once any
@@ -1148,49 +1207,86 @@ mod tests {
         assert_eq!(challenger_perspective, 0.0, "draw is neutral");
     }
 
-    /// REGRESSION (champion-promotion wedge, loop layer): a cycle whose champion
-    /// is a `ChannelEvaluator` whose batcher has stopped (the exact post-promotion
-    /// teardown condition) must NOT panic or hang, and the eval loop must re-arm so
-    /// a SUBSEQUENT version still gets a cycle.
+    /// Backend that drops every reply oneshot without answering and counts the
+    /// batches it dropped, so the test can wait until the champion eval has
+    /// actually been exercised. Every dropped reply makes the champion
+    /// `ChannelEvaluator` recover to a neutral result and set its sticky error
+    /// flag — the "batcher died mid-cycle" condition the gate must catch.
+    struct CountingDroppingBackend {
+        dropped: Arc<std::sync::atomic::AtomicUsize>,
+    }
+    impl crate::selfplay::inference::InferenceBackend for CountingDroppingBackend {
+        fn evaluate_batch(
+            &mut self,
+            requests: Vec<crate::selfplay::inference::InferenceRequest>,
+        ) {
+            self.dropped
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            drop(requests); // drop each reply oneshot → callers recover to neutral
+        }
+    }
+
+    /// REGRESSION (promotion-gate error-blindness + loop re-arm): the promotion
+    /// gate must be error-AWARE. A cycle whose champion eval degraded to neutral
+    /// results — a batcher genuinely died mid-cycle — must NOT reach a promotion
+    /// decision (else the challenger trivially "wins" against a neutral champion
+    /// and a garbage promotion is recorded), and the loop must still re-arm so a
+    /// subsequent healthy version is evaluated normally.
     ///
-    /// Setup mirrors the bootstrap (empty-pool) path so the champion evaluator is
-    /// actually exercised. The champion is a `ChannelEvaluator` whose inference
-    /// batcher we drop up front, reproducing "champion inference batcher stopped".
-    /// Pre-fix, the first champion `root_setup` would `.expect("inference channel
-    /// closed")` and panic inside the spawned eval task, stranding the ladder so
-    /// version 2 never evaluated. With the fix the champion recovers to a neutral
-    /// result, cycle 1 promotes, and cycle 2 (version 2) still runs.
+    /// Contract encoded here:
+    ///   - Cycle 1 runs the bootstrap (empty-pool) path with a champion whose
+    ///     batcher drops every reply. The champion recovers to neutral and sets its
+    ///     sticky error flag → the gate logs `cycle degraded by inference errors`
+    ///     and skips promotion. ASSERT the store version stays 0 (NO promotion)
+    ///     even though the cycle completed (the dropping backend confirms it ran).
+    ///   - Cycle 2 swaps the champion backend to a healthy one and feeds version 2.
+    ///     The cycle is clean → the challenger promotes. ASSERT the store version
+    ///     becomes 2, proving the loop re-armed after the skipped cycle.
     ///
-    /// The outer 60s timeout converts a regression (eval task wedged) into a TEST
-    /// failure instead of hanging CI.
+    /// Discriminator: on the PARENT branch (promote-blind gate, no error flag) the
+    /// degraded cycle 1 promotes immediately, so `store.version()` would read 1
+    /// after cycle 1 and the `version stays 0` assertion fails — this test fails
+    /// under the old behavior and passes only with the error-aware gate.
+    ///
+    /// All waits are bounded by timeouts so a regression that wedges the eval task
+    /// fails the TEST rather than hanging CI.
     #[tokio::test]
-    async fn eval_loop_rearms_after_promotion_with_dead_champion_batcher() {
+    async fn eval_loop_skips_promotion_on_degraded_cycle_then_rearms() {
         use crate::selfplay::inference::{
-            BatcherConfig, ChannelEvaluator, InferenceBatcher, RandomBackend,
+            BatcherConfig, ChannelEvaluator, InferenceBatcher, RandomBackend, SwappableBackend,
         };
+        use std::sync::atomic::{AtomicUsize, Ordering};
         use tokio::sync::mpsc;
 
         let precomputed = Arc::new(crate::PrecomputedItems::begin_precomputing());
         let challenger: Arc<dyn Evaluator> = Arc::new(RandomEvaluator);
 
-        // Champion = ChannelEvaluator whose batcher we forcibly stop, reproducing
-        // the post-promotion teardown where the champion batcher has exited but a
-        // `ChannelEvaluator` (holding a live `tx`) is still reachable. Aborting the
-        // batcher task (rather than closing the channel) keeps `champion_tx` valid,
-        // so `send().await` succeeds but the reply oneshot is dropped — the exact
-        // `EvalError::ReplyDropped` condition that pre-fix panicked the eval task.
+        // Champion = ChannelEvaluator over a LIVE batcher whose swappable backend
+        // starts in a "dropping" state: replies are dropped so the champion
+        // recovers to neutral and trips its error flag (cycle 1). For cycle 2 we
+        // swap the backend to a healthy RandomBackend so the champion answers
+        // normally. The batcher task stays alive throughout (mirroring the
+        // production swappable-champion architecture); only the inner backend
+        // changes between cycles.
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let initial_backend: Box<dyn crate::selfplay::inference::InferenceBackend> =
+            Box::new(CountingDroppingBackend { dropped: dropped.clone() });
+        let (champion_swappable, champion_backend_handle) = SwappableBackend::new(initial_backend);
+
         let (champion_tx, champion_rx) = mpsc::channel(32);
+        // Keepalive clone so the batcher's rx stays open even after a promotion
+        // swaps the stored champion away (cycle 2). Mirrors selfplay.rs keepalive.
+        let _keepalive_tx = champion_tx.clone();
         let mut champion_batcher = InferenceBatcher::new(
             champion_rx,
-            Box::new(RandomBackend::new(64)),
+            Box::new(champion_swappable),
             BatcherConfig { max_batch_size: 4, batch_timeout_ms: 5 },
         );
         let batcher_handle = tokio::spawn(async move { champion_batcher.run().await });
-        let champion_eval: Arc<dyn Evaluator> =
-            Arc::new(ChannelEvaluator::with_channels(champion_tx, 64));
-        // Stop the batcher: from here every champion request's reply is dropped.
-        batcher_handle.abort();
-        let _ = batcher_handle.await;
+
+        let champion_channel_eval = ChannelEvaluator::with_channels(champion_tx, 64);
+        let champion_error_flag = champion_channel_eval.error_flag();
+        let champion_eval: Arc<dyn Evaluator> = Arc::new(champion_channel_eval);
 
         let (version_tx, version_rx) = watch::channel(0u64);
         let ckpt_path: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
@@ -1201,7 +1297,7 @@ mod tests {
         let (_tmp, _checkpoints_dir, eval_pgn_path) = isolated_paths();
         let config = EvaluationConfig {
             games_per_side: 1,
-            promotion_threshold: 0.0, // Always promote on the bootstrap path.
+            promotion_threshold: 0.0, // A CLEAN cycle always promotes; degraded must still skip.
             promotion_cooldown_games: 0,
             num_simulations: 2,
             temperature_moves: 2,
@@ -1219,33 +1315,79 @@ mod tests {
             ckpt_path,
             champion_store,
             config,
-        );
+        )
+        // Register the champion error flag (challenger is RandomEvaluator → None):
+        // a cycle whose champion degraded must skip its promotion decision.
+        .with_error_flags(None, Some(champion_error_flag));
 
         let task_handle = tokio::spawn(async move {
             task.run().await;
         });
 
-        // Cycle 1: version 1 → must promote despite the dead champion batcher.
+        // --- Cycle 1: degraded champion → MUST NOT promote. ---
         version_tx.send(1).expect("send 1 failed");
-        // Poll until the promotion lands (store version bumps to 1) so we know
-        // cycle 1 completed without wedging, rather than racing a fixed sleep.
-        let promoted = tokio::time::timeout(std::time::Duration::from_secs(40), async {
-            loop {
-                if store_ref.version() == 1 {
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        // Wait until the champion batcher has been hit (proves cycle 1 actually ran
+        // the bootstrap games and degraded), rather than racing a fixed sleep.
+        let ran = tokio::time::timeout(std::time::Duration::from_secs(40), async {
+            while dropped.load(Ordering::SeqCst) == 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
             }
         })
         .await;
         assert!(
-            promoted.is_ok(),
-            "cycle 1 wedged: promotion never landed with a dead champion batcher"
+            ran.is_ok(),
+            "cycle 1 never reached the champion: bootstrap path did not run"
+        );
+        // Wait until the champion call count PLATEAUS: once `dropped` stops rising
+        // the bootstrap games are over and the loop has reached the promotion gate.
+        // The promotion (or its skip) happens synchronously right after the final
+        // champion call, so a plateau is a reliable "cycle 1 has decided" signal —
+        // no fixed sleep racing the cycle. Under a working error-aware gate the
+        // store stays at version 0 here; under the parent's promote-blind gate the
+        // degraded cycle would already have promoted to version 1 by this point.
+        let decided = tokio::time::timeout(std::time::Duration::from_secs(40), async {
+            let mut last = dropped.load(Ordering::SeqCst);
+            let mut stable = 0u32;
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                let now = dropped.load(Ordering::SeqCst);
+                if now == last {
+                    stable += 1;
+                    // ~1s of no new champion calls ⇒ cycle 1's games are done and
+                    // the gate has run.
+                    if stable >= 10 {
+                        break;
+                    }
+                } else {
+                    stable = 0;
+                    last = now;
+                }
+            }
+        })
+        .await;
+        assert!(
+            decided.is_ok(),
+            "cycle 1 never settled: champion calls did not plateau (eval task wedged?)"
+        );
+        // THE DISCRIMINATOR: the degraded cycle must NOT have promoted. On the
+        // parent branch (error-blind gate) `win_rate >= 0.0` promotes the
+        // challenger against the neutral champion, so this reads 1 and fails.
+        assert_eq!(
+            store_ref.version(),
+            0,
+            "degraded cycle 1 promoted the challenger (version={}) — gate is error-blind",
+            store_ref.version()
         );
 
-        // Cycle 2: version 2 → the loop must RE-ARM and evaluate again. We assert
-        // the store promotes to version 2 (threshold 0.0 promotes every cycle),
-        // proving a subsequent candidate was evaluated after the promotion.
+        // --- Cycle 2: healthy champion → MUST re-arm and promote. ---
+        // Swap the champion backend to a healthy one: replies now succeed, so the
+        // champion no longer degrades and the gate lets the promotion through.
+        {
+            let mut guard = champion_backend_handle
+                .lock()
+                .expect("champion backend lock poisoned");
+            *guard = Box::new(RandomBackend::new(64));
+        }
         version_tx.send(2).expect("send 2 failed");
         let rearmed = tokio::time::timeout(std::time::Duration::from_secs(40), async {
             loop {
@@ -1258,10 +1400,12 @@ mod tests {
         .await;
         assert!(
             rearmed.is_ok(),
-            "eval loop failed to re-arm: version 2 never evaluated after a promotion"
+            "eval loop failed to re-arm: a clean version 2 never promoted after the skipped cycle"
         );
 
         drop(version_tx);
         let _ = tokio::time::timeout(std::time::Duration::from_secs(20), task_handle).await;
+        batcher_handle.abort();
+        let _ = batcher_handle.await;
     }
 }
