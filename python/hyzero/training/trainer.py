@@ -781,10 +781,29 @@ class Trainer:
                         masked_log_probs_k = masked_log_probs_k.nan_to_num(
                             nan=0.0, neginf=0.0
                         )
-                        entropy_legal_k = (
-                            (-masked_probs_k * masked_log_probs_k).sum(dim=-1).mean().item()
-                        )
+                        per_sample_entropy_legal = (
+                            -masked_probs_k * masked_log_probs_k
+                        ).sum(dim=-1)  # [B]
+                        per_sample_top1 = masked_probs_k.max(dim=-1).values  # [B]
+                        entropy_legal_k = per_sample_entropy_legal.mean().item()
                         legal_part = f" pred_entropy_legal={entropy_legal_k:.4f}"
+                        # Regime split: when a tb_policy_mask is present the batch
+                        # mixes flat TB-trajectory policy targets with peaked replay
+                        # targets, blurring pred_entropy_legal. Recompute over the
+                        # replay (non-TB) rows only so the replay policy head's
+                        # sharpness is observable in isolation.
+                        if tb_policy_tensor is not None:
+                            replay_rows = ~tb_policy_tensor  # [B] bool, True = replay
+                            if replay_rows.any():
+                                entropy_legal_replay = (
+                                    per_sample_entropy_legal[replay_rows].mean().item()
+                                )
+                                top1_replay = per_sample_top1[replay_rows].mean().item()
+                                legal_part = (
+                                    legal_part
+                                    + f" pred_entropy_legal_replay={entropy_legal_replay:.4f}"
+                                    + f" pred_top1_replay={top1_replay:.4f}"
+                                )
                     pol_parts.append(
                         f"k{k} tgt_entropy={tgt_entropy_k:.4f}"
                         f" pred_entropy={entropy_k:.4f}"
