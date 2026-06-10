@@ -157,8 +157,20 @@ export HYZERO_POLICY_ENTROPY_WEIGHT=${HYZERO_POLICY_ENTROPY_WEIGHT:-0.0}
 # run; TB value/reward supervision is unaffected. Code default 1.0 = legacy.
 export HYZERO_TB_POLICY_WEIGHT=${HYZERO_TB_POLICY_WEIGHT:-0.0}
 export HYZERO_ANTISYM_LOSS_WEIGHT=0.01
+# Material shaping (opt-in): give rule-draws (repetition, fifty-move, move-cap)
+# a tanh(Δmaterial/scale) value target so the value head keeps learning when
+# 92%+ of self-play games draw 0.0. True draws (stalemate, insufficient material)
+# stay 0.0 — see score_board_terminal in src/selfplay/game_task.rs. Scale stays
+# at the code default (5.0); no scale knob is set here.
+export HYZERO_MATERIAL_SHAPING=1
 export HYZERO_LR_SCHEDULE=cosine
-export HYZERO_LR_COSINE_T_MAX=14000
+# Cosine T_max tracks the run length so the LR completes one full decay over the
+# run instead of a fixed 14000 steps. Throughput is ~18 trainer steps/min at the
+# current settings, so T_max ≈ duration_minutes * 18 = DURATION/60 * 18. Integer
+# arithmetic; floored at 100 to respect the trainer's lower clamp on short runs.
+LR_COSINE_T_MAX=$(( DURATION / 60 * 18 ))
+[ "$LR_COSINE_T_MAX" -lt 100 ] && LR_COSINE_T_MAX=100
+export HYZERO_LR_COSINE_T_MAX=$LR_COSINE_T_MAX
 export HYZERO_LR_COSINE_ETA_MIN=1e-5
 # Measured 2026-06-10: root Dirichlet noise is baked into the stored MCTS visit
 # targets, so ε=0.25 floors replay target entropy at ~2.0 nats in drawish play
