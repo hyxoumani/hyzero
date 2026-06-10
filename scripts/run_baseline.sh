@@ -8,7 +8,7 @@ SIMS=${HYZERO_SIMS:-200}
 EVAL_SIMS=${HYZERO_EVAL_SIMS:-100}
 GAMES=${HYZERO_GAMES:-9}              # total slots: 1 for eval + N-1 for selfplay
 BATCH_SIZE=${HYZERO_BATCH_SIZE:-64}
-GAMES_PER_SIDE=${HYZERO_GAMES_PER_SIDE:-4}
+GAMES_PER_SIDE=${HYZERO_GAMES_PER_SIDE:-8}
 PROMOTION_THRESHOLD=${HYZERO_PROMOTION_THRESHOLD:-0.55}
 CHAMPION_SCORE_WEIGHT=${HYZERO_CHAMPION_SCORE_WEIGHT:-2.0}
 ELO_SCORE_WEIGHT=${HYZERO_ELO_SCORE_WEIGHT:-0.05}
@@ -120,15 +120,31 @@ if [ -d checkpoints ]; then
     for f in checkpoints/best.pt checkpoints/best_v*.pt; do
         [ -f "$f" ] && [ "$(realpath "$f")" != "$(realpath "$RESUME_FROM" 2>/dev/null || echo /dev/null)" ] && rm -f "$f"
     done
+    # Seed the eval pool with preserved champions from prior validation runs.
+    # Pool scanner (src/selfplay/pool.rs) discovers checkpoints/best_v{NNN}.pt with
+    # min-width-3 zero-padding (champion.rs writes via format! "best_v{:03}.pt").
+    # Versions 3806/3905 already exceed 3 digits, so no extra leading zeros — these
+    # names match exactly what a real promotion would have produced.
+    if [ -f checkpoints/backup_champion_v3806_20260609.pt ]; then
+        cp checkpoints/backup_champion_v3806_20260609.pt checkpoints/best_v3806.pt
+    else
+        echo "  WARN: checkpoints/backup_champion_v3806_20260609.pt missing — pool not seeded with v3806"
+    fi
+    if [ -f checkpoints/backup_champion_v3905_20260609.pt ]; then
+        cp checkpoints/backup_champion_v3905_20260609.pt checkpoints/best_v3905.pt
+    else
+        echo "  WARN: checkpoints/backup_champion_v3905_20260609.pt missing — pool not seeded with v3905"
+    fi
     echo "  Remaining checkpoints:"
     ls checkpoints/*.pt 2>/dev/null | sed 's/^/    /' || echo "    (none)"
 fi
 
 # ── Run ────────────────────────────────────────────────────────
 echo "[2/5] Running selfplay for ${DURATION}s..."
-export HYZERO_POLICY_ENTROPY_WEIGHT=0.01
+export HYZERO_POLICY_ENTROPY_WEIGHT=0.003
+export HYZERO_ANTISYM_LOSS_WEIGHT=0.01
 export HYZERO_LR_SCHEDULE=cosine
-export HYZERO_LR_COSINE_T_MAX=7000
+export HYZERO_LR_COSINE_T_MAX=14000
 export HYZERO_LR_COSINE_ETA_MIN=1e-5
 echo "[env] $(env | grep '^HYZERO_' | sort | tr '\n' ' ')"
 HYZERO_DEVICE=$DEVICE \
