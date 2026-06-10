@@ -10,7 +10,7 @@ pub mod replay_writer;
 
 pub use inference::{
     InferenceRequest, InferenceBackend, RandomBackend, SwappableBackend,
-    InferenceBatcher, BatcherConfig, ChannelEvaluator,
+    InferenceBatcher, BatcherConfig, ChannelEvaluator, EvalError,
 };
 pub use game_task::{GameConfig, play_game, DualGameOutcome};
 pub use coordinator::{SelfPlayConfig, SelfPlayCoordinator};
