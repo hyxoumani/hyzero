@@ -192,13 +192,27 @@ def replay_fens(moves: List[str], start_fen: Optional[str] = None) -> List[str]:
     never breaks the whole game. The list always has at least the start position,
     so callers never see an empty ``fens``.
     """
+    fens, _ = replay_fens_with_stop(moves, start_fen)
+    return fens
+
+
+def replay_fens_with_stop(
+    moves: List[str], start_fen: Optional[str] = None
+) -> Tuple[List[str], Optional[Tuple[int, str]]]:
+    """Like :func:`replay_fens` but also report where replay stopped early.
+
+    Returns ``(fens, stop)`` where ``stop`` is ``None`` when every move replayed,
+    else ``(ply, token)`` naming the 1-based ply at which the first illegal move
+    was hit and the offending UCI token. Callers use ``stop`` to attach an honest
+    note ("replay stopped at ply N ...") instead of silently truncating.
+    """
     board = _new_board(start_fen)
     fens = [board.fen()]
-    for tok in moves:
+    for i, tok in enumerate(moves):
         if not _try_push(board, tok):
-            break
+            return fens, (i + 1, tok)
         fens.append(board.fen())
-    return fens
+    return fens, None
 
 
 def parse_pgn_file(path: str) -> List[Dict[str, Any]]:
@@ -238,24 +252,36 @@ def parse_pgn_file(path: str) -> List[Dict[str, Any]]:
             "replay_note": "",
         }
         if HAVE_CHESS:
+            stop: Optional[Tuple[int, str]] = None
             try:
-                game["fens"] = replay_fens(parsed["moves"], start_fen)
+                game["fens"], stop = replay_fens_with_stop(
+                    parsed["moves"], start_fen
+                )
             except Exception:
                 game["fens"] = [_new_board(start_fen).fen()]
-            # Legacy games written before the FEN-header fix can begin from a
-            # diverse start with no [FEN] header, so the very first move is
-            # illegal from the standard start and replay yields only the start
-            # position. Flag that explicitly so the page shows a note instead of
-            # a silent "0 / 0". A genuine single-position game (no moves) is not
-            # flagged.
-            if (
-                start_fen is None
-                and parsed["moves"]
-                and len(game["fens"]) == 1
-            ):
-                game["replay_note"] = (
-                    "replay unavailable (no FEN header — game predates fix)"
-                )
+                # An exception aborted replay before any move; treat it like an
+                # immediate stop so the game still gets an honest note below.
+                stop = (1, parsed["moves"][0]) if parsed["moves"] else None
+            # Whenever replay produced fewer FENs than moves (i.e. it stopped
+            # early), attach a note so the page never shows a silent "0 / 0" or a
+            # dead row. Two distinct cases:
+            #   * A legacy diverse-start game with NO [FEN] header whose very
+            #     first move is illegal from the standard start (replay yields
+            #     only the start position) -> it predates the FEN-header fix.
+            #   * Any other early stop (a genuinely illegal move mid-game, or an
+            #     unparseable [FEN] that fell back to the standard start) ->
+            #     report the ply and offending token so stepping is honest.
+            # A complete replay (stop is None) leaves the note empty.
+            if stop is not None:
+                ply, token = stop
+                if start_fen is None and len(game["fens"]) == 1:
+                    game["replay_note"] = (
+                        "replay unavailable (no FEN header — game predates fix)"
+                    )
+                else:
+                    game["replay_note"] = (
+                        f"replay stopped at ply {ply} (illegal move {token})"
+                    )
         games.append(game)
     return games
 
@@ -528,6 +554,10 @@ function metaIdxForDisplay(i) { return metas.length - 1 - i; }
 function currentMeta() { return metas[metaIdxForDisplay(selected)]; }
 
 function fenToBoard(fen) {
+  // Tolerate a missing/empty FEN (e.g. a game whose replay yielded no FENs):
+  // fall back to the standard start so the render never throws and the row
+  // stays clickable instead of dying mid-selection.
+  if (!fen || typeof fen !== "string") fen = START_FEN;
   const rows = fen.split(" ")[0].split("/");
   const grid = [];
   for (const row of rows) {
