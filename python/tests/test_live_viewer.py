@@ -224,6 +224,23 @@ def test_unknown_file_key_falls_back_to_selfplay(tmp_path):
     assert payload["count"] == 2
 
 
+def test_page_html_guards_empty_fen_in_render():
+    """The board render must tolerate a missing/empty FEN so a selection never
+    dies mid-render and leaves the row feeling dead (un-clickable)."""
+    assert "if (!fen || typeof fen !== \"string\") fen = START_FEN;" in lv.PAGE_HTML
+
+
+def test_all_http_responses_set_no_store_cache_control():
+    """Every HTTP response goes through _send, which must set Cache-Control:
+    no-store so a browser-cached stale page can never mask a future fix."""
+    import inspect
+
+    src = inspect.getsource(lv.make_handler)
+    # The single _send helper (used by _send_json, the HTML page, JSON, and 404)
+    # sets the header, so every response inherits it.
+    assert 'self.send_header("Cache-Control", "no-store")' in src
+
+
 def test_default_host_is_localhost():
     """The --host arg defaults to 127.0.0.1 so the server is not world-bound."""
     import argparse
@@ -416,3 +433,102 @@ def test_mid_write_movetext_tail_parses_as_shorter_game(tmp_path):
     if lv.HAVE_CHESS:
         # 'b8' is not a legal UCI move, so replay stops after the three good plies.
         assert len(tail["fens"]) == 4
+
+
+def test_replay_with_stop_reports_first_illegal_ply_and_token():
+    """replay_fens_with_stop names the 1-based ply and token of the first illegal
+    move so callers can build an honest "stopped at ply N" note."""
+    if not lv.HAVE_CHESS:
+        import pytest
+
+        pytest.skip("python-chess not available")
+    fens, stop = lv.replay_fens_with_stop(["e2e4", "e7e5", "a1a8"])
+    assert len(fens) == 3  # start + two legal plies
+    assert stop == (3, "a1a8")
+
+
+def test_replay_with_stop_reports_none_for_full_replay():
+    """A game that replays in full reports no stop point."""
+    if not lv.HAVE_CHESS:
+        import pytest
+
+        pytest.skip("python-chess not available")
+    fens, stop = lv.replay_fens_with_stop(["e2e4", "e7e5"])
+    assert len(fens) == 3
+    assert stop is None
+
+
+def test_partial_replay_game_gets_stopped_at_ply_note(tmp_path):
+    """A standard-start game whose replay stops on an illegal mid-game move gets a
+    note naming the ply and token, so stepping past it is explained rather than
+    silently truncated."""
+    if not lv.HAVE_CHESS:
+        import pytest
+
+        pytest.skip("python-chess not available")
+    partial = (
+        '[Event "Eval Cycle 1 Game P"]\n'
+        '[White "a"]\n'
+        '[Black "b"]\n'
+        '[Result "*"]\n'
+        "\n"
+        "1. e2e4 e7e5 2. a1a8 *\n"  # rook cannot jump on move 2 -> stops at ply 3
+        "\n"
+    )
+    (tmp_path / "eval_games.pgn").write_text(partial, encoding="utf-8")
+    payload = lv.build_game_payload(str(tmp_path), "eval", 0)
+    assert payload is not None
+    assert len(payload["fens"]) == 3  # fewer FENs than the 3 moves
+    assert payload["replay_note"] == "replay stopped at ply 3 (illegal move a1a8)"
+
+
+def test_unparseable_fen_header_falls_back_with_stop_note(tmp_path):
+    """A game with a malformed [FEN] header falls back to the standard start; if
+    its first move is then illegal it still gets a (non-legacy) stop note rather
+    than a silent 0/0."""
+    if not lv.HAVE_CHESS:
+        import pytest
+
+        pytest.skip("python-chess not available")
+    bad_fen = (
+        '[Event "Eval Cycle 1 Game F"]\n'
+        '[White "a"]\n'
+        '[Black "b"]\n'
+        '[Result "*"]\n'
+        '[SetUp "1"]\n'
+        '[FEN "not a real fen"]\n'  # unparseable -> standard start fallback
+        "\n"
+        "1. a1a3 *\n"  # rook cannot jump from the standard start
+        "\n"
+    )
+    (tmp_path / "eval_games.pgn").write_text(bad_fen, encoding="utf-8")
+    payload = lv.build_game_payload(str(tmp_path), "eval", 0)
+    assert payload is not None
+    assert len(payload["fens"]) == 1
+    # Has a [FEN] header, so it is NOT the legacy "no FEN header" case.
+    assert payload["replay_note"] == "replay stopped at ply 1 (illegal move a1a3)"
+
+
+def test_every_real_eval_game_has_fens_or_note():
+    """Against the running checkout's real eval log, every game returns either
+    >=2 FENs or (>=1 FEN AND a non-empty note) — no silent dead "0 / 0" rows."""
+    if not lv.HAVE_CHESS:
+        import pytest
+
+        pytest.skip("python-chess not available")
+    path = os.path.join(
+        os.path.dirname(__file__), "..", "..", "logs", "eval_games.pgn"
+    )
+    if not os.path.exists(path):
+        import pytest
+
+        pytest.skip("real eval log not present in this checkout")
+    games = lv.parse_pgn_file(path)
+    assert games  # the log has games
+    for i, g in enumerate(games):
+        fens = g.get("fens", [])
+        note = g.get("replay_note", "")
+        assert len(fens) >= 2 or (len(fens) >= 1 and note), (
+            f"game idx={i} would render a dead 0/0: "
+            f"fens={len(fens)} note={note!r}"
+        )
