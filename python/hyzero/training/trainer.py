@@ -493,11 +493,21 @@ class Trainer:
         self.policy_entropy_weight = _parse_loss_weight_env(
             "HYZERO_POLICY_ENTROPY_WEIGHT", default=0.0
         )
+        # Per-row weight applied to the policy cross-entropy of tablebase
+        # trajectory rows (tb_policy_mask). Their policy targets are uniform-
+        # over-Syzygy-optimal moves; at high tb_frac they flatten the shared
+        # policy head. Default 1.0 = legacy behavior (TB policy CE at full
+        # weight); set to 0.0 to disable the TB policy gradient while keeping
+        # the clean TB value/reward supervision untouched.
+        self.tb_policy_weight = _parse_loss_weight_env(
+            "HYZERO_TB_POLICY_WEIGHT", default=1.0
+        )
         print(
             f"[trainer] loss weights: policy={self.policy_loss_weight:.2f}"
             f" value={self.value_loss_weight:.2f}"
             f" reward={self.reward_loss_weight:.2f}"
             f" entropy={self.policy_entropy_weight:.4f}"
+            f" tb_policy={self.tb_policy_weight:.4f}"
         )
 
         # Syzygy tablebase supervision — optional, enabled by HYZERO_TABLEBASE_PATH.
@@ -565,6 +575,11 @@ class Trainer:
 
         # Pop is_tablebase before tensor conversion (Python-only field).
         is_tb_mask = batch.pop("is_tablebase", None)
+        # Pop tb_policy_mask too (Python-only field): True for tablebase
+        # trajectory rows whose policy targets are uniform-over-optimal. Used to
+        # weight only their policy CE via HYZERO_TB_POLICY_WEIGHT; value/reward
+        # losses are untouched. Replay rows are absent → treated as non-TB.
+        tb_policy_mask = batch.pop("tb_policy_mask", None)
 
         # Convert numpy arrays to tensors on the target device.
         # observations: [B, K+1, 102, 8, 8] — step 0 is root, steps 1..K for consistency
@@ -595,6 +610,25 @@ class Trainer:
             else None
         )
 
+        # Per-row policy-CE weight: 1.0 for non-TB-policy rows (replay + snapshot),
+        # HYZERO_TB_POLICY_WEIGHT for tablebase trajectory rows. None when no
+        # tb_policy_mask is present (e.g. pure replay batches) — in which case the
+        # policy CE stays the exact unweighted batch mean (backward-compatible).
+        # When the mask is present but tb_policy_weight == 1.0, every weight is
+        # 1.0 and the weighted mean still reduces to the plain batch mean.
+        tb_policy_tensor: torch.Tensor | None = (
+            torch.from_numpy(tb_policy_mask).to(self.device)
+            if tb_policy_mask is not None
+            else None
+        )
+        policy_row_weight: torch.Tensor | None = None
+        if tb_policy_tensor is not None:
+            policy_row_weight = torch.where(
+                tb_policy_tensor,
+                torch.full_like(tb_policy_tensor, self.tb_policy_weight, dtype=torch.float32),
+                torch.ones_like(tb_policy_tensor, dtype=torch.float32),
+            )  # [B]
+
         total_policy_loss = torch.tensor(0.0, device=self.device)
         total_value_loss = torch.tensor(0.0, device=self.device)
         total_reward_loss = torch.tensor(0.0, device=self.device)
@@ -620,9 +654,12 @@ class Trainer:
         predicted_policy_logits_per_k.append(policy_logits)
 
         # Policy loss at step 0 — apply legal mask if provided.
-        # ALL samples contribute at step 0 (no TB masking at root).
+        # ALL samples contribute at step 0 (no TB masking at root). When a
+        # tb_policy_mask is present, the TB trajectory rows' policy CE is
+        # weighted by HYZERO_TB_POLICY_WEIGHT (weighted mean); with weight 1.0
+        # / no mask this is the exact unweighted batch mean.
         total_policy_loss = total_policy_loss + self._policy_loss(
-            policy_logits, tgt_policies[:, 0], legal_mask
+            policy_logits, tgt_policies[:, 0], legal_mask, row_weight=policy_row_weight
         )
         # Value loss at step 0 — all samples contribute.
         total_value_loss = total_value_loss + F.mse_loss(value.squeeze(-1), tgt_values[:, 0])
@@ -649,9 +686,18 @@ class Trainer:
                 non_tb = (~is_tb_tensor).float()  # [B], 1.0 for replay, 0.0 for TB
                 non_tb_count = non_tb.sum().clamp(min=1.0)
 
-                # Policy loss at k >= 1: mask TB rows.
+                # Policy loss at k >= 1: mask zero-padded snapshot TB rows (non_tb)
+                # AND apply the per-row policy weight (policy_row_weight). Snapshot
+                # rows get non_tb=0 (excluded). Trajectory TB rows have real k>=1
+                # policy targets (non_tb=1) but their CE is scaled by
+                # HYZERO_TB_POLICY_WEIGHT. With weight 1.0 / no tb_policy_mask the
+                # combined weight is exactly non_tb → identical to legacy behavior.
                 per_sample_pol = self._policy_loss_per_sample(policy_logits, tgt_policies[:, k])
-                total_policy_loss = total_policy_loss + (per_sample_pol * non_tb).sum() / non_tb_count
+                pol_w = non_tb if policy_row_weight is None else non_tb * policy_row_weight
+                total_policy_loss = (
+                    total_policy_loss
+                    + (per_sample_pol * pol_w).sum() / pol_w.sum().clamp(min=1e-8)
+                )
 
                 # Value loss at k >= 1: mask TB rows.
                 per_sample_val = (value.squeeze(-1) - tgt_values[:, k]) ** 2  # [B]
@@ -666,9 +712,12 @@ class Trainer:
                     # k == 1: TB step-1 reward carries the real mating-action signal.
                     total_reward_loss = total_reward_loss + per_sample_rwd.mean()
             else:
-                # No TB rows in this batch — standard unmasked losses.
-                # No mask for latent steps (operating in learned latent space, not real board)
-                total_policy_loss = total_policy_loss + self._policy_loss(policy_logits, tgt_policies[:, k])
+                # No snapshot TB rows in this batch — standard unmasked losses.
+                # No mask for latent steps (operating in learned latent space, not real board).
+                # row_weight is None for pure-replay batches → plain batch mean (legacy).
+                total_policy_loss = total_policy_loss + self._policy_loss(
+                    policy_logits, tgt_policies[:, k], row_weight=policy_row_weight
+                )
                 total_value_loss = total_value_loss + F.mse_loss(value.squeeze(-1), tgt_values[:, k])
                 total_reward_loss = total_reward_loss + F.mse_loss(reward.squeeze(-1), tgt_rewards[:, k])
 
@@ -951,6 +1000,7 @@ class Trainer:
         logits: torch.Tensor,
         targets: torch.Tensor,
         legal_mask: torch.Tensor | None = None,
+        row_weight: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Cross-entropy between logits and a target probability distribution.
 
@@ -965,6 +1015,11 @@ class Trainer:
             legal_mask:  [B, num_actions] bool or None.
                          If provided, illegal positions are masked to -inf before
                          log_softmax so gradients do not push logits at illegal positions.
+            row_weight:  [B] float or None. Per-row weight for the cross-entropy
+                         term. When None, the plain batch mean is used. When given,
+                         the CE is a weighted mean — (ce·w).sum()/w.sum() — so rows
+                         can be down/upweighted (e.g. tablebase policy targets).
+                         With all weights 1.0 this reduces to the plain batch mean.
 
         Returns:
             Scalar tensor (mean over batch).
@@ -976,7 +1031,11 @@ class Trainer:
         # Since targets are always 0.0 at illegal positions, 0.0 * 0.0 = 0.0 is correct.
         # This avoids 0.0 * (-inf) = NaN in IEEE 754 arithmetic.
         log_probs = log_probs.nan_to_num(nan=0.0, neginf=0.0)
-        ce_loss = -torch.sum(targets * log_probs, dim=-1).mean()
+        per_sample_ce = -torch.sum(targets * log_probs, dim=-1)  # [B]
+        if row_weight is not None:
+            ce_loss = (per_sample_ce * row_weight).sum() / row_weight.sum().clamp(min=1e-8)
+        else:
+            ce_loss = per_sample_ce.mean()
 
         if self.policy_entropy_weight > 0.0:
             # Entropy bonus: penalize over-sharp output distributions.
@@ -1087,6 +1146,15 @@ class Trainer:
             merged["is_tablebase"][b - n_tb:] = tb_flag
         else:
             merged["is_tablebase"][b - n_tb:] = True
+        # ``tb_policy_mask`` gates the per-row policy-CE weight
+        # (HYZERO_TB_POLICY_WEIGHT). Replay rows → False (full-weight policy).
+        # Suffix rows take the TB builder's flag: trajectory batches set it True
+        # (uniform-over-optimal targets → weighted), snapshot batches omit it and
+        # default to False (snapshot rows are already excluded via is_tablebase).
+        merged["tb_policy_mask"] = np.zeros(b, dtype=bool)
+        tb_policy_flag = tb_dict.get("tb_policy_mask")
+        if tb_policy_flag is not None:
+            merged["tb_policy_mask"][b - n_tb:] = tb_policy_flag
         return merged, tb_indices
 
     def get_weights(self) -> bytes:

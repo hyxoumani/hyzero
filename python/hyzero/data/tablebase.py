@@ -314,6 +314,13 @@ def build_tb_batch_trajectories(
     the full replay-style K-step loss (no step-1..K masking, consistency loss
     active). This is the intended behavior for trajectory-format supervision.
 
+    ``tb_policy_mask`` is set to ``True`` on every output row so the trainer can
+    weight the policy cross-entropy of these rows separately
+    (HYZERO_TB_POLICY_WEIGHT). The policy targets here are uniform-over-Syzygy-
+    optimal moves; at high tb_frac they flatten the shared policy head, so the
+    trainer can downweight (or disable) their policy gradient while keeping the
+    clean value/reward supervision at full strength.
+
     Shape contract (same as build_tb_batch):
         observations:    [N, K+1, 102, 8, 8]  float32
         actions:         [N, K,   3,  8, 8]   float32
@@ -322,6 +329,7 @@ def build_tb_batch_trajectories(
         target_rewards:  [N, K+1]              float32
         legal_masks:     [N, 4672]             bool  (step-0 legality)
         is_tablebase:    [N]                   bool  (all False)
+        tb_policy_mask:  [N]                   bool  (all True)
 
     Args:
         trajectories: List of TBTrajectory objects to encode.
@@ -343,6 +351,9 @@ def build_tb_batch_trajectories(
     target_rewards  = np.zeros((n, k_steps + 1),                dtype=np.float32)
     legal_masks     = np.zeros((n, num_actions),                 dtype=bool)
     is_tablebase    = np.zeros(n,                                 dtype=bool)
+    # Trajectory rows carry uniform-over-optimal policy targets; flag them so
+    # the trainer can weight their policy CE via HYZERO_TB_POLICY_WEIGHT.
+    tb_policy_mask  = np.ones(n,                                  dtype=bool)
 
     for i, traj in enumerate(trajectories):
         if len(traj.fens) != k_steps + 1:
@@ -414,4 +425,5 @@ def build_tb_batch_trajectories(
         "target_rewards":  target_rewards,
         "legal_masks":     legal_masks,
         "is_tablebase":    is_tablebase,
+        "tb_policy_mask":  tb_policy_mask,
     }
