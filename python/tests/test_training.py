@@ -394,3 +394,37 @@ def test_antisym_probe_n_default_and_clamp(monkeypatch: pytest.MonkeyPatch) -> N
 
     monkeypatch.setenv("HYZERO_ANTISYM_PROBE_N", "999")
     assert _antisym_probe_n() == 64
+
+
+def _masked_k0_entropy(logits: torch.Tensor, legal_mask: torch.Tensor) -> float:
+    """Replicate the trainer's k0 pred_entropy_legal computation.
+
+    Mirrors the masked-softmax + nan_to_num(neginf=0.0) entropy emitted in the
+    [policy_stats] diagnostic at trainer.py (k0, guarded by legal_mask is not
+    None). Kept in sync with that block.
+    """
+    masked_logits = logits.masked_fill(~legal_mask, float("-inf"))
+    masked_probs = torch.softmax(masked_logits, dim=-1)
+    masked_log_probs = torch.log_softmax(masked_logits, dim=-1)
+    masked_log_probs = masked_log_probs.nan_to_num(nan=0.0, neginf=0.0)
+    return (-masked_probs * masked_log_probs).sum(dim=-1).mean().item()
+
+
+def test_pred_entropy_legal_peaked_distribution_is_low() -> None:
+    """A peaked masked distribution yields near-zero legal entropy."""
+    legal_mask = torch.zeros(1, NUM_ACTIONS, dtype=torch.bool)
+    legal_mask[0, :4] = True  # 4 legal moves
+    logits = torch.full((1, NUM_ACTIONS), -1e9)
+    logits[0, 0] = 50.0  # essentially all mass on one legal move
+    assert _masked_k0_entropy(logits, legal_mask) == pytest.approx(0.0, abs=1e-4)
+
+
+def test_pred_entropy_legal_uniform_over_legal_is_log_n() -> None:
+    """A uniform-over-legal distribution yields log(n_legal) legal entropy."""
+    n_legal = 5
+    legal_mask = torch.zeros(1, NUM_ACTIONS, dtype=torch.bool)
+    legal_mask[0, :n_legal] = True
+    logits = torch.zeros(1, NUM_ACTIONS)  # equal logits → uniform after masking
+    assert _masked_k0_entropy(logits, legal_mask) == pytest.approx(
+        math.log(n_legal), abs=1e-5
+    )

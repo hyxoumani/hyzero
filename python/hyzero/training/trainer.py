@@ -720,10 +720,27 @@ class Trainer:
                     tgt_p = tgt_policies[:, k]
                     tgt_log_p = tgt_p.clamp(min=1e-9).log()
                     tgt_entropy_k = (-tgt_p * tgt_log_p).sum(dim=-1).mean().item()
+                    # Legal-masked entropy (k0 only): the unmasked pred_entropy above
+                    # conflates real legal-policy flattening with drift of the
+                    # gradient-orphaned illegal logits. Recompute over the legal
+                    # support only, mirroring the mask+nan_to_num guard in _policy_loss.
+                    legal_part = ""
+                    if k == 0 and legal_mask is not None:
+                        masked_logits_k = logits_k.masked_fill(~legal_mask, float('-inf'))
+                        masked_probs_k = F.softmax(masked_logits_k, dim=-1)
+                        masked_log_probs_k = F.log_softmax(masked_logits_k, dim=-1)
+                        masked_log_probs_k = masked_log_probs_k.nan_to_num(
+                            nan=0.0, neginf=0.0
+                        )
+                        entropy_legal_k = (
+                            (-masked_probs_k * masked_log_probs_k).sum(dim=-1).mean().item()
+                        )
+                        legal_part = f" pred_entropy_legal={entropy_legal_k:.4f}"
                     pol_parts.append(
                         f"k{k} tgt_entropy={tgt_entropy_k:.4f}"
                         f" pred_entropy={entropy_k:.4f}"
                         f" pred_top1={top1_k:.4f}"
+                        f"{legal_part}"
                     )
 
                 _diag_print(f"[val_stats] step={self.model_version} " + " | ".join(val_parts))
