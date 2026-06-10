@@ -104,6 +104,28 @@ fn resign_disable_frac() -> f32 {
         .unwrap_or(0.1)
 }
 
+// --- Sampled self-play PGN logging (HYZERO_PGN_SAMPLE_RATE gate) ---
+
+/// Fraction of self-play games written to `logs/selfplay_sample.pgn` for
+/// opening-diversity analysis and live visualizer streaming.
+/// `HYZERO_PGN_SAMPLE_RATE`, default 0.01, clamped to [0.0, 1.0]. Unparseable
+/// input falls back to the default. Read per-call (TestEnvGuard-compatible).
+/// PGN writing is observability-only and has no effect on training dynamics.
+fn pgn_sample_rate() -> f32 {
+    std::env::var("HYZERO_PGN_SAMPLE_RATE")
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+        .map(|v| v.clamp(0.0, 1.0))
+        .unwrap_or(0.01)
+}
+
+/// Decide whether to write a PGN for one game given the sample `rate` and a
+/// single `draw` in [0.0, 1.0). Extracted from the call site so the decision is
+/// testable: at rate 1.0 every draw samples; at rate 0.0 none do.
+fn should_sample_pgn(rate: f32, draw: f32) -> bool {
+    draw < rate
+}
+
 // --- Annealed self-play temperature (HYZERO_TEMP_ANNEAL* gates) ---
 
 /// Env-gate: true (DEFAULT) unless HYZERO_TEMP_ANNEAL is "0"/"false"/"no"/empty.
@@ -886,14 +908,15 @@ pub async fn play_game(
         }
     }
 
-    // Sampled self-play PGN logging: 1% of games, for opening-diversity analysis.
+    // Sampled self-play PGN logging: `HYZERO_PGN_SAMPLE_RATE` of games (default
+    // 1%), for opening-diversity analysis and live visualizer streaming.
     // Cheaply keyed on a single rng call; no impact on training dynamics.
     //
     // Result label must reflect the BOARD outcome, not the value target. Under
     // material shaping (opt-in), non-checkmate games get game_outcome = tanh(Δ/S)
     // which can exceed ±0.5 for a drawn-by-rule game. Labeling those "1-0" caused
     // the analysis confusion we debugged on 2026-04-23. Respect is_draw.
-    if rand::random::<f32>() < 0.01 {
+    if should_sample_pgn(pgn_sample_rate(), rand::random::<f32>()) {
         let result_str = if is_draw {
             "1/2-1/2"
         } else if game_outcome > 0.5 {
@@ -1971,5 +1994,58 @@ mod tests {
             0.0,
             "a within-margin material lead should stay a draw",
         );
+    }
+
+    /// `HYZERO_PGN_SAMPLE_RATE` parses, defaults to 0.01 on missing/unparseable
+    /// input, and clamps out-of-range values into [0.0, 1.0].
+    #[test]
+    fn pgn_sample_rate_parses_defaults_and_clamps() {
+        use std::env;
+        let _env = TestEnvGuard::new(&["HYZERO_PGN_SAMPLE_RATE"]);
+        // SAFETY: env mutation serialized by TestEnvGuard for this test's duration.
+        unsafe {
+            env::remove_var("HYZERO_PGN_SAMPLE_RATE");
+            assert!(
+                (pgn_sample_rate() - 0.01).abs() < 1e-6,
+                "default must be 0.01"
+            );
+
+            env::set_var("HYZERO_PGN_SAMPLE_RATE", "0.5");
+            assert!((pgn_sample_rate() - 0.5).abs() < 1e-6);
+
+            // Out-of-range values clamp into [0.0, 1.0].
+            env::set_var("HYZERO_PGN_SAMPLE_RATE", "5.0");
+            assert!(
+                (pgn_sample_rate() - 1.0).abs() < 1e-6,
+                "above 1.0 clamps to 1.0"
+            );
+            env::set_var("HYZERO_PGN_SAMPLE_RATE", "-2.0");
+            assert!(
+                (pgn_sample_rate() - 0.0).abs() < 1e-6,
+                "below 0.0 clamps to 0.0"
+            );
+
+            // Unparseable falls back to the default.
+            env::set_var("HYZERO_PGN_SAMPLE_RATE", "not-a-number");
+            assert!((pgn_sample_rate() - 0.01).abs() < 1e-6);
+        }
+    }
+
+    /// At rate 1.0 every game samples a PGN; at rate 0.0 none do — for all
+    /// possible rng draws in [0.0, 1.0). FAILS if the decision ignores the rate.
+    #[test]
+    fn pgn_sampling_writes_all_at_full_rate_and_none_at_zero() {
+        // rand::random::<f32>() yields values in [0.0, 1.0); sweep that range.
+        for i in 0..1000 {
+            let draw = i as f32 / 1000.0;
+            assert!(
+                should_sample_pgn(1.0, draw),
+                "rate 1.0 must sample every game (draw {draw})",
+            );
+            assert!(
+                !should_sample_pgn(0.0, draw),
+                "rate 0.0 must sample no game (draw {draw})",
+            );
+        }
     }
 }
