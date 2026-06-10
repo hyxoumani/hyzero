@@ -92,6 +92,28 @@ if [ -n "$RESUME_FROM" ] && [ ! -f "$RESUME_FROM" ]; then
 fi
 echo "Resume: ${RESUME_FROM:-random init (no checkpoint)}"
 
+# Decisive-start curriculum: bias self-play toward decisively-winnable starts
+# (white-absolute material |Δ| ≥ 3) to fight value-signal starvation (self-play
+# is ~92.6% draws, ~63.5% of them by repetition). Generated from the base starts
+# file into data/decisive_starts.txt (~70% imbalanced + 30% original-distribution
+# for diversity). Idempotent and cheap; deterministic given the fixed seed. The
+# base data/starting_positions.txt is never modified. Only swap STARTS_FILE to the
+# curriculum when generation succeeds — otherwise keep the original starts.
+DECISIVE_STARTS_FILE="data/decisive_starts.txt"
+if [ -n "$STARTS_FILE" ] && [ -f "$STARTS_FILE" ]; then
+    echo "[pre-run] Building decisive-start curriculum -> $DECISIVE_STARTS_FILE"
+    # Fail fast if the generator's own self-test (classify/mix/validate) regresses.
+    if ! python3 scripts/make_decisive_starts.py --self-test; then
+        echo "  ERROR: make_decisive_starts.py self-test failed — aborting"
+        exit 1
+    fi
+    if python3 scripts/make_decisive_starts.py --in "$STARTS_FILE" --out "$DECISIVE_STARTS_FILE"; then
+        STARTS_FILE="$DECISIVE_STARTS_FILE"
+    else
+        echo "  WARN: decisive-start generation failed — using $STARTS_FILE unchanged"
+    fi
+fi
+
 # Warn (don't fail) on missing supervision files — training falls back to pure self-play.
 if [ -n "$STARTS_FILE" ] && [ ! -f "$STARTS_FILE" ]; then
     echo "  WARN: HYZERO_STARTS_FILE=$STARTS_FILE missing — diverse starts disabled"
