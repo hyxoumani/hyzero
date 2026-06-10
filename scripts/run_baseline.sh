@@ -148,6 +148,13 @@ echo "[2/5] Running selfplay for ${DURATION}s..."
 # Dirichlet noise + selfplay temperature, not from flattening the trained
 # policy. Default 0.0 (off); env-overridable for deliberate experiments.
 export HYZERO_POLICY_ENTROPY_WEIGHT=${HYZERO_POLICY_ENTROPY_WEIGHT:-0.0}
+# Tablebase trajectory rows carry uniform-over-Syzygy-optimal policy targets
+# (~48% of TB positions have >=2 optimal moves). At tb_frac 0.45 these flat
+# targets dominate the policy CE and flatten the shared policy head — the
+# 2026-06-09/10 "entropy divergence" (pred_entropy_legal 0.90->1.71, top1
+# 0.40->0.125). Weight 0.0 disables the TB policy gradient for the controlled
+# run; TB value/reward supervision is unaffected. Code default 1.0 = legacy.
+export HYZERO_TB_POLICY_WEIGHT=${HYZERO_TB_POLICY_WEIGHT:-0.0}
 export HYZERO_ANTISYM_LOSS_WEIGHT=0.01
 export HYZERO_LR_SCHEDULE=cosine
 export HYZERO_LR_COSINE_T_MAX=14000

@@ -428,3 +428,223 @@ def test_pred_entropy_legal_uniform_over_legal_is_log_n() -> None:
     assert _masked_k0_entropy(logits, legal_mask) == pytest.approx(
         math.log(n_legal), abs=1e-5
     )
+
+
+# --- HYZERO_TB_POLICY_WEIGHT (tablebase policy-CE gating) tests ---
+
+
+def _make_tb_policy_batch(
+    n_replay: int = 2,
+    n_tb: int = 2,
+    k_steps: int = 2,
+    seed: int = 0,
+    tb_policy: np.ndarray | None = None,
+    tb_value_fill: float | None = None,
+) -> dict:
+    """Build a mixed replay+TB-trajectory batch with a tb_policy_mask.
+
+    Replay rows come first, TB-trajectory rows last (matching _maybe_mix_tb_samples
+    ordering). is_tablebase is all-False (trajectory regime: real k>=1 targets);
+    tb_policy_mask is True only on the trailing TB rows.
+
+    obs/actions/values/rewards/legal_masks are shared (drawn from one seed) so that
+    BatchNorm statistics are identical across batches that differ only in the TB
+    rows' policy or value targets — letting tests isolate the gated policy path.
+    """
+    rng = np.random.RandomState(seed)
+    b = n_replay + n_tb
+    obs = rng.randn(b, k_steps + 1, INPUT_PLANES, 8, 8).astype(np.float32)
+    actions = rng.randn(b, k_steps, 3, 8, 8).astype(np.float32)
+    target_values = rng.uniform(-1, 1, (b, k_steps + 1)).astype(np.float32)
+    target_rewards = rng.uniform(-1, 1, (b, k_steps + 1)).astype(np.float32)
+
+    # Replay policy targets: peaked on a single (distinct) action per row.
+    target_policies = np.zeros((b, k_steps + 1, NUM_ACTIONS), dtype=np.float32)
+    for i in range(b):
+        for k in range(k_steps + 1):
+            target_policies[i, k, (i + k) % NUM_ACTIONS] = 1.0
+    # Override TB-row policy targets if requested (e.g. uniform-over-optimal).
+    if tb_policy is not None:
+        target_policies[n_replay:] = tb_policy
+
+    # Legal masks: all-True so the k0 legal-mask path engages without dropping mass.
+    legal_masks = np.ones((b, NUM_ACTIONS), dtype=bool)
+
+    is_tablebase = np.zeros(b, dtype=bool)            # trajectory regime
+    tb_policy_mask = np.zeros(b, dtype=bool)
+    tb_policy_mask[n_replay:] = True                  # only TB rows gated
+
+    if tb_value_fill is not None:
+        target_values[n_replay:] = tb_value_fill
+
+    return {
+        "observations": obs,
+        "actions": actions,
+        "target_policies": target_policies,
+        "target_values": target_values,
+        "target_rewards": target_rewards,
+        "legal_masks": legal_masks,
+        "is_tablebase": is_tablebase,
+        "tb_policy_mask": tb_policy_mask,
+    }
+
+
+def test_tb_policy_weight_zero_excludes_tb_policy_targets(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """w_tb=0.0: TB-row policy targets do not affect policy/total loss at any k."""
+    monkeypatch.setenv("HYZERO_TB_POLICY_WEIGHT", "0.0")
+
+    uniform_tb = np.full(
+        (2, 3, NUM_ACTIONS), 1.0 / NUM_ACTIONS, dtype=np.float32
+    )  # n_tb=2, k_steps+1=3
+    peaked_tb = np.zeros((2, 3, NUM_ACTIONS), dtype=np.float32)
+    peaked_tb[:, :, 123] = 1.0
+
+    batch_a = _make_tb_policy_batch(k_steps=2, seed=1, tb_policy=uniform_tb)
+    batch_b = _make_tb_policy_batch(k_steps=2, seed=1, tb_policy=peaked_tb)
+
+    res_a = _seeded_trainer_loss_full(batch_a)
+    res_b = _seeded_trainer_loss_full(batch_b)
+
+    # TB policy targets are zero-weighted → policy CE (k0 and k>=1 fold into the
+    # reported avg policy_loss) is identical regardless of those targets.
+    assert res_a["policy_loss"] == pytest.approx(res_b["policy_loss"], abs=1e-6)
+    assert res_a["total_loss"] == pytest.approx(res_b["total_loss"], abs=1e-6)
+
+
+def test_tb_policy_weight_zero_preserves_tb_value_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """w_tb=0.0: TB-row VALUE targets still move total loss (value path intact)."""
+    monkeypatch.setenv("HYZERO_TB_POLICY_WEIGHT", "0.0")
+
+    uniform_tb = np.full((2, 3, NUM_ACTIONS), 1.0 / NUM_ACTIONS, dtype=np.float32)
+    batch_lo = _make_tb_policy_batch(
+        k_steps=2, seed=2, tb_policy=uniform_tb, tb_value_fill=-1.0
+    )
+    batch_hi = _make_tb_policy_batch(
+        k_steps=2, seed=2, tb_policy=uniform_tb, tb_value_fill=1.0
+    )
+
+    res_lo = _seeded_trainer_loss_full(batch_lo)
+    res_hi = _seeded_trainer_loss_full(batch_hi)
+
+    # Even with TB policy gradient disabled, TB value supervision (k0 and k>=1)
+    # still flows for trajectory rows, so changing the TB value target must move
+    # both the value loss and the total loss.
+    assert res_lo["value_loss"] != pytest.approx(res_hi["value_loss"], abs=1e-6)
+    assert res_lo["total_loss"] != pytest.approx(res_hi["total_loss"], abs=1e-6)
+
+
+def test_tb_policy_weight_one_matches_unmasked_batch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """w_tb=1.0 (default): masked batch total loss equals the unmasked-batch loss."""
+    monkeypatch.setenv("HYZERO_TB_POLICY_WEIGHT", "1.0")
+
+    uniform_tb = np.full((2, 3, NUM_ACTIONS), 1.0 / NUM_ACTIONS, dtype=np.float32)
+    batch_masked = _make_tb_policy_batch(k_steps=2, seed=3, tb_policy=uniform_tb)
+    # Same inputs, but strip the TB bookkeeping so the trainer takes the plain
+    # (unmasked) replay path. With weight 1.0 the two must be bit-for-bit equal.
+    batch_plain = dict(batch_masked)
+    del batch_plain["is_tablebase"]
+    del batch_plain["tb_policy_mask"]
+
+    res_masked = _seeded_trainer_loss_full(batch_masked)
+    res_plain = _seeded_trainer_loss_full(batch_plain)
+
+    assert res_masked["total_loss"] == pytest.approx(res_plain["total_loss"], abs=1e-6)
+    assert res_masked["policy_loss"] == pytest.approx(
+        res_plain["policy_loss"], abs=1e-6
+    )
+
+
+def test_policy_loss_weight_zero_equals_replay_only_ce() -> None:
+    """Weighted policy CE with TB rows at weight 0 equals the replay-only mean CE.
+
+    Unit-level proof (no BatchNorm coupling): a per-row weight of [1,1,0,0] makes
+    the weighted mean collapse to the plain mean over the two replay rows, with
+    the k0 legal-mask + nan_to_num semantics preserved.
+    """
+    trainer = Trainer(device="cpu")
+    torch.manual_seed(11)
+    b = 4
+    logits = torch.randn(b, NUM_ACTIONS)
+    targets = torch.zeros(b, NUM_ACTIONS)
+    for i in range(b):
+        targets[i, i] = 1.0  # peaked target per row
+    legal_mask = torch.zeros(b, NUM_ACTIONS, dtype=torch.bool)
+    legal_mask[:, :8] = True  # 8 legal moves per row
+
+    row_weight = torch.tensor([1.0, 1.0, 0.0, 0.0])  # TB rows (2,3) zero-weighted
+    weighted = trainer._policy_loss(logits, targets, legal_mask, row_weight=row_weight)
+    replay_only = trainer._policy_loss(
+        logits[:2], targets[:2], legal_mask[:2]
+    )  # plain mean over replay rows
+    assert weighted.item() == pytest.approx(replay_only.item(), abs=1e-6)
+
+
+def test_pred_entropy_legal_replay_excludes_tb_rows(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """pred_entropy_legal_replay measures only replay rows (TB rows excluded).
+
+    Replay rows are forced to a single legal move → their legal-masked entropy is
+    exactly 0 regardless of logits. TB rows get many legal moves → positive
+    entropy. The blended pred_entropy_legal therefore exceeds the replay-only
+    pred_entropy_legal_replay, which must read 0.
+    """
+    monkeypatch.setenv("HYZERO_TB_POLICY_WEIGHT", "0.0")
+
+    n_replay, n_tb, k_steps = 2, 2, 1
+    uniform_tb = np.full(
+        (n_tb, k_steps + 1, NUM_ACTIONS), 1.0 / NUM_ACTIONS, dtype=np.float32
+    )
+    batch = _make_tb_policy_batch(
+        n_replay=n_replay, n_tb=n_tb, k_steps=k_steps, seed=4, tb_policy=uniform_tb
+    )
+    # Replay rows: exactly ONE legal move each → 0 legal entropy (point mass).
+    # TB rows: many legal moves → positive legal entropy.
+    legal = np.zeros((n_replay + n_tb, NUM_ACTIONS), dtype=bool)
+    for i in range(n_replay):
+        legal[i, i] = True
+    legal[n_replay:, :64] = True
+    batch["legal_masks"] = legal
+
+    np.random.seed(4)
+    torch.manual_seed(4)
+    trainer = Trainer(device="cpu")
+    trainer.train_batch(batch)
+
+    out = capsys.readouterr().out
+    pol_line = next(
+        (ln for ln in out.splitlines() if ln.startswith("[policy_stats]")), None
+    )
+    assert pol_line is not None, "expected a [policy_stats] diagnostic line"
+    replay_ent = _parse_metric(pol_line, "pred_entropy_legal_replay")
+    blended_ent = _parse_metric(pol_line, "pred_entropy_legal")
+    assert replay_ent is not None, f"missing pred_entropy_legal_replay in: {pol_line}"
+    assert "pred_top1_replay" in pol_line
+    assert replay_ent == pytest.approx(0.0, abs=1e-4)
+    assert blended_ent > replay_ent + 1e-3
+
+
+def _seeded_trainer_loss_full(batch: dict, seed: int = 7) -> dict:
+    """Like _seeded_trainer_loss but returns the full train_batch result dict."""
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    trainer = Trainer(device="cpu")
+    return trainer.train_batch(batch)
+
+
+def _parse_metric(line: str, key: str) -> float | None:
+    """Extract a ``key=value`` float from a whitespace-delimited diagnostic line.
+
+    Matches the exact token ``{key}=`` so that prefix keys (pred_entropy_legal)
+    do not accidentally capture suffixed ones (pred_entropy_legal_replay).
+    """
+    for tok in line.split():
+        if tok.startswith(key + "="):
+            return float(tok.split("=", 1)[1])
+    return None
