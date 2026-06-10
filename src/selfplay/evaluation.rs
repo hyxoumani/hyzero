@@ -219,6 +219,7 @@ impl EvaluationTask {
             black_label,
             result_str,
             &outcome.termination,
+            outcome.starting_fen.as_deref(),
             &outcome.moves,
         );
     }
