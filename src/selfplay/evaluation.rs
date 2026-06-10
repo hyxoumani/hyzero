@@ -218,6 +218,7 @@ impl EvaluationTask {
             white_label,
             black_label,
             result_str,
+            &outcome.termination,
             &outcome.moves,
         );
     }
