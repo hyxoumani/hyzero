@@ -5,11 +5,11 @@ use async_trait::async_trait;
 use pyo3::prelude::*;
 use tokio::sync::watch;
 
-use crate::PrecomputedItems;
-use crate::data::{BoardObservation, HiddenState, Policy, ActionIndex, NUM_ACTIONS};
+use crate::data::{ActionIndex, BoardObservation, HiddenState, Policy, NUM_ACTIONS};
 use crate::mcts::evaluator::Evaluator;
 use crate::selfplay::champion::ChampionStore;
-use crate::selfplay::game_task::{DualGameOutcome, GameConfig, play_game_dual};
+use crate::selfplay::game_task::{play_game_dual, DualGameOutcome, GameConfig};
+use crate::PrecomputedItems;
 
 // --- Eval-side adjudication (HYZERO_EVAL_ADJUDICATE* gates) ---
 //
@@ -49,7 +49,11 @@ pub struct RandomEvaluator;
 
 #[async_trait]
 impl Evaluator for RandomEvaluator {
-    async fn root_setup(&self, _obs: &BoardObservation, _legal_mask: &[bool]) -> (HiddenState, Policy, f32) {
+    async fn root_setup(
+        &self,
+        _obs: &BoardObservation,
+        _legal_mask: &[bool],
+    ) -> (HiddenState, Policy, f32) {
         let policy = vec![1.0 / NUM_ACTIONS as f32; NUM_ACTIONS];
         (HiddenState::new(64), policy, 0.0)
     }
@@ -98,6 +102,10 @@ pub struct EvaluationConfig {
     /// Directory scanned for `best_v{NNN}.pt` archives when building the pool.
     /// Default `checkpoints`.
     pub checkpoints_dir: PathBuf,
+    /// File every eval ladder game is appended to in PGN format.
+    /// Default `logs/eval_games.pgn`. Overridden in tests to a temp path so they
+    /// never write to the shared repo log used by the live training run.
+    pub eval_pgn_path: PathBuf,
 }
 
 impl Default for EvaluationConfig {
@@ -115,6 +123,7 @@ impl Default for EvaluationConfig {
             promotion_elo_delta: 20.0,
             opponent_initial_elo: crate::selfplay::elo::INITIAL_RATING,
             checkpoints_dir: PathBuf::from("checkpoints"),
+            eval_pgn_path: PathBuf::from("logs/eval_games.pgn"),
         }
     }
 }
@@ -197,8 +206,10 @@ impl EvaluationTask {
         self
     }
 
-    /// Write a single game to `logs/eval_games.pgn` in standard PGN format.
+    /// Write a single game to `pgn_path` (default `logs/eval_games.pgn`) in
+    /// standard PGN format.
     fn write_pgn_game(
+        pgn_path: &std::path::Path,
         cycle: u64,
         game_num: usize,
         white_label: &str,
@@ -213,7 +224,7 @@ impl EvaluationTask {
             "1/2-1/2"
         };
         crate::selfplay::pgn::write_pgn_game(
-            "logs/eval_games.pgn",
+            &pgn_path.to_string_lossy(),
             &format!("Eval Cycle {cycle} Game {game_num}"),
             white_label,
             black_label,
@@ -334,6 +345,7 @@ impl EvaluationTask {
                     .await;
 
                     Self::write_pgn_game(
+                        &self.config.eval_pgn_path,
                         self.cycle,
                         game_idx + 1,
                         &format!("challenger v{challenger_version}"),
@@ -360,6 +372,7 @@ impl EvaluationTask {
                     .await;
 
                     Self::write_pgn_game(
+                        &self.config.eval_pgn_path,
                         self.cycle,
                         gps + game_idx + 1,
                         &format!("champion v{champion_version}"),
@@ -418,8 +431,7 @@ impl EvaluationTask {
                     }
                 };
 
-                let labels: Vec<String> =
-                    pool.iter().map(|(v, _)| format!("v{v}")).collect();
+                let labels: Vec<String> = pool.iter().map(|(v, _)| format!("v{v}")).collect();
                 opponents_label = labels.join(",");
 
                 'pool_loop: for (opponent_version, ckpt_path) in pool.iter() {
@@ -462,6 +474,7 @@ impl EvaluationTask {
                         .await;
 
                         Self::write_pgn_game(
+                            &self.config.eval_pgn_path,
                             self.cycle,
                             game_idx + 1,
                             &format!("challenger v{challenger_version}"),
@@ -500,6 +513,7 @@ impl EvaluationTask {
                         .await;
 
                         Self::write_pgn_game(
+                            &self.config.eval_pgn_path,
                             self.cycle,
                             gps + game_idx + 1,
                             &format!("pool v{opponent_version}"),
@@ -607,6 +621,18 @@ mod tests {
     use crate::data::types::TestEnvGuard;
     use tokio::sync::watch;
 
+    /// Per-test isolation for `run()`-driving tests: an empty temp dir for the
+    /// champion pool and a temp PGN path, so a test never reads the real
+    /// `checkpoints/` archive (which the live training run populates) nor writes
+    /// to the shared `logs/eval_games.pgn`. The returned `TempDir` must be held
+    /// for the duration of the test — dropping it deletes the directory.
+    fn isolated_paths() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let checkpoints_dir = dir.path().join("checkpoints");
+        let eval_pgn_path = dir.path().join("eval_games.pgn");
+        (dir, checkpoints_dir, eval_pgn_path)
+    }
+
     /// Eval-side adjudication is wired into the `GameConfig` that drives
     /// `play_game_dual`: with `HYZERO_EVAL_ADJUDICATE` set truthy, the config
     /// the ladder builds carries `adjudicate_at_cap == true`; with it OFF, the
@@ -661,6 +687,7 @@ mod tests {
         assert!((config.promotion_elo_delta - 20.0).abs() < f32::EPSILON);
         assert!((config.opponent_initial_elo - 1500.0).abs() < f32::EPSILON);
         assert_eq!(config.checkpoints_dir, PathBuf::from("checkpoints"));
+        assert_eq!(config.eval_pgn_path, PathBuf::from("logs/eval_games.pgn"));
         // Preserved field — MUST remain 2.0 (existing tests at lines 320, 374
         // construct EvaluationConfig literals that set this).
         assert!((config.champion_score_weight - 2.0).abs() < f64::EPSILON);
@@ -727,7 +754,9 @@ mod tests {
         let store_ref = champion_store.clone();
 
         // Use a non-existent checkpoints dir so the pool is always empty
-        // (forces the bootstrap branch).
+        // (forces the bootstrap branch). Redirect PGN writes to a temp file so
+        // this test never appends to the shared `logs/eval_games.pgn`.
+        let (_tmp, _checkpoints_dir, eval_pgn_path) = isolated_paths();
         let config = EvaluationConfig {
             games_per_side: 1,
             promotion_threshold: 0.0, // Always promote on the bootstrap path.
@@ -737,6 +766,7 @@ mod tests {
             poll_interval_ms: 10,
             champion_score_weight: 2.0,
             checkpoints_dir: PathBuf::from("/nonexistent/test/dir/abc"),
+            eval_pgn_path,
             ..EvaluationConfig::default()
         };
 
@@ -779,6 +809,9 @@ mod tests {
         let champion_store = Arc::new(ChampionStore::new(champion_eval, 5));
         let store_ref = champion_store.clone();
 
+        // Redirect PGN writes to a temp file so this test never appends to the
+        // shared `logs/eval_games.pgn`.
+        let (_tmp, _checkpoints_dir, eval_pgn_path) = isolated_paths();
         let config = EvaluationConfig {
             games_per_side: 1,
             promotion_threshold: 2.0, // Impossible — never promote.
@@ -788,6 +821,7 @@ mod tests {
             poll_interval_ms: 10,
             champion_score_weight: 2.0,
             checkpoints_dir: PathBuf::from("/nonexistent/test/dir/xyz"),
+            eval_pgn_path,
             ..EvaluationConfig::default()
         };
 
@@ -869,6 +903,8 @@ mod tests {
         let ckpt_path: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
         let champion_store = Arc::new(ChampionStore::new(champion_eval, 5));
 
+        // Isolate pool reads + PGN writes from the shared repo state.
+        let (_tmp, checkpoints_dir, eval_pgn_path) = isolated_paths();
         let config = EvaluationConfig {
             games_per_side: 1,
             promotion_threshold: 2.0, // Force no promotion in this test
@@ -877,6 +913,8 @@ mod tests {
             temperature_moves: 2,
             poll_interval_ms: 10,
             champion_score_weight: 2.0,
+            checkpoints_dir,
+            eval_pgn_path,
             ..EvaluationConfig::default()
         };
 
@@ -902,11 +940,7 @@ mod tests {
         // Drop sender to end the loop.
         drop(version_tx);
 
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(30),
-            task_handle,
-        )
-        .await;
+        let result = tokio::time::timeout(std::time::Duration::from_secs(30), task_handle).await;
 
         assert!(result.is_ok(), "EvaluationTask should complete");
         assert!(result.unwrap().is_ok(), "EvaluationTask should not panic");
@@ -924,6 +958,12 @@ mod tests {
         let champion_store = Arc::new(ChampionStore::new(champion_eval, 5));
         let store_ref = champion_store.clone();
 
+        // Isolate the pool from the shared `checkpoints/` archive so this test
+        // always takes the empty-pool bootstrap (win-rate) promotion path even
+        // when the live training run has populated real `best_v{NNN}.pt` files.
+        // Without this, a nonempty real pool routes through the Elo ladder, which
+        // has no opponent handle in a unit test, so it skips and never promotes.
+        let (_tmp, checkpoints_dir, eval_pgn_path) = isolated_paths();
         let config = EvaluationConfig {
             games_per_side: 1,
             promotion_threshold: 0.0, // Always promote
@@ -932,6 +972,8 @@ mod tests {
             temperature_moves: 2,
             poll_interval_ms: 10,
             champion_score_weight: 2.0,
+            checkpoints_dir,
+            eval_pgn_path,
             ..EvaluationConfig::default()
         };
 
@@ -953,15 +995,15 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_secs(30)).await;
         drop(version_tx);
 
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(30),
-            task_handle,
-        )
-        .await;
+        let result = tokio::time::timeout(std::time::Duration::from_secs(30), task_handle).await;
 
         assert!(result.is_ok());
         // With threshold=0.0, champion_version should have been updated to 5.
-        assert_eq!(store_ref.version(), 5, "champion_version should be 5 after forced promotion");
+        assert_eq!(
+            store_ref.version(),
+            5,
+            "champion_version should be 5 after forced promotion"
+        );
     }
 
     /// Verify the opponent `Py<PyAny>` reload path swaps actual weights into a held
@@ -1079,12 +1121,18 @@ mod tests {
         let game_outcome: f32 = 1.0; // White (champion) wins
         let challenger_perspective = -game_outcome;
         // challenger lost: challenger_perspective < -0.5
-        assert!(challenger_perspective < -0.5, "challenger lost when champion won as White");
+        assert!(
+            challenger_perspective < -0.5,
+            "challenger lost when champion won as White"
+        );
 
         // Simulate: challenger=Black wins (game_outcome = -1.0)
         let game_outcome: f32 = -1.0; // Black (challenger) wins
         let challenger_perspective = -game_outcome;
-        assert!(challenger_perspective > 0.5, "challenger won when Black won");
+        assert!(
+            challenger_perspective > 0.5,
+            "challenger won when Black won"
+        );
 
         // Draw
         let game_outcome: f32 = 0.0;
