@@ -386,6 +386,10 @@ pub struct DualGameOutcome {
     /// "insufficient-material"), "move-cap" for an un-adjudicated cap, or
     /// "adjudication" when an eval material lead decided a non-checkmate terminal.
     pub termination: String,
+    /// Starting FEN when the game began from a non-standard position (diverse
+    /// starts via `HYZERO_STARTS_FILE`), else `None`. Plumbed to the PGN writer
+    /// so the viewer can replay the moves from this position via `[SetUp]`/`[FEN]`.
+    pub starting_fen: Option<String>,
 }
 
 /// Play a game with two distinct evaluators (challenger = White, champion = Black).
@@ -400,7 +404,7 @@ pub async fn play_game_dual(
     black_evaluator: Arc<dyn Evaluator>,
     config: GameConfig,
 ) -> DualGameOutcome {
-    let (mut board, mut side_to_move, _starting_fen) = init_self_play_board(precomputed.clone());
+    let (mut board, mut side_to_move, starting_fen) = init_self_play_board(precomputed.clone());
 
     let mut turn_count: usize = 0;
     let mut history: VecDeque<BoardSnapshot> = VecDeque::with_capacity(7);
@@ -536,6 +540,7 @@ pub async fn play_game_dual(
         num_moves: turn_count,
         moves,
         termination,
+        starting_fen,
     }
 }
 
@@ -905,6 +910,7 @@ pub async fn play_game(
             "selfplay_black",
             result_str,
             &termination,
+            starting_fen.as_deref(),
             &moves,
         );
     }
@@ -1505,6 +1511,7 @@ mod tests {
             num_moves: 40,
             moves: vec![],
             termination: "checkmate".to_string(),
+            starting_fen: None,
         };
         // When champion played Black, negate to get champion perspective
         let champion_perspective_when_black = -white_wins.game_outcome;
@@ -1519,6 +1526,7 @@ mod tests {
             num_moves: 40,
             moves: vec![],
             termination: "checkmate".to_string(),
+            starting_fen: None,
         };
         let champion_perspective_when_black = -black_wins.game_outcome;
         assert_eq!(
@@ -1532,6 +1540,7 @@ mod tests {
             num_moves: 300,
             moves: vec![],
             termination: "move-cap".to_string(),
+            starting_fen: None,
         };
         let champion_perspective_when_black = -draw.game_outcome;
         assert_eq!(
