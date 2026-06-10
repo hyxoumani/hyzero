@@ -327,8 +327,18 @@ async fn main() {
                         println!("[selfplay] Champion inference batcher stopped");
                     });
 
-                    let champion_eval: Arc<dyn Evaluator> =
-                        Arc::new(ChannelEvaluator::new(champion_tx));
+                    // Keepalive sender: the only other holder of `champion_tx` is the
+                    // champion `ChannelEvaluator` stored in `ChampionStore`. A promotion
+                    // swaps that stored evaluator (dropping the old one), which would
+                    // close `champion_rx` and stop the champion batcher — stranding any
+                    // in-flight bootstrap-cycle eval request. Leaking one clone for the
+                    // process lifetime keeps the batcher alive across promotions so the
+                    // teardown can never strand mid-cycle work.
+                    std::mem::forget(champion_tx.clone());
+
+                    let champion_eval: Arc<dyn Evaluator> = Arc::new(
+                        ChannelEvaluator::with_channels(champion_tx, champion_hidden_channels),
+                    );
 
                     println!(
                         "[selfplay] Loaded champion from {} (version={starting_version})",
@@ -448,10 +458,14 @@ async fn main() {
         opponent_batcher.run().await;
         println!("[selfplay] Opponent inference batcher stopped");
     });
-    let opponent_evaluator: Arc<dyn Evaluator> = Arc::new(ChannelEvaluator::new(opponent_tx));
+    let opponent_evaluator: Arc<dyn Evaluator> = Arc::new(ChannelEvaluator::with_channels(
+        opponent_tx,
+        opponent_hidden_channels,
+    ));
 
     // 8. Create evaluator and coordinator.
-    let evaluator: Arc<dyn Evaluator> = Arc::new(ChannelEvaluator::new(inference_tx.clone()));
+    let evaluator: Arc<dyn Evaluator> =
+        Arc::new(ChannelEvaluator::with_channels(inference_tx.clone(), hidden_channels));
 
     // Replay capture: opt-in via HYZERO_REPLAY_DIR. When set, every completed
     // self-play game writes a `.replay` file (bincode) into the given directory
@@ -495,7 +509,8 @@ async fn main() {
     ));
 
     // 10. Spawn evaluation ladder task.
-    let challenger_eval: Arc<dyn Evaluator> = Arc::new(ChannelEvaluator::new(inference_tx));
+    let challenger_eval: Arc<dyn Evaluator> =
+        Arc::new(ChannelEvaluator::with_channels(inference_tx, hidden_channels));
     let eval_config = EvaluationConfig {
         games_per_side: config.games_per_side,
         promotion_threshold: config.promotion_threshold,

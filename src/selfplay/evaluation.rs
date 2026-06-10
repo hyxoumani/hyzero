@@ -273,6 +273,14 @@ impl EvaluationTask {
     pub async fn run(&mut self) {
         let mut last_evaluated_version: u64 = 0;
 
+        // Re-arm invariant: the ONLY exit from this loop is the training-done
+        // signal (sender dropped, below). Every cycle — including one that
+        // promotes a new champion or one whose games degrade because a backing
+        // inference batcher stopped — must fall through to the next iteration and
+        // wait for the next version. The eval games call through `ChannelEvaluator`,
+        // which recovers from a dropped batcher with a neutral result instead of
+        // panicking (see `inference::ChannelEvaluator`), so a stopped batcher can no
+        // longer silently kill this task mid-cycle and strand the ladder.
         loop {
             // Wait for a new model version.
             loop {
@@ -1138,5 +1146,122 @@ mod tests {
         let game_outcome: f32 = 0.0;
         let challenger_perspective = -game_outcome;
         assert_eq!(challenger_perspective, 0.0, "draw is neutral");
+    }
+
+    /// REGRESSION (champion-promotion wedge, loop layer): a cycle whose champion
+    /// is a `ChannelEvaluator` whose batcher has stopped (the exact post-promotion
+    /// teardown condition) must NOT panic or hang, and the eval loop must re-arm so
+    /// a SUBSEQUENT version still gets a cycle.
+    ///
+    /// Setup mirrors the bootstrap (empty-pool) path so the champion evaluator is
+    /// actually exercised. The champion is a `ChannelEvaluator` whose inference
+    /// batcher we drop up front, reproducing "champion inference batcher stopped".
+    /// Pre-fix, the first champion `root_setup` would `.expect("inference channel
+    /// closed")` and panic inside the spawned eval task, stranding the ladder so
+    /// version 2 never evaluated. With the fix the champion recovers to a neutral
+    /// result, cycle 1 promotes, and cycle 2 (version 2) still runs.
+    ///
+    /// The outer 60s timeout converts a regression (eval task wedged) into a TEST
+    /// failure instead of hanging CI.
+    #[tokio::test]
+    async fn eval_loop_rearms_after_promotion_with_dead_champion_batcher() {
+        use crate::selfplay::inference::{
+            BatcherConfig, ChannelEvaluator, InferenceBatcher, RandomBackend,
+        };
+        use tokio::sync::mpsc;
+
+        let precomputed = Arc::new(crate::PrecomputedItems::begin_precomputing());
+        let challenger: Arc<dyn Evaluator> = Arc::new(RandomEvaluator);
+
+        // Champion = ChannelEvaluator whose batcher we forcibly stop, reproducing
+        // the post-promotion teardown where the champion batcher has exited but a
+        // `ChannelEvaluator` (holding a live `tx`) is still reachable. Aborting the
+        // batcher task (rather than closing the channel) keeps `champion_tx` valid,
+        // so `send().await` succeeds but the reply oneshot is dropped — the exact
+        // `EvalError::ReplyDropped` condition that pre-fix panicked the eval task.
+        let (champion_tx, champion_rx) = mpsc::channel(32);
+        let mut champion_batcher = InferenceBatcher::new(
+            champion_rx,
+            Box::new(RandomBackend::new(64)),
+            BatcherConfig { max_batch_size: 4, batch_timeout_ms: 5 },
+        );
+        let batcher_handle = tokio::spawn(async move { champion_batcher.run().await });
+        let champion_eval: Arc<dyn Evaluator> =
+            Arc::new(ChannelEvaluator::with_channels(champion_tx, 64));
+        // Stop the batcher: from here every champion request's reply is dropped.
+        batcher_handle.abort();
+        let _ = batcher_handle.await;
+
+        let (version_tx, version_rx) = watch::channel(0u64);
+        let ckpt_path: Arc<Mutex<Option<PathBuf>>> = Arc::new(Mutex::new(None));
+        let champion_store = Arc::new(ChampionStore::new(champion_eval, 5));
+        let store_ref = champion_store.clone();
+
+        // Empty pool (nonexistent dir) → bootstrap path exercises the champion.
+        let (_tmp, _checkpoints_dir, eval_pgn_path) = isolated_paths();
+        let config = EvaluationConfig {
+            games_per_side: 1,
+            promotion_threshold: 0.0, // Always promote on the bootstrap path.
+            promotion_cooldown_games: 0,
+            num_simulations: 2,
+            temperature_moves: 2,
+            poll_interval_ms: 10,
+            champion_score_weight: 2.0,
+            checkpoints_dir: PathBuf::from("/nonexistent/test/dir/rearm"),
+            eval_pgn_path,
+            ..EvaluationConfig::default()
+        };
+
+        let mut task = EvaluationTask::new(
+            precomputed,
+            challenger,
+            version_rx,
+            ckpt_path,
+            champion_store,
+            config,
+        );
+
+        let task_handle = tokio::spawn(async move {
+            task.run().await;
+        });
+
+        // Cycle 1: version 1 → must promote despite the dead champion batcher.
+        version_tx.send(1).expect("send 1 failed");
+        // Poll until the promotion lands (store version bumps to 1) so we know
+        // cycle 1 completed without wedging, rather than racing a fixed sleep.
+        let promoted = tokio::time::timeout(std::time::Duration::from_secs(40), async {
+            loop {
+                if store_ref.version() == 1 {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        })
+        .await;
+        assert!(
+            promoted.is_ok(),
+            "cycle 1 wedged: promotion never landed with a dead champion batcher"
+        );
+
+        // Cycle 2: version 2 → the loop must RE-ARM and evaluate again. We assert
+        // the store promotes to version 2 (threshold 0.0 promotes every cycle),
+        // proving a subsequent candidate was evaluated after the promotion.
+        version_tx.send(2).expect("send 2 failed");
+        let rearmed = tokio::time::timeout(std::time::Duration::from_secs(40), async {
+            loop {
+                if store_ref.version() == 2 {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+        })
+        .await;
+        assert!(
+            rearmed.is_ok(),
+            "eval loop failed to re-arm: version 2 never evaluated after a promotion"
+        );
+
+        drop(version_tx);
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(20), task_handle).await;
     }
 }
