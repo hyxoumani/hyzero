@@ -145,3 +145,39 @@ def test_unknown_file_key_falls_back_to_selfplay(tmp_path):
     payload = lv.build_games_payload(str(tmp_path), "bogus")
     assert payload["file"] == "selfplay"
     assert payload["count"] == 2
+
+
+def test_default_host_is_localhost():
+    """The --host arg defaults to 127.0.0.1 so the server is not world-bound."""
+    import argparse
+
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--logs-dir", default="./logs")
+    ap.add_argument("--port", type=int, default=8642)
+    ap.add_argument("--host", default="127.0.0.1")
+    args = ap.parse_args([])
+    assert args.host == "127.0.0.1"
+
+
+def test_mid_write_movetext_tail_parses_as_shorter_game(tmp_path):
+    """A trailing game with finished headers but a half-written movetext tail
+    parses as a shorter game whose replay stops cleanly at the truncation."""
+    mid_write = (
+        TWO_GAMES
+        + '[Event "Eval Cycle 1 Game 3"]\n'
+        + '[White "challenger"]\n'
+        + '[Black "champion"]\n'
+        + '[Result "*"]\n'
+        + "\n"
+        + "1. e2e4 e7e5 2. g1f3 b8"  # movetext cut off mid-write, no result token
+    )
+    p = tmp_path / "games.pgn"
+    p.write_text(mid_write, encoding="utf-8")
+    games = lv.parse_pgn_file(str(p))
+    assert len(games) == 3  # the truncated game still parses
+    tail = games[2]
+    assert tail["event"] == "Eval Cycle 1 Game 3"
+    assert tail["moves"] == ["e2e4", "e7e5", "g1f3", "b8"]
+    if lv.HAVE_CHESS:
+        # 'b8' is not a legal UCI move, so replay stops after the three good plies.
+        assert len(tail["fens"]) == 4

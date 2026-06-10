@@ -3,8 +3,10 @@
 Serves a single static page plus a tiny JSON API so you can watch self-play and
 eval games near-live in a browser while a baseline run appends games to the log
 files. The PGN files are re-parsed fresh on every poll (they are small) and a
-partially-written trailing game is tolerated: parse errors on the tail are
-skipped rather than fatal.
+partially-written trailing game is tolerated: a trailing block whose header
+section is not yet terminated by a blank line is skipped, while a trailing block
+with finished headers but movetext still being written parses as a (shorter)
+game whose replay simply stops at the truncated tail rather than being fatal.
 
 Moves in hyzero PGNs are long-algebraic / UCI tokens (e.g. ``a2a4``, ``c2c1n``),
 not SAN. When ``python-chess`` is importable we replay each game and return a
@@ -143,7 +145,9 @@ def parse_pgn_file(path: str) -> List[Dict[str, Any]]:
 
     Each game dict has ``event``, ``white``, ``black``, ``result`` and either
     ``fens`` (when python-chess is available) or ``moves`` (the raw UCI list).
-    A missing file yields an empty list; a partial trailing game is skipped.
+    A missing file yields an empty list. A trailing game whose header section is
+    not yet terminated is skipped; one with finished headers but a half-written
+    movetext tail parses as a shorter game (replay stops at the truncation).
     """
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as fh:
@@ -223,13 +227,13 @@ def make_handler(logs_dir: str):
     return Handler
 
 
-def serve(logs_dir: str, port: int) -> None:
+def serve(logs_dir: str, port: int, host: str = "127.0.0.1") -> None:
     """Run the HTTP server until interrupted."""
     handler = make_handler(logs_dir)
-    httpd = ThreadingHTTPServer(("0.0.0.0", port), handler)
+    httpd = ThreadingHTTPServer((host, port), handler)
     print(
         f"[live_viewer] serving logs from {os.path.abspath(logs_dir)} "
-        f"on http://localhost:{port}/ (python-chess: {'yes' if HAVE_CHESS else 'no'})"
+        f"on http://{host}:{port}/ (python-chess: {'yes' if HAVE_CHESS else 'no'})"
     )
     try:
         httpd.serve_forever()
@@ -243,8 +247,9 @@ def main(argv: Optional[List[str]] = None) -> None:
     ap = argparse.ArgumentParser(description="hyzero live PGN game visualizer")
     ap.add_argument("--logs-dir", default="./logs", help="directory holding the PGN files")
     ap.add_argument("--port", type=int, default=8642, help="HTTP port to listen on")
+    ap.add_argument("--host", default="127.0.0.1", help="address to bind (default localhost)")
     args = ap.parse_args(argv)
-    serve(args.logs_dir, args.port)
+    serve(args.logs_dir, args.port, args.host)
 
 
 PAGE_HTML = r"""<!doctype html>
