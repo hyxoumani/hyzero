@@ -793,13 +793,15 @@ pub async fn play_game(
     }
 
     // Game outcome.
-    // Checkmates produce ±1 signal (strong). Non-decisive terminals (stalemate, repetition,
-    // 50-move rule, 300-move cap) use tanh(Δmaterial/5) as a weak material-proxy signal to
-    // keep the value head learning when games don't reach checkmate. Adjudication is NOT
-    // re-enabled — it was the primary cause of the passivity attractor. Material-at-cap
-    // alone (without early termination on material imbalance) is a weaker incentive:
-    // preserving material only pays off IF you survive to a real terminal, so passive
-    // play still risks getting checkmated.
+    // Checkmates produce ±1 signal (strong). Rule-draw terminals (repetition,
+    // 50-move rule, 300-move cap) optionally use tanh(Δmaterial/5) as a weak
+    // material-proxy signal to keep the value head learning when games don't reach
+    // checkmate; true draws (stalemate, insufficient material) stay 0.0 because the
+    // position is drawn regardless of material. See `score_board_terminal`.
+    // Adjudication is NOT re-enabled — it was the primary cause of the passivity
+    // attractor. Material-at-cap alone (without early termination on material
+    // imbalance) is a weaker incentive: preserving material only pays off IF you
+    // survive to a real terminal, so passive play still risks getting checkmated.
     let board_result = board.result();
     // Termination cause for the PGN header. Resignation overrides the board cause;
     // otherwise map the board result (or move-cap) to a standard label.
@@ -814,27 +816,7 @@ pub async fn play_game(
         let outcome = if loser == Color::White { -1.0f32 } else { 1.0f32 };
         (outcome, false)
     } else {
-        match board_result {
-            GameResult::Checkmate(Color::White) => (1.0f32, false),
-            GameResult::Checkmate(Color::Black) => (-1.0f32, false),
-            _ => {
-                // All non-checkmate terminals: stalemate, repetition, 50-move, cap, insufficient material.
-                // Default (AlphaZero-style): outcome = 0.0 — pure-outcome signal; only real
-                // checkmates produce non-zero value targets. Material shaping is OFF unless
-                // explicitly opted in via HYZERO_MATERIAL_SHAPING=1. Shaping was historically
-                // the cause of (a) the PGN-result labeling bug (shaped draws got labeled 1-0 /
-                // 0-1 based on the tanh(Δ) threshold) and (b) shuffle-attractor reinforcement
-                // where material-leading sides got +0.8 value targets for drawing by
-                // repetition, teaching the value head to reward passive play.
-                if material_shaping_enabled() {
-                    let delta = compute_material_diff(&board);
-                    let scale = material_shaping_scale();
-                    ((delta as f32 / scale).tanh(), true)
-                } else {
-                    (0.0f32, true)
-                }
-            }
-        }
+        score_board_terminal(board_result, &board)
     };
 
     // Set terminal reward on last step (convert white-absolute game_outcome to last-step POV,
@@ -1179,6 +1161,48 @@ fn compute_material_diff(board: &GameBoard) -> i32 {
         delta += val * (white_count - black_count);
     }
     delta
+}
+
+/// Map a (non-resignation) board terminal to a self-play training outcome,
+/// returning `(white_absolute_outcome, is_draw)`.
+///
+/// Checkmates always produce a decisive ±1 signal. Non-checkmate terminals split
+/// into two groups:
+///   - TRUE draws (stalemate, insufficient material): the position is genuinely
+///     drawn regardless of material on the board, so the outcome MUST stay 0.0.
+///     Shaping these with `tanh(Δmaterial)` would teach the value head a false
+///     value (e.g. a stalemate with a material lead is still a draw, not a win).
+///   - RULE draws (repetition, fifty-move, move-cap): the game stopped by a count
+///     rule, not because the position is balanced. With HYZERO_MATERIAL_SHAPING=1
+///     these get `tanh(Δmaterial/scale)` as a weak material-proxy signal to keep
+///     the value head learning when games don't reach checkmate. Default (shaping
+///     OFF) is AlphaZero-style: outcome = 0.0.
+///
+/// `is_draw` is true for every non-checkmate terminal (used by the trainer's
+/// draw penalty and by the PGN result label, which must stay 1/2-1/2 even when a
+/// rule draw carries a non-zero shaped value — historically the cause of the
+/// 2026-04-23 PGN labeling confusion). Material shaping is opt-in because it
+/// historically reinforced the shuffle-attractor: material-leading sides got
+/// high value targets for drawing by repetition, teaching the value head to
+/// reward passive play.
+fn score_board_terminal(board_result: GameResult, board: &GameBoard) -> (f32, bool) {
+    match board_result {
+        GameResult::Checkmate(Color::White) => (1.0f32, false),
+        GameResult::Checkmate(Color::Black) => (-1.0f32, false),
+        // True draws: drawn by position, never shaped.
+        GameResult::Stalemate | GameResult::InsufficientMaterial => (0.0f32, true),
+        // Rule draws: repetition, fifty-move, and move-cap (board still Ongoing
+        // when the loop exits on the cap). Eligible for material shaping.
+        GameResult::ThreefoldRepetition | GameResult::FiftyMoveRule | GameResult::Ongoing => {
+            if material_shaping_enabled() {
+                let delta = compute_material_diff(board);
+                let scale = material_shaping_scale();
+                ((delta as f32 / scale).tanh(), true)
+            } else {
+                (0.0f32, true)
+            }
+        }
+    }
 }
 
 /// Eval-only adjudication for a non-checkmate terminal (used by `play_game_dual`).
@@ -1993,6 +2017,88 @@ mod tests {
             adjudicate_non_checkmate(&board, true, 5),
             0.0,
             "a within-margin material lead should stay a draw",
+        );
+    }
+
+    /// Regression: with material shaping ON, a repetition draw with a material
+    /// lead stores a NON-ZERO shaped outcome of the correct sign — repetition is a
+    /// rule draw (the game stopped by a count rule, not because the position is
+    /// balanced), so the weak material-proxy signal is allowed. FAILS without the
+    /// explicit rule-draw arm (the old catch-all already shaped this, so this case
+    /// guards against a future regression that lumps it back with true draws).
+    #[test]
+    fn repetition_with_material_lead_is_shaped_when_enabled() {
+        use std::env;
+        let _env = TestEnvGuard::new(&["HYZERO_MATERIAL_SHAPING", "HYZERO_MATERIAL_SHAPING_SCALE"]);
+        // SAFETY: env mutation serialized by TestEnvGuard for this test's duration.
+        unsafe {
+            env::set_var("HYZERO_MATERIAL_SHAPING", "1");
+            env::remove_var("HYZERO_MATERIAL_SHAPING_SCALE"); // default scale 5.0
+        }
+        let precomputed = Arc::new(PrecomputedItems::begin_precomputing());
+        // White up a full queen (delta +9) — non-checkmate position.
+        let (board, _, _) =
+            board_from_fen("4k3/8/8/8/8/8/8/3QK3 w - - 0 1", precomputed).expect("invalid FEN");
+
+        let (outcome, is_draw) = score_board_terminal(GameResult::ThreefoldRepetition, &board);
+        let expected = (9.0f32 / 5.0).tanh();
+        assert!(
+            (outcome - expected).abs() < 1e-6,
+            "repetition with +9 material under shaping must store tanh(9/5)={expected}, got {outcome}",
+        );
+        // The shaped rule draw is still a draw for the PGN label / trainer penalty.
+        assert!(is_draw, "a shaped repetition draw must remain is_draw=true");
+    }
+
+    /// Regression: with material shaping ON, a STALEMATE with a material lead must
+    /// still store 0.0 — stalemate is a true draw (drawn by position regardless of
+    /// material), and shaping it would teach the value head a false value. FAILS
+    /// against the old catch-all, which shaped every non-checkmate terminal.
+    #[test]
+    fn stalemate_with_material_lead_stays_zero_when_enabled() {
+        use std::env;
+        let _env = TestEnvGuard::new(&["HYZERO_MATERIAL_SHAPING", "HYZERO_MATERIAL_SHAPING_SCALE"]);
+        // SAFETY: env mutation serialized by TestEnvGuard for this test's duration.
+        unsafe {
+            env::set_var("HYZERO_MATERIAL_SHAPING", "1");
+            env::remove_var("HYZERO_MATERIAL_SHAPING_SCALE");
+        }
+        let precomputed = Arc::new(PrecomputedItems::begin_precomputing());
+        // White up a full queen (delta +9) — a true stalemate would still be a draw.
+        let (board, _, _) =
+            board_from_fen("4k3/8/8/8/8/8/8/3QK3 w - - 0 1", precomputed).expect("invalid FEN");
+
+        let (outcome, is_draw) = score_board_terminal(GameResult::Stalemate, &board);
+        assert_eq!(
+            outcome, 0.0,
+            "stalemate is a true draw — material shaping must NOT apply",
+        );
+        let _ = is_draw;
+    }
+
+    /// Regression: with material shaping ON, INSUFFICIENT MATERIAL must store 0.0 —
+    /// it is a true draw. FAILS against the old catch-all, which shaped it via the
+    /// (small) residual material delta. Constructed with White holding an extra
+    /// pawn so the old code would have produced a non-zero tanh(Δ).
+    #[test]
+    fn insufficient_material_stays_zero_when_enabled() {
+        use std::env;
+        let _env = TestEnvGuard::new(&["HYZERO_MATERIAL_SHAPING", "HYZERO_MATERIAL_SHAPING_SCALE"]);
+        // SAFETY: env mutation serialized by TestEnvGuard for this test's duration.
+        unsafe {
+            env::set_var("HYZERO_MATERIAL_SHAPING", "1");
+            env::remove_var("HYZERO_MATERIAL_SHAPING_SCALE");
+        }
+        let precomputed = Arc::new(PrecomputedItems::begin_precomputing());
+        // White up a pawn (delta +1) — under the old catch-all this would have
+        // shaped to tanh(1/5) ≠ 0; the true-draw arm must keep it at 0.0.
+        let (board, _, _) =
+            board_from_fen("4k3/8/8/8/8/8/4P3/4K3 w - - 0 1", precomputed).expect("invalid FEN");
+
+        let (outcome, _is_draw) = score_board_terminal(GameResult::InsufficientMaterial, &board);
+        assert_eq!(
+            outcome, 0.0,
+            "insufficient material is a true draw — material shaping must NOT apply",
         );
     }
 
