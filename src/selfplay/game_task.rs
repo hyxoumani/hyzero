@@ -89,6 +89,21 @@ fn resign_min_ply() -> u32 {
         .unwrap_or(30)
 }
 
+/// Fraction of self-play games that DISABLE resignation entirely and play on to a
+/// natural terminal / move cap (AlphaZero-style resignation calibration).
+/// `HYZERO_RESIGN_DISABLE_FRAC`, default 0.1, clamped to [0.0, 1.0]. Selection is
+/// per-game (a single random draw at game start), not per-ply: in a disabled game
+/// the resignation condition is still tracked but never ends the game, so the
+/// would-be resigner's eventual real outcome makes the false-positive rate
+/// measurable. Defaults to 0.1 on missing/unparseable input.
+fn resign_disable_frac() -> f32 {
+    std::env::var("HYZERO_RESIGN_DISABLE_FRAC")
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+        .map(|v| v.clamp(0.0, 1.0))
+        .unwrap_or(0.1)
+}
+
 // --- Annealed self-play temperature (HYZERO_TEMP_ANNEAL* gates) ---
 
 /// Env-gate: true (DEFAULT) unless HYZERO_TEMP_ANNEAL is "0"/"false"/"no"/empty.
@@ -366,6 +381,11 @@ pub struct DualGameOutcome {
     pub num_moves: usize,
     /// Move list in coordinate notation (e.g. "e2e4"), one entry per ply.
     pub moves: Vec<String>,
+    /// How the game ended, for the PGN `[Termination "..."]` header. One of the
+    /// board-result causes ("checkmate", "stalemate", "repetition", "fifty-move",
+    /// "insufficient-material"), "move-cap" for an un-adjudicated cap, or
+    /// "adjudication" when an eval material lead decided a non-checkmate terminal.
+    pub termination: String,
 }
 
 /// Play a game with two distinct evaluators (challenger = White, champion = Black).
@@ -487,7 +507,8 @@ pub async fn play_game_dual(
         turn_count += 1;
     }
 
-    let game_outcome = match board.result() {
+    let result = board.result();
+    let game_outcome = match result {
         GameResult::Checkmate(Color::White) => 1.0,
         GameResult::Checkmate(Color::Black) => -1.0,
         // Non-checkmate terminal (incl. the move cap): adjudicate when enabled,
@@ -499,10 +520,22 @@ pub async fn play_game_dual(
         ),
     };
 
+    // Termination cause for the PGN header. A non-checkmate terminal that
+    // adjudication turned decisive is recorded as "adjudication" (eval-only);
+    // otherwise the underlying board-result cause / move-cap is used.
+    let termination = if matches!(result, GameResult::Checkmate(_)) {
+        termination_label(result).to_string()
+    } else if game_outcome != 0.0 {
+        "adjudication".to_string()
+    } else {
+        termination_label(result).to_string()
+    };
+
     DualGameOutcome {
         game_outcome,
         num_moves: turn_count,
         moves,
+        termination,
     }
 }
 
@@ -543,6 +576,18 @@ pub async fn play_game(
     // the loop.
     let mut consecutive_losing_plies: u32 = 0;
     let mut resigned_side: Option<Color> = None;
+
+    // Resignation calibration (AlphaZero-style). A per-game random draw disables
+    // resignation for `resign_disable_frac()` of games: they play on to a natural
+    // terminal / move cap so the would-be resigner's REAL outcome is observable.
+    // For such games we still detect the first ply the resignation condition fires
+    // (`would_resign_ply` / `would_resign_side`) so the false-positive rate — a
+    // resign signal where the side did NOT actually lose — is computable from the
+    // emitted `[resign_calib]` log line. The draw is a single per-game roll, not
+    // per-ply, so the disable decision is stable for the whole game.
+    let resign_disabled = resign_enabled() && rand::random::<f32>() < resign_disable_frac();
+    let mut would_resign_ply: Option<usize> = None;
+    let mut would_resign_side: Option<Color> = None;
 
     loop {
         if board.result() != GameResult::Ongoing {
@@ -670,7 +715,17 @@ pub async fn play_game(
             }
             if turn_count >= resign_min_ply() as usize && consecutive_losing_plies >= resign_plies()
             {
-                resigned_side = Some(side_to_move);
+                if resign_disabled {
+                    // Calibration game: record the FIRST ply the resignation
+                    // condition fired (and which side) but do NOT end the game —
+                    // it plays on so the real outcome reveals false positives.
+                    if would_resign_ply.is_none() {
+                        would_resign_ply = Some(turn_count);
+                        would_resign_side = Some(side_to_move);
+                    }
+                } else {
+                    resigned_side = Some(side_to_move);
+                }
             }
         }
 
@@ -718,13 +773,21 @@ pub async fn play_game(
     // alone (without early termination on material imbalance) is a weaker incentive:
     // preserving material only pays off IF you survive to a real terminal, so passive
     // play still risks getting checkmated.
+    let board_result = board.result();
+    // Termination cause for the PGN header. Resignation overrides the board cause;
+    // otherwise map the board result (or move-cap) to a standard label.
+    let termination = if resigned_side.is_some() {
+        "resignation".to_string()
+    } else {
+        termination_label(board_result).to_string()
+    };
     let (game_outcome, is_draw) = if let Some(loser) = resigned_side {
         // Value-based resignation: the side that resigned loses, opponent wins.
         // White-absolute: White resigns → -1.0 (Black wins); Black resigns → +1.0.
         let outcome = if loser == Color::White { -1.0f32 } else { 1.0f32 };
         (outcome, false)
     } else {
-        match board.result() {
+        match board_result {
             GameResult::Checkmate(Color::White) => (1.0f32, false),
             GameResult::Checkmate(Color::Black) => (-1.0f32, false),
             _ => {
@@ -764,6 +827,30 @@ pub async fn play_game(
             turn_count,
             game_outcome,
             is_draw,
+        );
+    }
+
+    // Resignation calibration trace: one `[resign_calib]` line per disabled game,
+    // emitted unconditionally (not gated) so a long run always yields the
+    // false-positive denominator. `game_outcome` is white-absolute; a would-be
+    // resigner is a false positive when its side did NOT actually lose (the
+    // game's outcome from that side's POV is >= 0). Games where the condition
+    // never fired report `would_resign_ply=none` (always not a false positive).
+    if resign_disabled {
+        let (ply_str, side_str, false_positive) = match (would_resign_ply, would_resign_side) {
+            (Some(ply), Some(side)) => {
+                // White-absolute outcome converted to the would-be resigner's POV.
+                let side_sign: f32 = if side == Color::White { 1.0 } else { -1.0 };
+                let resigner_outcome = game_outcome * side_sign;
+                let side_char = if side == Color::White { "w" } else { "b" };
+                // False positive: signalled a loss but did not actually lose.
+                (ply.to_string(), side_char, resigner_outcome >= 0.0)
+            }
+            _ => ("none".to_string(), "-", false),
+        };
+        println!(
+            "[resign_calib] game={model_version} would_resign_ply={ply_str} side={side_str} \
+             outcome={game_outcome:.3} false_positive={false_positive}"
         );
     }
 
@@ -817,6 +904,7 @@ pub async fn play_game(
             "selfplay_white",
             "selfplay_black",
             result_str,
+            &termination,
             &moves,
         );
     }
@@ -1080,6 +1168,24 @@ fn adjudicate_non_checkmate(board: &GameBoard, enabled: bool, margin: i32) -> f3
         -1.0
     } else {
         0.0
+    }
+}
+
+/// PGN `[Termination "..."]` value for a board-result terminal. Maps the chess
+/// `GameResult` variants onto the standard short causes recorded in the PGN
+/// header. The move-cap and resignation/adjudication terminals are NOT reached
+/// here — those are board `Ongoing` (cap) or out-of-band (resignation, eval
+/// adjudication) and are labeled by the caller before this is consulted.
+fn termination_label(result: GameResult) -> &'static str {
+    match result {
+        GameResult::Checkmate(_) => "checkmate",
+        GameResult::Stalemate => "stalemate",
+        GameResult::ThreefoldRepetition => "repetition",
+        GameResult::FiftyMoveRule => "fifty-move",
+        GameResult::InsufficientMaterial => "insufficient-material",
+        // The loop only exits to terminal scoring once the game is non-Ongoing
+        // OR the move cap is hit; an Ongoing board here means the cap stopped it.
+        GameResult::Ongoing => "move-cap",
     }
 }
 
@@ -1398,6 +1504,7 @@ mod tests {
             game_outcome: 1.0,
             num_moves: 40,
             moves: vec![],
+            termination: "checkmate".to_string(),
         };
         // When champion played Black, negate to get champion perspective
         let champion_perspective_when_black = -white_wins.game_outcome;
@@ -1411,6 +1518,7 @@ mod tests {
             game_outcome: -1.0,
             num_moves: 40,
             moves: vec![],
+            termination: "checkmate".to_string(),
         };
         let champion_perspective_when_black = -black_wins.game_outcome;
         assert_eq!(
@@ -1423,6 +1531,7 @@ mod tests {
             game_outcome: 0.0,
             num_moves: 300,
             moves: vec![],
+            termination: "move-cap".to_string(),
         };
         let champion_perspective_when_black = -draw.game_outcome;
         assert_eq!(
@@ -1563,6 +1672,7 @@ mod tests {
             "HYZERO_RESIGN_THRESHOLD",
             "HYZERO_RESIGN_CONSECUTIVE",
             "HYZERO_RESIGN_MIN_PLY",
+            "HYZERO_RESIGN_DISABLE_FRAC",
         ]);
         // SAFETY: env mutation serialized by TestEnvGuard for this test's duration.
         unsafe {
@@ -1570,6 +1680,9 @@ mod tests {
             env::remove_var("HYZERO_RESIGN_THRESHOLD"); // default -0.90
             env::set_var("HYZERO_RESIGN_CONSECUTIVE", "2");
             env::set_var("HYZERO_RESIGN_MIN_PLY", "0");
+            // Pin calibration off so resignation always fires (default 0.1 would
+            // disable it for ~10% of runs, making this assertion flaky).
+            env::set_var("HYZERO_RESIGN_DISABLE_FRAC", "0");
         }
 
         let precomputed = Arc::new(PrecomputedItems::begin_precomputing());
@@ -1606,6 +1719,116 @@ mod tests {
         );
     }
 
+    /// `resign_disable_frac` parses `HYZERO_RESIGN_DISABLE_FRAC`, defaults to 0.1
+    /// when unset/unparseable, and clamps out-of-range values into [0.0, 1.0].
+    /// FAILS without the new knob (the helper does not exist).
+    #[test]
+    fn resign_disable_frac_parses_defaults_and_clamps() {
+        use std::env;
+        let _env = TestEnvGuard::new(&["HYZERO_RESIGN_DISABLE_FRAC"]);
+        // SAFETY: env mutation serialized by TestEnvGuard for this test's duration.
+        unsafe {
+            env::remove_var("HYZERO_RESIGN_DISABLE_FRAC");
+            assert!(
+                (resign_disable_frac() - 0.1).abs() < 1e-6,
+                "default must be 0.1"
+            );
+
+            env::set_var("HYZERO_RESIGN_DISABLE_FRAC", "0.25");
+            assert!((resign_disable_frac() - 0.25).abs() < 1e-6);
+
+            // Out-of-range values clamp into [0.0, 1.0].
+            env::set_var("HYZERO_RESIGN_DISABLE_FRAC", "5.0");
+            assert!(
+                (resign_disable_frac() - 1.0).abs() < 1e-6,
+                "above 1.0 clamps to 1.0"
+            );
+            env::set_var("HYZERO_RESIGN_DISABLE_FRAC", "-2.0");
+            assert!(
+                (resign_disable_frac() - 0.0).abs() < 1e-6,
+                "below 0.0 clamps to 0.0"
+            );
+
+            // Unparseable falls back to the default.
+            env::set_var("HYZERO_RESIGN_DISABLE_FRAC", "not-a-number");
+            assert!((resign_disable_frac() - 0.1).abs() < 1e-6);
+        }
+    }
+
+    /// Calibration: with `HYZERO_RESIGN_DISABLE_FRAC=1.0` every game disables
+    /// resignation, so even a hopeless (LosingEvaluator) game does NOT end at the
+    /// would-be resign ply — it plays on past it to a natural terminal / cap.
+    /// Mirrors `resigns_after_consecutive_losing_plies_below_threshold` (which ends
+    /// at exactly 2 steps); the calibration game must instead exceed that, proving
+    /// resignation was ignored. FAILS without the per-game disable (the game would
+    /// resign and stop at 2 steps).
+    #[tokio::test]
+    // Deliberate: hold the std Mutex across the await to serialize env mutation
+    // for the whole game (the env knobs are read per-ply inside play_game).
+    #[allow(clippy::await_holding_lock)]
+    async fn calibration_game_ignores_resignation_and_plays_on() {
+        use std::env;
+        let _env = TestEnvGuard::new(&[
+            "HYZERO_RESIGN",
+            "HYZERO_RESIGN_THRESHOLD",
+            "HYZERO_RESIGN_CONSECUTIVE",
+            "HYZERO_RESIGN_MIN_PLY",
+            "HYZERO_RESIGN_DISABLE_FRAC",
+        ]);
+        // SAFETY: env mutation serialized by TestEnvGuard for this test's duration.
+        unsafe {
+            env::remove_var("HYZERO_RESIGN"); // default ON
+            env::remove_var("HYZERO_RESIGN_THRESHOLD"); // default -0.90
+            env::set_var("HYZERO_RESIGN_CONSECUTIVE", "2");
+            env::set_var("HYZERO_RESIGN_MIN_PLY", "0");
+            // Disable resignation for EVERY game (per-game draw < 1.0 is always true).
+            env::set_var("HYZERO_RESIGN_DISABLE_FRAC", "1.0");
+        }
+
+        let precomputed = Arc::new(PrecomputedItems::begin_precomputing());
+        let evaluator: Arc<dyn Evaluator> = Arc::new(LosingEvaluator);
+        let config = GameConfig {
+            num_simulations: 1,
+            exploration_constant: 1.5,
+            temperature_moves: 0,
+            replay_dir: None,
+            adjudicate_at_cap: false,
+            adjudication_material_margin: 5,
+        };
+
+        let trajectory = play_game(precomputed, evaluator, 1, config).await;
+
+        // Without the disable, the game resigns at ply 1 → exactly 2 steps. With
+        // resignation disabled it plays past the would-be resign ply.
+        assert!(
+            trajectory.steps.len() > 2,
+            "calibration game must ignore resignation and play on past ply 2 \
+             (got {} steps)",
+            trajectory.steps.len(),
+        );
+    }
+
+    /// `termination_label` maps each board result onto its PGN cause, and an
+    /// Ongoing board (only reachable at the move cap) maps to "move-cap".
+    #[test]
+    fn termination_label_maps_board_results() {
+        assert_eq!(
+            termination_label(GameResult::Checkmate(Color::White)),
+            "checkmate"
+        );
+        assert_eq!(termination_label(GameResult::Stalemate), "stalemate");
+        assert_eq!(
+            termination_label(GameResult::ThreefoldRepetition),
+            "repetition"
+        );
+        assert_eq!(termination_label(GameResult::FiftyMoveRule), "fifty-move");
+        assert_eq!(
+            termination_label(GameResult::InsufficientMaterial),
+            "insufficient-material"
+        );
+        assert_eq!(termination_label(GameResult::Ongoing), "move-cap");
+    }
+
     /// The min-ply gate must suppress resignation entirely until `resign_min_ply`,
     /// even when every ply is below threshold (consecutive=1). With min_ply=3 the
     /// game cannot resign on plies 0..2, so it survives to ply 3 — still before
@@ -1622,6 +1845,7 @@ mod tests {
             "HYZERO_RESIGN_THRESHOLD",
             "HYZERO_RESIGN_CONSECUTIVE",
             "HYZERO_RESIGN_MIN_PLY",
+            "HYZERO_RESIGN_DISABLE_FRAC",
         ]);
         // SAFETY: env mutation serialized by TestEnvGuard for this test's duration.
         unsafe {
@@ -1629,6 +1853,9 @@ mod tests {
             env::remove_var("HYZERO_RESIGN_THRESHOLD");
             env::set_var("HYZERO_RESIGN_CONSECUTIVE", "1");
             env::set_var("HYZERO_RESIGN_MIN_PLY", "3");
+            // Pin calibration off so resignation always fires (default 0.1 would
+            // disable it for ~10% of runs, making the exact step count flaky).
+            env::set_var("HYZERO_RESIGN_DISABLE_FRAC", "0");
         }
 
         let precomputed = Arc::new(PrecomputedItems::begin_precomputing());
