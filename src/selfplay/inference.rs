@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -6,6 +7,32 @@ use tokio::time::{timeout, Duration};
 
 use crate::data::{BoardObservation, HiddenState, Policy, ActionIndex, NUM_ACTIONS};
 use crate::mcts::evaluator::Evaluator;
+
+/// Recoverable failure when a `ChannelEvaluator` cannot complete a request: either
+/// the request channel to the batcher is closed (all receivers dropped) or the
+/// reply oneshot was dropped before a result was produced. Both arise when the
+/// backing `InferenceBatcher` task has stopped — historically these were
+/// `.expect()` panics that, inside a spawned eval task, killed the task silently
+/// and wedged the evaluation ladder. Callers now recover from this instead of
+/// panicking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EvalError {
+    /// The request channel to the batcher is closed (batcher task has exited).
+    ChannelClosed,
+    /// The reply oneshot was dropped before the batcher produced a result.
+    ReplyDropped,
+}
+
+impl std::fmt::Display for EvalError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EvalError::ChannelClosed => write!(f, "inference channel closed"),
+            EvalError::ReplyDropped => write!(f, "inference reply dropped"),
+        }
+    }
+}
+
+impl std::error::Error for EvalError {}
 
 /// Request sent from game tasks to the inference batcher.
 pub enum InferenceRequest {
@@ -145,39 +172,149 @@ impl InferenceBatcher {
 
 /// Evaluator that sends requests through a channel to the InferenceBatcher.
 /// Implements the Evaluator trait so it can be used directly by MCTSTree.
+///
+/// If the backing batcher task has stopped (request channel closed or reply
+/// oneshot dropped), the fallible `try_*` methods surface a recoverable
+/// [`EvalError`]; the `Evaluator` trait methods (which must return concrete
+/// tuples for the MCTS hot path) recover to a neutral result — a uniform policy
+/// and zero value/reward — and log a one-time warning rather than panicking.
+/// A spawned eval task therefore degrades the affected game instead of dying
+/// silently and stranding the evaluation ladder.
 #[derive(Clone)]
 pub struct ChannelEvaluator {
     tx: mpsc::Sender<InferenceRequest>,
+    /// Channel count for the neutral hidden state returned when `root_setup`
+    /// recovers from a dropped batcher (expand_leaf reuses the input state's
+    /// channel count, so this only backstops the root call).
+    hidden_channels: usize,
+    /// Set once a recovery has been logged so a dead batcher does not flood the
+    /// log with one line per MCTS simulation.
+    recovery_warned: Arc<AtomicBool>,
+    /// Sticky flag set the FIRST and every subsequent time this evaluator recovers
+    /// to a neutral result (i.e. an [`EvalError`] was swallowed by the `Evaluator`
+    /// impl). Unlike `recovery_warned` (which only gates the log line), this stays
+    /// observable to the eval cycle so a promotion decision built on degraded games
+    /// can be skipped. Cleared by [`ChannelEvaluator::take_error`]; the MCTS hot
+    /// path never reads it. Shared via the `Clone` derive so a registered handle
+    /// observes recoveries on any clone of this evaluator.
+    error_flag: Arc<AtomicBool>,
 }
 
 impl ChannelEvaluator {
+    /// Create an evaluator with the default neutral hidden-state width (64).
+    /// Prefer [`ChannelEvaluator::with_channels`] so recovery hidden states match
+    /// the live model width; this constructor is kept for existing call sites and
+    /// tests that do not exercise the recovery path.
     pub fn new(tx: mpsc::Sender<InferenceRequest>) -> Self {
-        Self { tx }
+        Self::with_channels(tx, 64)
     }
-}
 
-#[async_trait]
-impl Evaluator for ChannelEvaluator {
-    async fn root_setup(&self, observation: &BoardObservation, legal_mask: &[bool]) -> (HiddenState, Policy, f32) {
+    /// Create an evaluator that, on recovery from a dropped batcher, returns a
+    /// neutral root hidden state of `hidden_channels` channels.
+    pub fn with_channels(tx: mpsc::Sender<InferenceRequest>, hidden_channels: usize) -> Self {
+        Self {
+            tx,
+            hidden_channels,
+            recovery_warned: Arc::new(AtomicBool::new(false)),
+            error_flag: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Clone the shared sticky error-flag handle so the eval cycle can observe
+    /// (and clear, via the returned `Arc`) recoveries this evaluator makes. The
+    /// handle is shared across all clones of this `ChannelEvaluator`, so a single
+    /// registered handle reflects recoveries from every game task using it.
+    pub fn error_flag(&self) -> Arc<AtomicBool> {
+        self.error_flag.clone()
+    }
+
+    /// Whether this evaluator has recovered to a neutral result (swallowed an
+    /// [`EvalError`]) since the flag was last cleared. Non-destructive.
+    pub fn error_seen(&self) -> bool {
+        self.error_flag.load(Ordering::Acquire)
+    }
+
+    /// Read-and-clear the sticky error flag: returns whether a recovery occurred
+    /// since the last clear, then resets it so the next eval cycle starts clean.
+    pub fn take_error(&self) -> bool {
+        self.error_flag.swap(false, Ordering::AcqRel)
+    }
+
+    /// Fallible root setup: returns [`EvalError`] if the request channel is closed
+    /// or the reply is dropped before the batcher answers. This is the recoverable
+    /// path the `Evaluator` impl wraps.
+    pub async fn try_root_setup(
+        &self,
+        observation: &BoardObservation,
+        legal_mask: &[bool],
+    ) -> Result<(HiddenState, Policy, f32), EvalError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         let req = InferenceRequest::RootSetup {
             observation: observation.clone(),
             legal_mask: legal_mask.to_vec(),
             reply: reply_tx,
         };
-        self.tx.send(req).await.expect("inference channel closed");
-        reply_rx.await.expect("inference reply dropped")
+        self.tx.send(req).await.map_err(|_| EvalError::ChannelClosed)?;
+        reply_rx.await.map_err(|_| EvalError::ReplyDropped)
     }
 
-    async fn expand_leaf(&self, hidden_state: &HiddenState, action: ActionIndex) -> (HiddenState, f32, Policy, f32) {
+    /// Fallible leaf expansion: returns [`EvalError`] if the request channel is
+    /// closed or the reply is dropped before the batcher answers.
+    pub async fn try_expand_leaf(
+        &self,
+        hidden_state: &HiddenState,
+        action: ActionIndex,
+    ) -> Result<(HiddenState, f32, Policy, f32), EvalError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         let req = InferenceRequest::ExpandLeaf {
             hidden_state: hidden_state.clone(),
             action,
             reply: reply_tx,
         };
-        self.tx.send(req).await.expect("inference channel closed");
-        reply_rx.await.expect("inference reply dropped")
+        self.tx.send(req).await.map_err(|_| EvalError::ChannelClosed)?;
+        reply_rx.await.map_err(|_| EvalError::ReplyDropped)
+    }
+
+    /// Record a recovery from a dropped batcher: set the sticky error flag (every
+    /// time, so the eval cycle sees it) and log on the FIRST recovery only so a
+    /// dead batcher cannot spam the log with one line per MCTS simulation.
+    fn warn_recovery_once(&self, op: &str, err: EvalError) {
+        // Set unconditionally: the gate that consumes this must observe ANY
+        // recovery, even ones whose log line was suppressed by the once-guard.
+        self.error_flag.store(true, Ordering::Release);
+        if !self.recovery_warned.swap(true, Ordering::Relaxed) {
+            eprintln!(
+                "[inference] WARN: {op} recovering with neutral result — {err} \
+                 (backing batcher stopped); affected game/cycle is degraded, not wedged"
+            );
+        }
+    }
+}
+
+#[async_trait]
+impl Evaluator for ChannelEvaluator {
+    async fn root_setup(&self, observation: &BoardObservation, legal_mask: &[bool]) -> (HiddenState, Policy, f32) {
+        match self.try_root_setup(observation, legal_mask).await {
+            Ok(result) => result,
+            Err(err) => {
+                self.warn_recovery_once("root_setup", err);
+                let policy: Policy = vec![1.0 / NUM_ACTIONS as f32; NUM_ACTIONS];
+                (HiddenState::new(self.hidden_channels), policy, 0.0)
+            }
+        }
+    }
+
+    async fn expand_leaf(&self, hidden_state: &HiddenState, action: ActionIndex) -> (HiddenState, f32, Policy, f32) {
+        match self.try_expand_leaf(hidden_state, action).await {
+            Ok(result) => result,
+            Err(err) => {
+                self.warn_recovery_once("expand_leaf", err);
+                let policy: Policy = vec![1.0 / NUM_ACTIONS as f32; NUM_ACTIONS];
+                // Reuse the input width so the neutral state matches the tree's
+                // existing hidden-state shape.
+                (HiddenState::new(hidden_state.channels), 0.0, policy, 0.0)
+            }
+        }
     }
 }
 
@@ -290,6 +427,160 @@ mod tests {
         assert!((1..=2).contains(&batches), "Expected 1-2 batches, got {}", batches);
 
         drop(tx);
+        let _ = batcher_handle.await;
+    }
+
+    /// Backend that drops every reply oneshot without answering, then signals it
+    /// has seen a request. Used to reproduce the champion-promotion wedge: a
+    /// batcher whose backend never replies (or, equivalently, one that has
+    /// exited) must surface a recoverable error rather than parking the caller
+    /// forever.
+    struct DroppingBackend {
+        seen: Arc<std::sync::atomic::AtomicBool>,
+    }
+    impl InferenceBackend for DroppingBackend {
+        fn evaluate_batch(&mut self, requests: Vec<InferenceRequest>) {
+            self.seen.store(true, std::sync::atomic::Ordering::SeqCst);
+            // Drop each request (and thus its reply oneshot) without sending.
+            drop(requests);
+        }
+    }
+
+    /// REGRESSION (champion-promotion wedge, layer a): when the batcher's reply
+    /// oneshot is dropped without an answer, `try_root_setup` must return
+    /// `EvalError::ReplyDropped` — NOT panic and NOT hang. Pre-fix the production
+    /// path used `.expect("inference reply dropped")`, which panicked inside the
+    /// spawned eval task and stranded the ladder. The 5s timeout converts a
+    /// regression (await that never completes) into a TEST failure, not a CI hang.
+    #[tokio::test]
+    async fn try_root_setup_returns_error_when_reply_dropped() {
+        let seen = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (tx, rx) = mpsc::channel(8);
+        let backend = Box::new(DroppingBackend { seen: seen.clone() });
+        let config = BatcherConfig { max_batch_size: 1, batch_timeout_ms: 5 };
+        let mut batcher = InferenceBatcher::new(rx, backend, config);
+        let batcher_handle = tokio::spawn(async move { batcher.run().await });
+
+        let evaluator = ChannelEvaluator::new(tx);
+        let mask = vec![true; NUM_ACTIONS];
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            evaluator.try_root_setup(&BoardObservation::default(), &mask),
+        )
+        .await
+        .expect("try_root_setup hung — recovery path regressed");
+
+        assert!(
+            matches!(result, Err(EvalError::ReplyDropped)),
+            "expected Err(ReplyDropped), got {:?}",
+            result.map(|_| "Ok")
+        );
+        assert!(seen.load(std::sync::atomic::Ordering::SeqCst), "backend never saw the request");
+
+        drop(evaluator);
+        let _ = batcher_handle.await;
+    }
+
+    /// REGRESSION (champion-promotion wedge, layer a): when the batcher task has
+    /// fully exited (request channel closed), `try_expand_leaf` must return
+    /// `EvalError::ChannelClosed` rather than panicking on `.expect("inference
+    /// channel closed")`. This is the exact condition after a promotion drops the
+    /// old champion's `ChannelEvaluator` and its batcher stops.
+    #[tokio::test]
+    async fn try_expand_leaf_returns_error_when_channel_closed() {
+        let (tx, rx) = mpsc::channel::<InferenceRequest>(8);
+        // Drop the receiver: the batcher is gone, so sends must fail.
+        drop(rx);
+
+        let evaluator = ChannelEvaluator::new(tx);
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            evaluator.try_expand_leaf(&HiddenState::new(64), 0),
+        )
+        .await
+        .expect("try_expand_leaf hung — recovery path regressed");
+
+        assert!(
+            matches!(result, Err(EvalError::ChannelClosed)),
+            "expected Err(ChannelClosed), got {:?}",
+            result.map(|_| "Ok")
+        );
+    }
+
+    /// The `Evaluator` trait impl must NOT panic when the batcher is gone: it
+    /// recovers to a neutral result (uniform policy, zero value) so the MCTS hot
+    /// path and the eval game survive a dropped batcher. Without the fix this
+    /// `root_setup` call panicked.
+    #[tokio::test]
+    async fn evaluator_recovers_to_neutral_when_batcher_gone() {
+        let (tx, rx) = mpsc::channel::<InferenceRequest>(8);
+        drop(rx);
+
+        let evaluator = ChannelEvaluator::with_channels(tx, 48);
+        let mask = vec![true; NUM_ACTIONS];
+        let (hs, policy, value) = tokio::time::timeout(
+            Duration::from_secs(5),
+            evaluator.root_setup(&BoardObservation::default(), &mask),
+        )
+        .await
+        .expect("root_setup hung — recovery path regressed");
+
+        assert_eq!(hs.channels, 48, "recovery hidden state must use configured width");
+        assert_eq!(policy.len(), NUM_ACTIONS);
+        assert!((value - 0.0).abs() < f32::EPSILON);
+    }
+
+    /// A recovery (neutral fallback) sets the sticky error flag so a higher-level
+    /// gate can tell a degraded cycle apart from a clean one. `take_error` reads
+    /// and clears it; a second `take_error` reports clean. The flag is shared
+    /// across clones (it is the eval cycle's registration handle).
+    #[tokio::test]
+    async fn recovery_sets_sticky_error_flag_observable_via_take() {
+        let (tx, rx) = mpsc::channel::<InferenceRequest>(8);
+        drop(rx); // batcher gone → next call recovers to neutral
+
+        let evaluator = ChannelEvaluator::with_channels(tx, 48);
+        let handle = evaluator.error_flag();
+        assert!(!evaluator.error_seen(), "flag must start clear");
+
+        let mask = vec![true; NUM_ACTIONS];
+        let _ = tokio::time::timeout(
+            Duration::from_secs(5),
+            evaluator.root_setup(&BoardObservation::default(), &mask),
+        )
+        .await
+        .expect("root_setup hung — recovery path regressed");
+
+        assert!(evaluator.error_seen(), "recovery must set the sticky error flag");
+        assert!(handle.load(Ordering::Acquire), "shared handle must observe the flag");
+        assert!(evaluator.take_error(), "take_error must report the recovery");
+        assert!(!evaluator.error_seen(), "take_error must clear the flag");
+        assert!(!evaluator.take_error(), "second take_error must report clean");
+    }
+
+    /// A clean call (live batcher) must NOT set the sticky error flag, so a healthy
+    /// cycle is never mistaken for a degraded one.
+    #[tokio::test]
+    async fn clean_call_leaves_sticky_error_flag_unset() {
+        let (tx, rx) = mpsc::channel(32);
+        let backend = Box::new(RandomBackend::new(64));
+        let config = BatcherConfig { max_batch_size: 8, batch_timeout_ms: 10 };
+        let mut batcher = InferenceBatcher::new(rx, backend, config);
+        let batcher_handle = tokio::spawn(async move { batcher.run().await });
+
+        let evaluator = ChannelEvaluator::with_channels(tx, 64);
+        let mask = vec![true; NUM_ACTIONS];
+        let _ = tokio::time::timeout(
+            Duration::from_secs(5),
+            evaluator.root_setup(&BoardObservation::default(), &mask),
+        )
+        .await
+        .expect("root_setup hung");
+
+        assert!(!evaluator.error_seen(), "clean call must leave the error flag unset");
+        assert!(!evaluator.take_error(), "take_error must report clean after a clean call");
+
+        drop(evaluator);
         let _ = batcher_handle.await;
     }
 }
