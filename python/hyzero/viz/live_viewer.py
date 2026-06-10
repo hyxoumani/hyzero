@@ -439,6 +439,12 @@ window.onerror = function (msg, src, line, col) {
   showError(msg + " (" + (src || "?") + ":" + line + ":" + col + ")");
   return false;
 };
+// window.onerror does NOT catch rejected promises (e.g. a failed /api/game
+// fetch), so surface those in the same banner instead of failing silently.
+window.addEventListener("unhandledrejection", function (e) {
+  const reason = (e && e.reason) ? (e.reason.message || e.reason) : "unknown";
+  showError("unhandled promise rejection: " + reason);
+});
 
 let metas = [];        // lightweight metadata, file order (oldest first)
 let selected = 0;      // index into display order (newest = 0)
@@ -500,19 +506,41 @@ function renderCurrent() {
 
 function renderList() {
   const list = document.getElementById("list");
+  // Preserve scroll position across the 3s poll re-render so the sidebar does
+  // not jump back to the top mid-browse. #sidebar is the scroll container
+  // (overflow-y:auto); #list itself does not scroll.
+  const sidebar = document.getElementById("sidebar");
+  const scroll = sidebar.scrollTop;
   list.innerHTML = "";
   for (let i=0; i<metas.length; i++) {
     const g = metas[metaIdxForDisplay(i)];
     const d = document.createElement("div");
     d.className = "game" + (i===selected ? " active" : "");
+    // Carry the display index as data so the delegated click handler on the
+    // #list container can resolve which row was clicked. A single delegated
+    // handler survives the poll re-render that rebuilds these rows, so no row
+    // ever goes dead (per-row onclick handlers were lost on every rebuild).
+    d.dataset.idx = i;
     const term = g.termination ? "<br><span class='term'>"+g.termination+"</span>" : "";
     d.innerHTML = "<span class='res'>"+(g.result||"*")+"</span>#"+(metas.length-i)+" "+
                   (g.event||"") + "<br><small>"+(g.white||"")+" vs "+(g.black||"")+
                   " ("+(g.move_count||0)+" plies)</small>" + term;
-    d.onclick = () => { selected=i; ply=0; userSelected=true; renderList(); loadDetail(true); };
     list.appendChild(d);
   }
+  sidebar.scrollTop = scroll;
 }
+
+// Event delegation: one click handler on the persistent #list container, so a
+// click always resolves even when the rows themselves are rebuilt by a poll.
+document.getElementById("list").addEventListener("click", (e) => {
+  const row = e.target.closest(".game");
+  if (!row || row.dataset.idx === undefined) return;
+  selected = +row.dataset.idx;
+  ply = 0;
+  userSelected = true;
+  renderList();
+  loadDetail(true);
+});
 
 function lastPly() {
   if (haveChess && detail && detail.fens && detail.fens.length) ply = detail.fens.length - 1;
