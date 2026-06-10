@@ -56,8 +56,9 @@ zero-reward tests pass bit-for-bit.
 
 When `add_root_noise` is true and Gumbel is off, root priors are mixed:
 `P(a) = (1 − ε)·P(a) + ε·η_a`, with `η ~ Dir(α)` sampled via Marsaglia-Tsang
-Gamma. Defaults `ε = 0.25` (`HYZERO_DIRICHLET_EPSILON`), `α = 0.3`
-(`HYZERO_DIRICHLET_ALPHA`, the AlphaZero chess value). `add_root_noise` is true
+Gamma. Defaults `ε = 0.25` (`HYZERO_DIRICHLET_EPS`; `scripts/run_baseline.sh`
+exports 0.10), `α = 0.3` (`HYZERO_DIRICHLET_ALPHA`, the AlphaZero chess value).
+`add_root_noise` is true
 for self-play, false for evaluation. Dirichlet sampling is slow in debug builds —
 use `--release`.
 

@@ -1,3 +1,104 @@
+# Run History — 2026-06-10 Overnight Loop: Policy Flattening Root-Caused
+
+The 2026-06-10 overnight autonomous loop (4 runs, 4 merged fixes, 1
+promotion) root-caused the policy flattening to target-side noise, peeled in
+three layers: an entropy bonus in the policy loss, uniform tablebase policy
+targets in the CE, and root Dirichlet noise baked into visit-count targets —
+causally confirmed by run 4. All runs resumed `mate_pretrained.pt` (internal
+step base 3800) with the eval pool seeded v3806+v3905, `GAMES_PER_SIDE=8`,
+antisym weight 0.01, LR `T_max=14000`.
+
+## Run 1 — entropy weight β=0.003 (killed at 23 min)
+
+- k0 raw `pred_entropy` 2.38 → 5.72 by step ~464 — identical to the legacy
+  run-2 divergence.
+- **Discovery:** the entropy term in trainer.py `_policy_loss` is an entropy
+  BONUS (`ce + β·Σp·log p` — flattens the policy; its comment says "penalize
+  over-sharp"). The prior recommendation "lower the weight" was
+  wrong-direction: any β>0 is harmful for distillation.
+- Merged 58067e5: β default 0.0, plus new `pred_entropy_legal` metric — the
+  old `pred_entropy` reads pre-mask logits, inflated by gradient-orphaned
+  illegal logits (legal-uniform ≈3.5 vs full-uniform 8.45).
+
+## Run 2 — β=0 (killed at ~80 min)
+
+- `pred_entropy_legal` 0.90 → 1.71 and still climbing — the bonus is ruled
+  out as sole cause.
+- **Found:** TB trajectory rows are 45% of every batch (tb_frac=0.45) with
+  uniform-over-Syzygy-optimal policy targets (48% of positions multi-optimal;
+  mean legal support 19.8), entering policy CE at ALL k because the
+  trajectory cache sets `is_tablebase=False`.
+- Two quantitative locks: blended tgt_entropy 0.45·0.72 + 0.55·1.15 ≈ 0.95
+  (matches observed ~1.0–1.2); k1–5 entropy plateau = log(19.8) = 2.986
+  (matches 2.9–3.0 exactly).
+- Merged d8cded7: `HYZERO_TB_POLICY_WEIGHT` gates TB rows out of policy CE
+  only (TB value/reward supervision preserved at all k; code default 1.0 =
+  legacy, baseline script 0.0), plus regime-split metrics
+  `pred_entropy_legal_replay` / `pred_top1_replay`.
+
+## Run 3 — TB gated (killed at ~80 min)
+
+- Replay-only rows STILL flattened, but to a stable measurable floor:
+  inferred replay target entropy ~1.9–2.1, preds ~2.5–2.6, top1 0.26. Eval
+  candidates degraded vs v3905 (0.531 → 0.406), 0 promotions.
+- **Diagnosis:** ε=0.25 root Dirichlet noise is stored in visit-count targets
+  (tree.rs `extract_visit_distribution` reads raw post-noise visits), and
+  draw-dominated play (value ≈ 0 in-search, resign never fires) cannot
+  re-concentrate visits → targets noise-floored at ~2.0 nats.
+- Merged 58beff5: `HYZERO_DIRICHLET_EPS`/`HYZERO_DIRICHLET_ALPHA` env knobs
+  (renamed from `HYZERO_DIRICHLET_EPSILON`, which nothing ever set); baseline
+  ε=0.10; SIMS 200 → 300.
+
+## Run 4 — ε=0.10 (completed, 4h30m, clean exit)
+
+- **Causal confirmation:** inferred replay targets ~1.6 vs ~1.9 at matched
+  steps. Policy held end-to-end — `pred_entropy_legal_replay` ~2.06 / top1
+  ~0.36 vs run 3's collapsed 2.55/0.26. k0 value MSE ~0.035; antisym
+  2.0 → ~0.3.
+- **Champion promotion: v3840** (cycle 3, Elo 1544.1 > 1520 gate). The gate
+  is Elo-vs-pool: candidate win_rate 0.562 in cycle 1 was correctly rejected
+  at Elo 1519.7, and a champion's own version is excluded from its opponent
+  pool by design.
+- 6 eval cycles total; cycles 4–6 scored 0.500/0.469/0.484 vs {v3905, v3806},
+  no further promotions.
+- 316 games at 18.4 steps/min; final optimizer step 4,960 of `T_max=14000` —
+  the LR never left the high regime (size T_max ≈ expected steps next run).
+- Flip side: decisive-target fraction fell ~3.7x as the buffer filled with
+  ordinary draws (±0.1 bins 446 → 837; resign 0/22 calibration probes, 0
+  false positives).
+
+## Same-day infra merge — eval-ladder hardening (f867c4a)
+
+Found while investigating a mid-run eval silence that turned out to be slow
+cadence (eval actually completed all 6 cycles). Dropped champion-batcher
+replies now surface as a recoverable `EvalError` instead of a silent panic
+(the eval task's `JoinHandle` is dropped, so panics vanish); the champion
+batcher is kept alive across promotions; cycles that saw ANY inference error
+skip the promotion decision (no Elo from neutral-eval games).
+Regression-test-proven.
+
+## Preserved checkpoints
+
+- `checkpoints/backup_champion_v3840_20260610.pt` — current champion
+- `checkpoints/backup_final_model_v004109_20260610.pt`
+
+## Next-run recommendations
+
+In priority order:
+
+1. Decisiveness levers: resign-threshold calibration, selfplay adjudication,
+   decisive-start curriculum via `HYZERO_STARTS_FILE`, temperature schedule.
+2. Size the LR cosine `T_max` ≈ expected steps (~18 steps/min at SIMS 300 /
+   `GAMES_PER_SIDE=8`).
+3. Optional: ε sweep 0.05–0.15 now that it is an env knob.
+
+## Related
+
+- Wiki: [Training Signal](training-signal.md),
+  [Elo Ladder Evaluation](elo-ladder-eval.md),
+  [Champion Pool Promotion](champion-pool-promotion.md)
+- Scripts: `scripts/run_baseline.sh`
+
 # Run History — 2026-06-09 Signal-Starvation-Fix Validation
 
 Two validation runs on 2026-06-09 confirmed the [signal-starvation
