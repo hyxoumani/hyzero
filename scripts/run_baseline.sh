@@ -141,7 +141,13 @@ fi
 
 # ── Run ────────────────────────────────────────────────────────
 echo "[2/5] Running selfplay for ${DURATION}s..."
-export HYZERO_POLICY_ENTROPY_WEIGHT=0.003
+# The trainer's policy-entropy term (trainer.py _policy_loss) is an entropy
+# BONUS: minimizing the loss maximizes H(π), pushing the k0 policy toward
+# uniform. It caused the k0 pred_entropy divergence in the 2026-06-09 runs at
+# β=0.01 and β=0.003. In MuZero-style distillation exploration comes from MCTS
+# Dirichlet noise + selfplay temperature, not from flattening the trained
+# policy. Default 0.0 (off); env-overridable for deliberate experiments.
+export HYZERO_POLICY_ENTROPY_WEIGHT=${HYZERO_POLICY_ENTROPY_WEIGHT:-0.0}
 export HYZERO_ANTISYM_LOSS_WEIGHT=0.01
 export HYZERO_LR_SCHEDULE=cosine
 export HYZERO_LR_COSINE_T_MAX=14000
