@@ -4,7 +4,8 @@ set +m
 
 # ── Configuration ──────────────────────────────────────────────
 DURATION=${1:-1800}          # 30 minutes default
-SIMS=${HYZERO_SIMS:-200}
+# 300 (was 200): let small Q-differences re-concentrate visits past residual noise.
+SIMS=${HYZERO_SIMS:-300}
 EVAL_SIMS=${HYZERO_EVAL_SIMS:-100}
 GAMES=${HYZERO_GAMES:-9}              # total slots: 1 for eval + N-1 for selfplay
 BATCH_SIZE=${HYZERO_BATCH_SIZE:-64}
@@ -159,6 +160,13 @@ export HYZERO_ANTISYM_LOSS_WEIGHT=0.01
 export HYZERO_LR_SCHEDULE=cosine
 export HYZERO_LR_COSINE_T_MAX=14000
 export HYZERO_LR_COSINE_ETA_MIN=1e-5
+# Measured 2026-06-10: root Dirichlet noise is baked into the stored MCTS visit
+# targets, so ε=0.25 floors replay target entropy at ~2.0 nats in drawish play
+# (value≈0 in-search → 200-sim PUCT can't re-concentrate past the noise),
+# flattening the distilled policy. ε=0.10 lowers that floor; selection
+# temperature still provides exploration diversity. α=0.3 = AlphaZero default.
+export HYZERO_DIRICHLET_EPS=${HYZERO_DIRICHLET_EPS:-0.10}
+export HYZERO_DIRICHLET_ALPHA=${HYZERO_DIRICHLET_ALPHA:-0.3}
 echo "[env] $(env | grep '^HYZERO_' | sort | tr '\n' ' ')"
 HYZERO_DEVICE=$DEVICE \
 HYZERO_SIMS=$SIMS \
