@@ -182,9 +182,11 @@ export HYZERO_ANTISYM_LOSS_WEIGHT=0.01
 # Material shaping (opt-in): give rule-draws (repetition, fifty-move, move-cap)
 # a tanh(Δmaterial/scale) value target so the value head keeps learning when
 # 92%+ of self-play games draw 0.0. True draws (stalemate, insufficient material)
-# stay 0.0 — see score_board_terminal in src/selfplay/game_task.rs. Scale stays
-# at the code default (5.0); no scale knob is set here.
+# stay 0.0 — see score_board_terminal in src/selfplay/game_task.rs. Scale is
+# lowered to 3.0 (from the code default 5.0) for a stronger draw-shaping gradient:
+# a lower divisor in tanh(Δmaterial/scale) yields a stronger shaping signal.
 export HYZERO_MATERIAL_SHAPING=1
+export HYZERO_MATERIAL_SHAPING_SCALE=3.0
 export HYZERO_LR_SCHEDULE=cosine
 # Cosine T_max tracks the run length so the LR completes one full decay over the
 # run instead of a fixed 14000 steps. Throughput is ~18 trainer steps/min at the
