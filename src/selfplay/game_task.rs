@@ -152,17 +152,21 @@ fn temp_anneal_plies() -> u32 {
         .unwrap_or(60)
 }
 
-/// Length of the self-play exploration window: temperature stays 1.0 for the
-/// first N plies, then anneals/steps toward exploitation. `HYZERO_TEMPERATURE_MOVES`,
-/// default 30 (legacy), clamped to [1, 200]. Read per-call
-/// (TestEnvGuard-compatible). Shorter windows make games seeded from
+/// Optional override for the self-play exploration window length (temperature
+/// stays 1.0 for the first N plies, then anneals/steps toward exploitation).
+/// Returns `Some(clamped value)` when `HYZERO_TEMPERATURE_MOVES` is set and
+/// parseable (clamped to [1, 200]), `None` otherwise. Read per-call
+/// (TestEnvGuard-compatible).
+///
+/// `None` lets the self-play construction site fall through to the legacy
+/// `HYZERO_TEMP_MOVES`/RunConfig-default chain, so unset behavior is bit-identical
+/// to before this knob existed. Shorter windows make games seeded from
 /// midgame/endgame FENs anneal to exploitation faster (less random walking).
-pub fn temperature_moves() -> u32 {
+pub fn temperature_moves_override() -> Option<u32> {
     std::env::var("HYZERO_TEMPERATURE_MOVES")
         .ok()
         .and_then(|v| v.parse::<u32>().ok())
         .map(|n| n.clamp(1, 200))
-        .unwrap_or(30)
 }
 
 /// Compute the self-play temperature for `turn_count` given the
@@ -399,7 +403,7 @@ impl Default for GameConfig {
         Self {
             num_simulations: 800,
             exploration_constant: 1.5,
-            temperature_moves: temperature_moves(),
+            temperature_moves: 30,
             replay_dir: None,
             adjudicate_at_cap: false,
             adjudication_material_margin: 5,
@@ -1990,53 +1994,56 @@ mod tests {
         assert!((selfplay_temperature(31, temperature_moves) - 0.01).abs() < 1e-6);
     }
 
-    /// HYZERO_TEMPERATURE_MOVES unset falls back to the legacy default of 30.
+    /// HYZERO_TEMPERATURE_MOVES unset yields no override (None), so the self-play
+    /// construction site falls through to the legacy HYZERO_TEMP_MOVES/RunConfig
+    /// default. Unparseable input is likewise no override.
     #[test]
-    fn temperature_moves_defaults_to_thirty_when_unset() {
+    fn temperature_moves_override_is_none_when_unset_or_unparseable() {
         let _env = TestEnvGuard::new(&["HYZERO_TEMPERATURE_MOVES"]);
         // SAFETY: env mutation serialized by TestEnvGuard for this test's duration.
         unsafe {
             std::env::remove_var("HYZERO_TEMPERATURE_MOVES");
         }
-        assert_eq!(temperature_moves(), 30);
+        assert_eq!(temperature_moves_override(), None);
+        // Unparseable input also yields no override (falls through to legacy).
+        // SAFETY: still under the same TestEnvGuard.
+        unsafe {
+            std::env::set_var("HYZERO_TEMPERATURE_MOVES", "not-a-number");
+        }
+        assert_eq!(temperature_moves_override(), None);
     }
 
-    /// A valid HYZERO_TEMPERATURE_MOVES value is parsed as-is.
+    /// A valid HYZERO_TEMPERATURE_MOVES value is parsed as-is into Some(value).
     #[test]
-    fn temperature_moves_parses_valid_value() {
+    fn temperature_moves_override_parses_valid_value() {
         let _env = TestEnvGuard::new(&["HYZERO_TEMPERATURE_MOVES"]);
         // SAFETY: env mutation serialized by TestEnvGuard for this test's duration.
         unsafe {
             std::env::set_var("HYZERO_TEMPERATURE_MOVES", "12");
         }
-        assert_eq!(temperature_moves(), 12);
+        assert_eq!(temperature_moves_override(), Some(12));
     }
 
     /// Out-of-range HYZERO_TEMPERATURE_MOVES values clamp into [1, 200].
     #[test]
-    fn temperature_moves_clamps_out_of_range() {
+    fn temperature_moves_override_clamps_out_of_range() {
         let _env = TestEnvGuard::new(&["HYZERO_TEMPERATURE_MOVES"]);
         // SAFETY: env mutation serialized by TestEnvGuard for this test's duration.
         unsafe {
             std::env::set_var("HYZERO_TEMPERATURE_MOVES", "0");
         }
-        assert_eq!(temperature_moves(), 1);
+        assert_eq!(temperature_moves_override(), Some(1));
         // SAFETY: still under the same TestEnvGuard.
         unsafe {
             std::env::set_var("HYZERO_TEMPERATURE_MOVES", "9999");
         }
-        assert_eq!(temperature_moves(), 200);
-        // Unparseable input falls back to the default, not a clamp.
-        // SAFETY: still under the same TestEnvGuard.
-        unsafe {
-            std::env::set_var("HYZERO_TEMPERATURE_MOVES", "not-a-number");
-        }
-        assert_eq!(temperature_moves(), 30);
+        assert_eq!(temperature_moves_override(), Some(200));
     }
 
-    /// The configured window reaches the temperature schedule: a GameConfig
-    /// built from the environment carries temperature_moves==12 when the var is
-    /// set, and `selfplay_temperature` holds 1.0 up to that ply then drops.
+    /// A set HYZERO_TEMPERATURE_MOVES reaches the self-play GameConfig: the
+    /// construction site applies `temperature_moves_override().unwrap_or(...)`,
+    /// so a set var of 12 overrides the legacy GameConfig::default() value of 30.
+    /// `selfplay_temperature` then holds 1.0 up to that ply and drops just past it.
     #[test]
     fn configured_window_reaches_temperature_schedule() {
         let _env = TestEnvGuard::new(&["HYZERO_TEMPERATURE_MOVES", "HYZERO_TEMP_ANNEAL"]);
@@ -2045,11 +2052,32 @@ mod tests {
             std::env::set_var("HYZERO_TEMPERATURE_MOVES", "12");
             std::env::set_var("HYZERO_TEMP_ANNEAL", "0"); // hard step for a crisp edge
         }
-        let config = GameConfig::default();
+        // Mirror the src/bin/selfplay.rs construction site: the env override
+        // wins over the legacy GameConfig::default() window (30).
+        let mut config = GameConfig::default();
+        assert_eq!(config.temperature_moves, 30, "default window must stay the legacy 30");
+        config.temperature_moves = temperature_moves_override().unwrap_or(config.temperature_moves);
         assert_eq!(config.temperature_moves, 12);
         // Full temperature inside the shortened window, exploitation just past it.
         assert!((selfplay_temperature(11, config.temperature_moves) - 1.0).abs() < 1e-6);
         assert!((selfplay_temperature(12, config.temperature_moves) - 0.01).abs() < 1e-6);
+    }
+
+    /// Unset HYZERO_TEMPERATURE_MOVES leaves the self-play window at the legacy
+    /// value: the construction site falls through `unwrap_or` to the supplied
+    /// config window (the HYZERO_TEMP_MOVES/RunConfig chain) — bit-identical to
+    /// pre-knob behavior. Here we feed RunConfig's default-15 to confirm it stands.
+    #[test]
+    fn unset_override_preserves_legacy_selfplay_window() {
+        let _env = TestEnvGuard::new(&["HYZERO_TEMPERATURE_MOVES"]);
+        // SAFETY: env mutation serialized by TestEnvGuard for this test's duration.
+        unsafe {
+            std::env::remove_var("HYZERO_TEMPERATURE_MOVES");
+        }
+        // Legacy self-play window from the RunConfig default (15).
+        let legacy_window: u32 = 15;
+        let resolved = temperature_moves_override().unwrap_or(legacy_window);
+        assert_eq!(resolved, legacy_window);
     }
 
     /// Eval cap-adjudication: when enabled and one side is clearly ahead on
