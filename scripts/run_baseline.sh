@@ -203,6 +203,10 @@ export HYZERO_LR_COSINE_ETA_MIN=1e-5
 # temperature still provides exploration diversity. α=0.3 = AlphaZero default.
 export HYZERO_DIRICHLET_EPS=${HYZERO_DIRICHLET_EPS:-0.10}
 export HYZERO_DIRICHLET_ALPHA=${HYZERO_DIRICHLET_ALPHA:-0.3}
+# Shorten the self-play exploration window 30->12: games seeded from midgame/
+# endgame FENs anneal to exploitation faster (less random walking, more decisive
+# play). Code default 30 = legacy; eval ladder unaffected (HYZERO_TEMP_MOVES).
+export HYZERO_TEMPERATURE_MOVES=${HYZERO_TEMPERATURE_MOVES:-12}
 echo "[env] $(env | grep '^HYZERO_' | sort | tr '\n' ' ')"
 HYZERO_DEVICE=$DEVICE \
 HYZERO_SIMS=$SIMS \

@@ -8,7 +8,7 @@ use tokio::sync::{mpsc, watch};
 use hyzero::mcts::evaluator::Evaluator;
 use hyzero::py::{PyO3Backend, PyTrainingThread};
 use hyzero::selfplay::evaluation::RandomEvaluator;
-use hyzero::selfplay::game_task::GameConfig;
+use hyzero::selfplay::game_task::{temperature_moves, GameConfig};
 use hyzero::selfplay::{
     BatcherConfig, ChampionStore, ChannelEvaluator, EvaluationConfig, EvaluationTask,
     InferenceBatcher, RandomBackend, SelfPlayConfig, SelfPlayCoordinator, SwappableBackend,
@@ -491,7 +491,10 @@ async fn main() {
         game_config: GameConfig {
             num_simulations: config.num_simulations,
             exploration_constant: 1.5,
-            temperature_moves: config.temperature_moves,
+            // Self-play exploration window from HYZERO_TEMPERATURE_MOVES (default
+            // 30, clamped [1,200]). Eval keeps config.temperature_moves
+            // (HYZERO_TEMP_MOVES) below so the ladder is unaffected.
+            temperature_moves: temperature_moves(),
             replay_dir: replay_dir.clone(),
             // Self-play must never adjudicate (passivity-attractor guard).
             adjudicate_at_cap: false,

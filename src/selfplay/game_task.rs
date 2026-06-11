@@ -152,6 +152,19 @@ fn temp_anneal_plies() -> u32 {
         .unwrap_or(60)
 }
 
+/// Length of the self-play exploration window: temperature stays 1.0 for the
+/// first N plies, then anneals/steps toward exploitation. `HYZERO_TEMPERATURE_MOVES`,
+/// default 30 (legacy), clamped to [1, 200]. Read per-call
+/// (TestEnvGuard-compatible). Shorter windows make games seeded from
+/// midgame/endgame FENs anneal to exploitation faster (less random walking).
+pub fn temperature_moves() -> u32 {
+    std::env::var("HYZERO_TEMPERATURE_MOVES")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .map(|n| n.clamp(1, 200))
+        .unwrap_or(30)
+}
+
 /// Compute the self-play temperature for `turn_count` given the
 /// `temperature_moves` exploration window. Within the window: 1.0. Past it,
 /// when annealing is enabled, linearly interpolate 1.0 → 0.01 over
@@ -386,7 +399,7 @@ impl Default for GameConfig {
         Self {
             num_simulations: 800,
             exploration_constant: 1.5,
-            temperature_moves: 30,
+            temperature_moves: temperature_moves(),
             replay_dir: None,
             adjudicate_at_cap: false,
             adjudication_material_margin: 5,
@@ -1975,6 +1988,68 @@ mod tests {
         }
         assert!((selfplay_temperature(29, temperature_moves) - 1.0).abs() < 1e-6);
         assert!((selfplay_temperature(31, temperature_moves) - 0.01).abs() < 1e-6);
+    }
+
+    /// HYZERO_TEMPERATURE_MOVES unset falls back to the legacy default of 30.
+    #[test]
+    fn temperature_moves_defaults_to_thirty_when_unset() {
+        let _env = TestEnvGuard::new(&["HYZERO_TEMPERATURE_MOVES"]);
+        // SAFETY: env mutation serialized by TestEnvGuard for this test's duration.
+        unsafe {
+            std::env::remove_var("HYZERO_TEMPERATURE_MOVES");
+        }
+        assert_eq!(temperature_moves(), 30);
+    }
+
+    /// A valid HYZERO_TEMPERATURE_MOVES value is parsed as-is.
+    #[test]
+    fn temperature_moves_parses_valid_value() {
+        let _env = TestEnvGuard::new(&["HYZERO_TEMPERATURE_MOVES"]);
+        // SAFETY: env mutation serialized by TestEnvGuard for this test's duration.
+        unsafe {
+            std::env::set_var("HYZERO_TEMPERATURE_MOVES", "12");
+        }
+        assert_eq!(temperature_moves(), 12);
+    }
+
+    /// Out-of-range HYZERO_TEMPERATURE_MOVES values clamp into [1, 200].
+    #[test]
+    fn temperature_moves_clamps_out_of_range() {
+        let _env = TestEnvGuard::new(&["HYZERO_TEMPERATURE_MOVES"]);
+        // SAFETY: env mutation serialized by TestEnvGuard for this test's duration.
+        unsafe {
+            std::env::set_var("HYZERO_TEMPERATURE_MOVES", "0");
+        }
+        assert_eq!(temperature_moves(), 1);
+        // SAFETY: still under the same TestEnvGuard.
+        unsafe {
+            std::env::set_var("HYZERO_TEMPERATURE_MOVES", "9999");
+        }
+        assert_eq!(temperature_moves(), 200);
+        // Unparseable input falls back to the default, not a clamp.
+        // SAFETY: still under the same TestEnvGuard.
+        unsafe {
+            std::env::set_var("HYZERO_TEMPERATURE_MOVES", "not-a-number");
+        }
+        assert_eq!(temperature_moves(), 30);
+    }
+
+    /// The configured window reaches the temperature schedule: a GameConfig
+    /// built from the environment carries temperature_moves==12 when the var is
+    /// set, and `selfplay_temperature` holds 1.0 up to that ply then drops.
+    #[test]
+    fn configured_window_reaches_temperature_schedule() {
+        let _env = TestEnvGuard::new(&["HYZERO_TEMPERATURE_MOVES", "HYZERO_TEMP_ANNEAL"]);
+        // SAFETY: env mutation serialized by TestEnvGuard for this test's duration.
+        unsafe {
+            std::env::set_var("HYZERO_TEMPERATURE_MOVES", "12");
+            std::env::set_var("HYZERO_TEMP_ANNEAL", "0"); // hard step for a crisp edge
+        }
+        let config = GameConfig::default();
+        assert_eq!(config.temperature_moves, 12);
+        // Full temperature inside the shortened window, exploitation just past it.
+        assert!((selfplay_temperature(11, config.temperature_moves) - 1.0).abs() < 1e-6);
+        assert!((selfplay_temperature(12, config.temperature_moves) - 0.01).abs() < 1e-6);
     }
 
     /// Eval cap-adjudication: when enabled and one side is clearly ahead on
