@@ -1141,6 +1141,28 @@ fn material_shaping_scale() -> f32 {
         .unwrap_or(5.0)
 }
 
+/// Multiplier applied to the shaped value of a REPETITION or MOVE-CAP rule draw
+/// (NOT fifty-move) when material shaping is on. `HYZERO_SHAPING_REP_DISCOUNT`,
+/// default 1.0 (behavior unchanged), clamped to [0.0, 1.0]. Unparseable input
+/// falls back to the default. Read per-call (TestEnvGuard-compatible).
+///
+/// Applied symmetrically to BOTH sides, preserving the existing antisymmetry of
+/// the shaped value: winner's +0.9 → +0.27, loser's -0.9 → -0.27 at 0.3.
+///
+/// Rationale (2026-06-11, measured 3/120 forced-mate conversion rate): an
+/// undiscounted material lead shapes a repetition/move-cap draw to ≈+0.9, so
+/// shuffling earns ~90% of mating and nothing prefers conversion. Discounting
+/// (e.g. 0.3) keeps a sharp mate-vs-shuffle gradient for the winner while — by
+/// the preserved antisymmetry — still leaving the defender a slight preference
+/// for escaping into repetition over being mated (loser's -0.9 → -0.27).
+fn shaping_rep_discount() -> f32 {
+    std::env::var("HYZERO_SHAPING_REP_DISCOUNT")
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+        .map(|v| v.clamp(0.0, 1.0))
+        .unwrap_or(1.0)
+}
+
 /// True when HYZERO_MATERIAL_SHAPING is set to any truthy value
 /// ("1", "true", "yes", ...). When false (the DEFAULT), every non-checkmate
 /// terminal produces outcome=0.0 — AlphaZero-style pure-outcome training
@@ -1193,7 +1215,10 @@ fn compute_material_diff(board: &GameBoard) -> i32 {
 ///     rule, not because the position is balanced. With HYZERO_MATERIAL_SHAPING=1
 ///     these get `tanh(Δmaterial/scale)` as a weak material-proxy signal to keep
 ///     the value head learning when games don't reach checkmate. Default (shaping
-///     OFF) is AlphaZero-style: outcome = 0.0.
+///     OFF) is AlphaZero-style: outcome = 0.0. Repetition and move-cap draws are
+///     additionally scaled by HYZERO_SHAPING_REP_DISCOUNT (default 1.0 = no
+///     change), applied symmetrically to both sides so the shaped value's
+///     antisymmetry is preserved; fifty-move is NOT discounted.
 ///
 /// `is_draw` is true for every non-checkmate terminal (used by the trainer's
 /// draw penalty and by the PGN result label, which must stay 1/2-1/2 even when a
@@ -1208,9 +1233,25 @@ fn score_board_terminal(board_result: GameResult, board: &GameBoard) -> (f32, bo
         GameResult::Checkmate(Color::Black) => (-1.0f32, false),
         // True draws: drawn by position, never shaped.
         GameResult::Stalemate | GameResult::InsufficientMaterial => (0.0f32, true),
-        // Rule draws: repetition, fifty-move, and move-cap (board still Ongoing
-        // when the loop exits on the cap). Eligible for material shaping.
-        GameResult::ThreefoldRepetition | GameResult::FiftyMoveRule | GameResult::Ongoing => {
+        // Repetition and move-cap (board still Ongoing when the loop exits on the
+        // cap) are rule draws eligible for material shaping. They additionally
+        // receive HYZERO_SHAPING_REP_DISCOUNT (default 1.0 = no change), applied
+        // symmetrically so the antisymmetry of the shaped value is preserved.
+        // The discount makes the winner's mate-vs-shuffle gradient sharp while
+        // still letting a defender slightly prefer repetition over being mated.
+        GameResult::ThreefoldRepetition | GameResult::Ongoing => {
+            if material_shaping_enabled() {
+                let delta = compute_material_diff(board);
+                let scale = material_shaping_scale();
+                let shaped = (delta as f32 / scale).tanh();
+                (shaped * shaping_rep_discount(), true)
+            } else {
+                (0.0f32, true)
+            }
+        }
+        // Fifty-move is a rule draw eligible for shaping but NOT for the
+        // repetition/move-cap discount (it is not a shuffle-to-repetition draw).
+        GameResult::FiftyMoveRule => {
             if material_shaping_enabled() {
                 let delta = compute_material_diff(board);
                 let scale = material_shaping_scale();
@@ -2202,6 +2243,211 @@ mod tests {
         assert_eq!(
             outcome, 0.0,
             "insufficient material is a true draw — material shaping must NOT apply",
+        );
+    }
+
+    /// `HYZERO_SHAPING_REP_DISCOUNT` parses, defaults to 1.0 on missing/unparseable
+    /// input, and clamps out-of-range values into [0.0, 1.0].
+    #[test]
+    fn shaping_rep_discount_parses_defaults_and_clamps() {
+        use std::env;
+        let _env = TestEnvGuard::new(&["HYZERO_SHAPING_REP_DISCOUNT"]);
+        // SAFETY: env mutation serialized by TestEnvGuard for this test's duration.
+        unsafe {
+            env::remove_var("HYZERO_SHAPING_REP_DISCOUNT");
+            assert!(
+                (shaping_rep_discount() - 1.0).abs() < 1e-6,
+                "default must be 1.0"
+            );
+
+            env::set_var("HYZERO_SHAPING_REP_DISCOUNT", "0.3");
+            assert!((shaping_rep_discount() - 0.3).abs() < 1e-6);
+
+            // Out-of-range values clamp into [0.0, 1.0].
+            env::set_var("HYZERO_SHAPING_REP_DISCOUNT", "5.0");
+            assert!(
+                (shaping_rep_discount() - 1.0).abs() < 1e-6,
+                "above 1.0 clamps to 1.0"
+            );
+            env::set_var("HYZERO_SHAPING_REP_DISCOUNT", "-2.0");
+            assert!(
+                (shaping_rep_discount() - 0.0).abs() < 1e-6,
+                "below 0.0 clamps to 0.0"
+            );
+
+            // Unparseable falls back to the default.
+            env::set_var("HYZERO_SHAPING_REP_DISCOUNT", "not-a-number");
+            assert!((shaping_rep_discount() - 1.0).abs() < 1e-6);
+        }
+    }
+
+    /// At the default discount of 1.0, a shaped repetition draw is bit-identical
+    /// to the undiscounted `tanh(Δ/scale)` — behavior unchanged when the knob is
+    /// absent. Guards the "default = no-op" contract.
+    #[test]
+    fn repetition_shaping_unchanged_at_default_discount() {
+        use std::env;
+        let _env = TestEnvGuard::new(&[
+            "HYZERO_MATERIAL_SHAPING",
+            "HYZERO_MATERIAL_SHAPING_SCALE",
+            "HYZERO_SHAPING_REP_DISCOUNT",
+        ]);
+        // SAFETY: env mutation serialized by TestEnvGuard for this test's duration.
+        unsafe {
+            env::set_var("HYZERO_MATERIAL_SHAPING", "1");
+            env::remove_var("HYZERO_MATERIAL_SHAPING_SCALE"); // default scale 5.0
+            env::remove_var("HYZERO_SHAPING_REP_DISCOUNT"); // default 1.0
+        }
+        let precomputed = Arc::new(PrecomputedItems::begin_precomputing());
+        // White up a full queen (delta +9).
+        let (board, _, _) =
+            board_from_fen("4k3/8/8/8/8/8/8/3QK3 w - - 0 1", precomputed).expect("invalid FEN");
+
+        let (outcome, _) = score_board_terminal(GameResult::ThreefoldRepetition, &board);
+        let expected = (9.0f32 / 5.0).tanh();
+        assert_eq!(
+            outcome, expected,
+            "default discount 1.0 must leave the shaped value bit-identical",
+        );
+    }
+
+    /// With the discount at 0.3, a repetition draw's shaped value is scaled to
+    /// 0.3× for BOTH sides, preserving antisymmetry: winner's +tanh(9/5) and the
+    /// mirror loser's -tanh(9/5) both shrink by the same factor. FAILS without
+    /// the discount code (the regression character of this knob).
+    #[test]
+    fn repetition_shaping_discounted_antisymmetrically_at_03() {
+        use std::env;
+        let _env = TestEnvGuard::new(&[
+            "HYZERO_MATERIAL_SHAPING",
+            "HYZERO_MATERIAL_SHAPING_SCALE",
+            "HYZERO_SHAPING_REP_DISCOUNT",
+        ]);
+        // SAFETY: env mutation serialized by TestEnvGuard for this test's duration.
+        unsafe {
+            env::set_var("HYZERO_MATERIAL_SHAPING", "1");
+            env::remove_var("HYZERO_MATERIAL_SHAPING_SCALE"); // default scale 5.0
+            env::set_var("HYZERO_SHAPING_REP_DISCOUNT", "0.3");
+        }
+        let precomputed = Arc::new(PrecomputedItems::begin_precomputing());
+        // White up a queen (+9): winner side.
+        let (white_ahead, _, _) =
+            board_from_fen("4k3/8/8/8/8/8/8/3QK3 w - - 0 1", precomputed.clone())
+                .expect("invalid FEN");
+        // Black up a queen (-9): mirror, loser side from White's POV.
+        let (black_ahead, _, _) =
+            board_from_fen("3qk3/8/8/8/8/8/8/4K3 w - - 0 1", precomputed).expect("invalid FEN");
+
+        let undiscounted = (9.0f32 / 5.0).tanh();
+        let (won, _) = score_board_terminal(GameResult::ThreefoldRepetition, &white_ahead);
+        let (lost, _) = score_board_terminal(GameResult::ThreefoldRepetition, &black_ahead);
+
+        assert!(
+            (won - undiscounted * 0.3).abs() < 1e-6,
+            "winner's repetition shaping must be 0.3*tanh(9/5)={}, got {won}",
+            undiscounted * 0.3,
+        );
+        assert!(
+            (lost - (-undiscounted * 0.3)).abs() < 1e-6,
+            "loser's repetition shaping must be -0.3*tanh(9/5)={}, got {lost}",
+            -undiscounted * 0.3,
+        );
+        // Antisymmetry preserved exactly.
+        assert!(
+            (won + lost).abs() < 1e-6,
+            "discounted shaping must stay antisymmetric (won + lost == 0)",
+        );
+    }
+
+    /// The move-cap terminal (board still `Ongoing` at the cap) receives the same
+    /// repetition discount. FAILS without the discount code.
+    #[test]
+    fn move_cap_shaping_discounted_at_03() {
+        use std::env;
+        let _env = TestEnvGuard::new(&[
+            "HYZERO_MATERIAL_SHAPING",
+            "HYZERO_MATERIAL_SHAPING_SCALE",
+            "HYZERO_SHAPING_REP_DISCOUNT",
+        ]);
+        // SAFETY: env mutation serialized by TestEnvGuard for this test's duration.
+        unsafe {
+            env::set_var("HYZERO_MATERIAL_SHAPING", "1");
+            env::remove_var("HYZERO_MATERIAL_SHAPING_SCALE"); // default scale 5.0
+            env::set_var("HYZERO_SHAPING_REP_DISCOUNT", "0.3");
+        }
+        let precomputed = Arc::new(PrecomputedItems::begin_precomputing());
+        // White up a queen (+9). Ongoing = move-cap terminal.
+        let (board, _, _) =
+            board_from_fen("4k3/8/8/8/8/8/8/3QK3 w - - 0 1", precomputed).expect("invalid FEN");
+
+        let (outcome, _) = score_board_terminal(GameResult::Ongoing, &board);
+        let expected = (9.0f32 / 5.0).tanh() * 0.3;
+        assert!(
+            (outcome - expected).abs() < 1e-6,
+            "move-cap repetition shaping must be 0.3*tanh(9/5)={expected}, got {outcome}",
+        );
+    }
+
+    /// Fifty-move is a rule draw eligible for shaping but NOT for the
+    /// repetition/move-cap discount: even with the discount at 0.3 its shaped
+    /// value stays the full undiscounted `tanh(Δ/scale)`.
+    #[test]
+    fn fifty_move_shaping_ignores_rep_discount() {
+        use std::env;
+        let _env = TestEnvGuard::new(&[
+            "HYZERO_MATERIAL_SHAPING",
+            "HYZERO_MATERIAL_SHAPING_SCALE",
+            "HYZERO_SHAPING_REP_DISCOUNT",
+        ]);
+        // SAFETY: env mutation serialized by TestEnvGuard for this test's duration.
+        unsafe {
+            env::set_var("HYZERO_MATERIAL_SHAPING", "1");
+            env::remove_var("HYZERO_MATERIAL_SHAPING_SCALE"); // default scale 5.0
+            env::set_var("HYZERO_SHAPING_REP_DISCOUNT", "0.3");
+        }
+        let precomputed = Arc::new(PrecomputedItems::begin_precomputing());
+        // White up a queen (+9).
+        let (board, _, _) =
+            board_from_fen("4k3/8/8/8/8/8/8/3QK3 w - - 0 1", precomputed).expect("invalid FEN");
+
+        let (outcome, _) = score_board_terminal(GameResult::FiftyMoveRule, &board);
+        let expected = (9.0f32 / 5.0).tanh();
+        assert_eq!(
+            outcome, expected,
+            "fifty-move shaping must ignore HYZERO_SHAPING_REP_DISCOUNT",
+        );
+    }
+
+    /// True draws (stalemate, insufficient material) stay 0.0 regardless of the
+    /// discount knob — the discount multiplies a value that is already 0.0.
+    #[test]
+    fn true_draws_unaffected_by_rep_discount() {
+        use std::env;
+        let _env = TestEnvGuard::new(&[
+            "HYZERO_MATERIAL_SHAPING",
+            "HYZERO_MATERIAL_SHAPING_SCALE",
+            "HYZERO_SHAPING_REP_DISCOUNT",
+        ]);
+        // SAFETY: env mutation serialized by TestEnvGuard for this test's duration.
+        unsafe {
+            env::set_var("HYZERO_MATERIAL_SHAPING", "1");
+            env::remove_var("HYZERO_MATERIAL_SHAPING_SCALE");
+            env::set_var("HYZERO_SHAPING_REP_DISCOUNT", "0.3");
+        }
+        let precomputed = Arc::new(PrecomputedItems::begin_precomputing());
+        // White up a queen (+9) — a true draw stays 0.0 regardless.
+        let (board, _, _) =
+            board_from_fen("4k3/8/8/8/8/8/8/3QK3 w - - 0 1", precomputed).expect("invalid FEN");
+
+        let (stalemate, _) = score_board_terminal(GameResult::Stalemate, &board);
+        let (insufficient, _) = score_board_terminal(GameResult::InsufficientMaterial, &board);
+        assert_eq!(
+            stalemate, 0.0,
+            "stalemate stays 0.0 under the discount knob"
+        );
+        assert_eq!(
+            insufficient, 0.0,
+            "insufficient material stays 0.0 under the discount knob",
         );
     }
 

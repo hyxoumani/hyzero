@@ -190,6 +190,11 @@ export HYZERO_ANTISYM_LOSS_WEIGHT=0.01
 # a lower divisor in tanh(Δmaterial/scale) yields a stronger shaping signal.
 export HYZERO_MATERIAL_SHAPING=1
 export HYZERO_MATERIAL_SHAPING_SCALE=3.0
+# Discount repetition/move-cap draw shaping (NOT fifty-move): from won KQ/KR-vs-K
+# positions models mated in only 3/120 games, shuffling to repetition instead
+# because a +0.9 shaped repetition earned ~90% of mating. 0.3 sharpens the
+# mate-vs-shuffle gradient while keeping the defender's prefer-repetition signal.
+export HYZERO_SHAPING_REP_DISCOUNT=0.3
 export HYZERO_LR_SCHEDULE=cosine
 # Cosine T_max tracks the run length so the LR completes one full decay over the
 # run instead of a fixed 14000 steps. Throughput is ~18 trainer steps/min at the
