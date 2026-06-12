@@ -456,6 +456,11 @@ pub struct DualGameOutcome {
 /// Returns the White-perspective outcome. Callers that want to count champion wins
 /// when champion played Black must **negate** `game_outcome`.
 ///
+/// The starting position is selected by `init_self_play_board` (a diverse-start
+/// FEN sampled from `HYZERO_STARTS_FILE` when configured, else the standard
+/// initial position). Callers that need to drive a *specific* starting position
+/// (e.g. the arena's mirrored-pair scheduler) use `play_game_dual_from` instead.
+///
 /// No `GameTrajectory` is produced — eval games don't go to the training buffer.
 pub async fn play_game_dual(
     precomputed: Arc<PrecomputedItems>,
@@ -463,8 +468,34 @@ pub async fn play_game_dual(
     black_evaluator: Arc<dyn Evaluator>,
     config: GameConfig,
 ) -> DualGameOutcome {
-    let (mut board, mut side_to_move, starting_fen) = init_self_play_board(precomputed.clone());
+    let (board, side_to_move, starting_fen) = init_self_play_board(precomputed);
+    play_game_dual_from(
+        white_evaluator,
+        black_evaluator,
+        config,
+        board,
+        side_to_move,
+        starting_fen,
+    )
+    .await
+}
 
+/// Play a dual-evaluator game from an explicit starting `board` / `side_to_move`.
+///
+/// Identical to `play_game_dual` except the caller supplies the initial position
+/// instead of it being sampled by `init_self_play_board`. `starting_fen` is
+/// forwarded verbatim into the returned `DualGameOutcome` (and thence to the PGN
+/// `[SetUp]`/`[FEN]` headers); pass `Some(fen)` for a non-standard start and
+/// `None` for the standard initial position. Eval-style search (no root noise,
+/// near-greedy 0.01 temperature) is used, matching `play_game_dual`.
+pub async fn play_game_dual_from(
+    white_evaluator: Arc<dyn Evaluator>,
+    black_evaluator: Arc<dyn Evaluator>,
+    config: GameConfig,
+    mut board: GameBoard,
+    mut side_to_move: Color,
+    starting_fen: Option<String>,
+) -> DualGameOutcome {
     let mut turn_count: usize = 0;
     let mut history: VecDeque<BoardSnapshot> = VecDeque::with_capacity(7);
     let mut moves: Vec<String> = Vec::new();
@@ -1521,6 +1552,57 @@ mod tests {
             trajectory.game_outcome.abs() <= 1.0,
             "Game outcome should be in [-1, 1], got {}",
             trajectory.game_outcome
+        );
+    }
+
+    /// `play_game_dual_from` must start from the *supplied* board/side and
+    /// forward `starting_fen` verbatim into the outcome — it must NOT fall back
+    /// to `init_self_play_board` (which would ignore the caller's position).
+    /// Uses a sparse K+P vs K endgame so the very first legal move can only come
+    /// from that custom position, never the standard 20-move opening.
+    #[tokio::test]
+    async fn play_game_dual_from_uses_supplied_board() {
+        let precomputed = Arc::new(PrecomputedItems::begin_precomputing());
+        let white: Arc<dyn Evaluator> = Arc::new(RandomEvaluator);
+        let black: Arc<dyn Evaluator> = Arc::new(RandomEvaluator);
+        let config = GameConfig {
+            num_simulations: 2,
+            exploration_constant: 1.5,
+            temperature_moves: 0,
+            replay_dir: None,
+            adjudicate_at_cap: false,
+            adjudication_material_margin: 5,
+        };
+
+        // White: Kc1, Pd2. Black: Kc8. Only White pieces move first; none of the
+        // standard-start opening moves (a2a3..h2h4, knights) are legal here.
+        let fen = "2k5/8/8/8/8/8/3P4/2K5 w - - 0 1";
+        let (board, side_to_move, _fm) =
+            board_from_fen(fen, precomputed.clone()).expect("valid FEN");
+        assert_eq!(side_to_move, Color::White);
+
+        let outcome = play_game_dual_from(
+            white,
+            black,
+            config,
+            board,
+            side_to_move,
+            Some(fen.to_string()),
+        )
+        .await;
+
+        // The starting FEN is forwarded verbatim (drives the PGN [FEN] header).
+        assert_eq!(outcome.starting_fen.as_deref(), Some(fen));
+        // At least one move was made, and the first one originates from a square
+        // that holds a White piece in the supplied position (c1 king or d2 pawn) —
+        // proving the game did NOT start from the standard initial position.
+        assert!(!outcome.moves.is_empty(), "game should have made moves");
+        let first_from = &outcome.moves[0][..2];
+        assert!(
+            first_from == "c1" || first_from == "d2",
+            "first move {} must originate from the supplied K+P position, not the \
+             standard start",
+            outcome.moves[0]
         );
     }
 

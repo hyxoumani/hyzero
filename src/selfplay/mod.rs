@@ -12,7 +12,7 @@ pub use inference::{
     InferenceRequest, InferenceBackend, RandomBackend, SwappableBackend,
     InferenceBatcher, BatcherConfig, ChannelEvaluator, EvalError,
 };
-pub use game_task::{GameConfig, play_game, DualGameOutcome};
+pub use game_task::{GameConfig, play_game, play_game_dual, play_game_dual_from, DualGameOutcome};
 pub use coordinator::{SelfPlayConfig, SelfPlayCoordinator};
 pub use elo::{expected_score, update_rating, INITIAL_RATING, K_FACTOR};
 pub use pool::latest_archive_versions;
