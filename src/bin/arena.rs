@@ -12,12 +12,14 @@
 //! mirroring the dual-model eval path in `src/selfplay/evaluation.rs`. No trainer
 //! and no replay buffer are involved — the weights never change during a match.
 //!
-//! Mirrored-pair fairness: `N/2` starting FENs are taken from the starts file
-//! (the first `N/2` lines, deterministic). Each FEN is played TWICE with colors
-//! swapped (A-as-White then B-as-White) and wins are tallied PER MODEL, so a
-//! white-advantage bias cancels out. Adjudication / termination reuse whatever
-//! `play_game_dual_from` already does (move cap, eval adjudication via the
-//! HYZERO_EVAL_ADJUDICATE* gates). Draws are counted as draws.
+//! Mirrored-pair fairness: `N/2` starting FENs are sampled from the starts file
+//! by a deterministic, seedless STRIDE over the whole file (index
+//! `floor(i * L / (N/2))` for `i in 0..N/2`, `L` = non-empty line count), so the
+//! selection spans the entire file rather than just its head. Each FEN is played
+//! TWICE with colors swapped (A-as-White then B-as-White) and wins are tallied
+//! PER MODEL, so a white-advantage bias cancels out. Adjudication / termination
+//! reuse whatever `play_game_dual_from` already does (move cap, eval adjudication
+//! via the HYZERO_EVAL_ADJUDICATE* gates). Draws are counted as draws.
 //!
 //! Output (one machine-readable line at the end, to stdout):
 //! ```text
@@ -30,12 +32,19 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict};
 use tokio::sync::{mpsc, Semaphore};
 
+use hyzero::data::{encode_board, flip_action, move_to_action, ActionIndex};
 use hyzero::game::board_from_fen;
+use hyzero::game::perft::get_legal_moves_for_perft;
 use hyzero::mcts::evaluator::Evaluator;
 use hyzero::py::PyO3Backend;
 use hyzero::selfplay::game_task::{play_game_dual_from, DualGameOutcome, GameConfig};
 use hyzero::selfplay::{BatcherConfig, ChannelEvaluator, InferenceBatcher};
-use hyzero::PrecomputedItems;
+use hyzero::{Color, PrecomputedItems};
+
+/// Standard chess starting position FEN, used for the cheap weight-load
+/// fingerprint probe (a single eval through the same ChannelEvaluator used to
+/// play). Distinct checkpoints must yield distinct fingerprints.
+const START_FEN: &str = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
 
 /// Parsed arena CLI arguments.
 #[derive(Debug, Clone, PartialEq)]
@@ -46,6 +55,7 @@ struct ArenaArgs {
     sims: u32,
     starts: String,
     concurrency: usize,
+    device: String,
 }
 
 /// One mirrored-pair game slot: which FEN index to play, and whether model A
@@ -112,7 +122,10 @@ fn score_for_a(outcome: &DualGameOutcome, a_is_white: bool) -> GameScore {
 ///
 /// Required: `--model-a`, `--model-b`, `--games`. Optional: `--sims` (default
 /// 100), `--starts` (default `data/starting_positions.txt`), `--concurrency`
-/// (default 4). Returns a human-readable error string on missing/invalid input.
+/// (default 4), `--device` (default: `HYZERO_DEVICE` env, else `cuda` — matching
+/// `scripts/run_baseline.sh` and `src/bin/selfplay.rs`). The `--device` flag
+/// overrides the env. Returns a human-readable error string on missing/invalid
+/// input.
 fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<ArenaArgs, String> {
     let mut model_a: Option<String> = None;
     let mut model_b: Option<String> = None;
@@ -120,6 +133,10 @@ fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<ArenaArgs, Stri
     let mut sims: u32 = 100;
     let mut starts: String = "data/starting_positions.txt".to_string();
     let mut concurrency: usize = 4;
+    // Default device: HYZERO_DEVICE env, falling back to "cuda" (matching
+    // scripts/run_baseline.sh `DEVICE=${HYZERO_DEVICE:-cuda}`). A `--device` flag
+    // overrides it.
+    let mut device: String = std::env::var("HYZERO_DEVICE").unwrap_or_else(|_| "cuda".to_string());
 
     let mut it = args.into_iter();
     while let Some(flag) = it.next() {
@@ -145,6 +162,9 @@ fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<ArenaArgs, Stri
                 let v = it.next().ok_or("--concurrency requires a value")?;
                 concurrency = v.parse().map_err(|_| format!("invalid --concurrency: {v}"))?;
             }
+            "--device" => {
+                device = it.next().ok_or("--device requires a value")?;
+            }
             other => return Err(format!("unknown argument: {other}")),
         }
     }
@@ -166,25 +186,50 @@ fn parse_args<I: IntoIterator<Item = String>>(args: I) -> Result<ArenaArgs, Stri
         sims,
         starts,
         concurrency,
+        device,
     })
 }
 
-/// Read the first `count` non-empty FEN lines from `path`. Fewer than `count`
-/// is fine — `build_schedule` cycles over whatever is available.
-fn load_starts(path: &str, count: usize) -> Result<Vec<String>, String> {
+/// Deterministic, seedless stride indices selecting `count` positions spread over
+/// `line_count` available lines: `floor(i * line_count / count)` for `i in
+/// 0..count`. This spans the WHOLE file (head-to-tail) instead of taking only the
+/// first `count` lines, so e.g. 100 FENs sample evenly across a 100k-line file.
+///
+/// When `count >= line_count`, every line is selected (and, for `count >
+/// line_count`, later indices repeat the tail — `build_schedule` already cycles
+/// FENs, so duplicate selections are harmless). `count == 0` or `line_count == 0`
+/// yields an empty vector. Pure + deterministic — unit-tested in `tests`.
+fn stride_indices(line_count: usize, count: usize) -> Vec<usize> {
+    if count == 0 || line_count == 0 {
+        return Vec::new();
+    }
+    (0..count)
+        .map(|i| (i * line_count) / count)
+        .collect()
+}
+
+/// Sample `count` non-empty FEN lines from `path` by deterministic stride over the
+/// whole file (see `stride_indices`). Returns the sampled FENs plus the total
+/// non-empty line count `L`, so the caller can log the sampling provenance. Fewer
+/// available lines than `count` is fine — `build_schedule` cycles over whatever is
+/// returned.
+fn load_starts(path: &str, count: usize) -> Result<(Vec<String>, usize), String> {
     let contents =
         std::fs::read_to_string(path).map_err(|e| format!("failed to read starts file {path}: {e}"))?;
-    let fens: Vec<String> = contents
+    let lines: Vec<&str> = contents
         .lines()
         .map(|l| l.trim())
         .filter(|l| !l.is_empty())
-        .take(count)
-        .map(|l| l.to_string())
         .collect();
-    if fens.is_empty() {
+    if lines.is_empty() {
         return Err(format!("starts file {path} contained no FENs"));
     }
-    Ok(fens)
+    let line_count = lines.len();
+    let fens: Vec<String> = stride_indices(line_count, count)
+        .into_iter()
+        .map(|idx| lines[idx].to_string())
+        .collect();
+    Ok((fens, line_count))
 }
 
 /// Build one frozen inference evaluator from a checkpoint path: instantiate a
@@ -247,6 +292,47 @@ fn build_frozen_evaluator(
     Arc::new(ChannelEvaluator::with_channels(tx, hidden_channels))
 }
 
+/// Cheap weight-load fingerprint: evaluate the standard starting position once
+/// through the SAME `ChannelEvaluator` used to play, and return the root value
+/// (side-to-move POV). Two different checkpoints must produce different values;
+/// identical checkpoints produce identical ones — so a silent `load_weights`
+/// failure (both models sharing one set of weights) is caught by comparing the
+/// two fingerprints. Reuses `encode_board` + the perft legal-move generator and
+/// the same Black-POV `flip_action` canonicalization that `play_game_dual_from`
+/// applies, so the probe exercises the real inference path.
+async fn fingerprint_evaluator(
+    evaluator: &Arc<dyn Evaluator>,
+    precomputed: Arc<PrecomputedItems>,
+) -> f32 {
+    let (board, side_to_move, _fullmove) = board_from_fen(START_FEN, precomputed)
+        .unwrap_or_else(|e| panic!("[arena] failed to parse START_FEN for fingerprint: {e}"));
+
+    let observation = encode_board(&board, side_to_move, &[]);
+
+    // Legal moves in current-player POV, matching the play path's flip + sort.
+    let raw_moves = get_legal_moves_for_perft(&board, side_to_move);
+    let mut legal_actions: Vec<ActionIndex> = raw_moves
+        .iter()
+        .map(|mv| {
+            let a = move_to_action(mv);
+            if side_to_move == Color::Black {
+                flip_action(a as usize) as ActionIndex
+            } else {
+                a
+            }
+        })
+        .collect();
+    legal_actions.sort_unstable();
+
+    let mut legal_mask = vec![false; hyzero::data::NUM_ACTIONS];
+    for &a in &legal_actions {
+        legal_mask[a as usize] = true;
+    }
+
+    let (_hidden_state, _policy, value) = evaluator.root_setup(&observation, &legal_mask).await;
+    value
+}
+
 #[tokio::main]
 async fn main() {
     let raw: Vec<String> = std::env::args().skip(1).collect();
@@ -256,28 +342,36 @@ async fn main() {
             eprintln!("[arena] error: {e}");
             eprintln!(
                 "usage: arena --model-a <ckpt.pt> --model-b <ckpt.pt> --games <N> \
-                 [--sims 100] [--starts data/starting_positions.txt] [--concurrency 4]"
+                 [--sims 100] [--starts data/starting_positions.txt] [--concurrency 4] \
+                 [--device cuda]"
             );
             std::process::exit(2);
         }
     };
 
-    let device = std::env::var("HYZERO_DEVICE").unwrap_or_else(|_| "cpu".to_string());
+    let device = args.device.clone();
     eprintln!(
         "[arena] device={device} sims={} concurrency={} games={}",
         args.sims, args.concurrency, args.games
     );
 
-    // N/2 mirrored pairs → take the first N/2 FENs (deterministic).
+    // N/2 mirrored pairs → sample N/2 FENs by deterministic stride over the whole
+    // starts file (not just its head), so the openings span the full file.
     let num_pairs = args.games / 2;
-    let fens = match load_starts(&args.starts, num_pairs) {
-        Ok(f) => Arc::new(f),
+    let (fens, line_count) = match load_starts(&args.starts, num_pairs) {
+        Ok(f) => f,
         Err(e) => {
             eprintln!("[arena] error: {e}");
             std::process::exit(2);
         }
     };
-    eprintln!("[arena] loaded {} starting FEN(s) from {}", fens.len(), args.starts);
+    let fens = Arc::new(fens);
+    eprintln!(
+        "[arena] loaded {} starting FEN(s) from {} ({} non-empty lines, deterministic stride sampling)",
+        fens.len(),
+        args.starts,
+        line_count,
+    );
 
     let precomputed = Arc::new(PrecomputedItems::begin_precomputing());
 
@@ -288,6 +382,21 @@ async fn main() {
     };
     let eval_a = build_frozen_evaluator(&args.model_a, &device, batcher_config.clone());
     let eval_b = build_frozen_evaluator(&args.model_b, &device, batcher_config.clone());
+
+    // Weight-load diagnostic: one cheap eval of the start position per model.
+    // Distinct checkpoints MUST show distinct fingerprints; identical files show
+    // identical ones — guarding against a silent `load_weights` failure that would
+    // leave both models effectively sharing weights.
+    let fp_a = fingerprint_evaluator(&eval_a, precomputed.clone()).await;
+    let fp_b = fingerprint_evaluator(&eval_b, precomputed.clone()).await;
+    eprintln!("[arena] model_a fingerprint value={fp_a:.6}");
+    eprintln!("[arena] model_b fingerprint value={fp_b:.6}");
+    if args.model_a != args.model_b && fp_a == fp_b {
+        eprintln!(
+            "[arena] WARN: distinct checkpoints produced identical fingerprints \
+             ({fp_a:.6}) — possible silent load_weights failure"
+        );
+    }
 
     // Eval-style game config: PUCT (no root noise inside play_game_dual_from),
     // eval temperature (hardcoded 0.01), and the eval adjudication gates so a
@@ -416,24 +525,21 @@ mod tests {
     }
 
     /// Required flags parse into the expected struct; optional flags take their
-    /// documented defaults when omitted.
+    /// documented defaults when omitted. The device default reads process env
+    /// (`HYZERO_DEVICE`, else "cuda") and so is exercised via `--device` overrides
+    /// rather than asserted here.
     #[test]
     fn parse_args_applies_defaults_for_optional_flags() {
         let a = parse_args(args(&[
             "--model-a", "a.pt", "--model-b", "b.pt", "--games", "10",
         ]))
         .expect("parse ok");
-        assert_eq!(
-            a,
-            ArenaArgs {
-                model_a: "a.pt".to_string(),
-                model_b: "b.pt".to_string(),
-                games: 10,
-                sims: 100,
-                starts: "data/starting_positions.txt".to_string(),
-                concurrency: 4,
-            }
-        );
+        assert_eq!(a.model_a, "a.pt");
+        assert_eq!(a.model_b, "b.pt");
+        assert_eq!(a.games, 10);
+        assert_eq!(a.sims, 100);
+        assert_eq!(a.starts, "data/starting_positions.txt");
+        assert_eq!(a.concurrency, 4);
     }
 
     /// All flags (including the optionals) parse to the supplied values.
@@ -441,12 +547,23 @@ mod tests {
     fn parse_args_reads_all_flags() {
         let a = parse_args(args(&[
             "--model-a", "x.pt", "--model-b", "y.pt", "--games", "8", "--sims", "50",
-            "--starts", "s.txt", "--concurrency", "2",
+            "--starts", "s.txt", "--concurrency", "2", "--device", "cpu",
         ]))
         .expect("parse ok");
         assert_eq!(a.sims, 50);
         assert_eq!(a.starts, "s.txt");
         assert_eq!(a.concurrency, 2);
+        assert_eq!(a.device, "cpu");
+    }
+
+    /// `--device` overrides whatever the env/default would supply.
+    #[test]
+    fn parse_args_device_flag_overrides_default() {
+        let a = parse_args(args(&[
+            "--model-a", "a.pt", "--model-b", "b.pt", "--games", "4", "--device", "cuda:1",
+        ]))
+        .expect("parse ok");
+        assert_eq!(a.device, "cuda:1");
     }
 
     /// A missing required flag is a parse error, not a silent default.
@@ -504,6 +621,64 @@ mod tests {
         let slots = build_schedule(8, 2); // 4 pairs, 2 FENs
         let indices: Vec<usize> = slots.iter().step_by(2).map(|s| s.fen_index).collect();
         assert_eq!(indices, vec![0, 1, 0, 1], "pair FENs cycle 0,1,0,1");
+    }
+
+    /// Sampling `count` from `line_count` lines spans the whole file head-to-tail
+    /// via `floor(i * line_count / count)` — not just the first `count` lines.
+    #[test]
+    fn stride_indices_spans_whole_file() {
+        // 4 samples over 100 lines → 0, 25, 50, 75 (full-file spread, not 0..4).
+        assert_eq!(stride_indices(100, 4), vec![0, 25, 50, 75]);
+    }
+
+    /// The stride formula matches the documented `floor(i * L / count)` exactly,
+    /// including the truncating division on a non-divisible split.
+    #[test]
+    fn stride_indices_uses_floor_division() {
+        // 3 samples over 10 lines → floor(0), floor(10/3=3), floor(20/3=6).
+        assert_eq!(stride_indices(10, 3), vec![0, 3, 6]);
+    }
+
+    /// The first sampled index is always 0 and the last is strictly inside the
+    /// file (`< line_count`), so no index ever overruns the available lines.
+    #[test]
+    fn stride_indices_stay_in_bounds() {
+        let idx = stride_indices(100_000, 100);
+        assert_eq!(idx.len(), 100);
+        assert_eq!(idx[0], 0);
+        assert!(idx.iter().all(|&i| i < 100_000), "every index in [0, L)");
+        // The 100-sample stride over 100k lines reaches the file's tail.
+        assert_eq!(*idx.last().unwrap(), 99_000);
+    }
+
+    /// The sampler is deterministic and seedless: identical inputs yield identical
+    /// indices across calls.
+    #[test]
+    fn stride_indices_is_deterministic() {
+        assert_eq!(stride_indices(777, 13), stride_indices(777, 13));
+    }
+
+    /// A degenerate request (zero samples or empty file) yields no indices rather
+    /// than panicking on a divide-by-zero.
+    #[test]
+    fn stride_indices_handles_empty_inputs() {
+        assert!(stride_indices(0, 5).is_empty(), "empty file → no indices");
+        assert!(stride_indices(50, 0).is_empty(), "zero samples → no indices");
+    }
+
+    /// When `count` exceeds the line count, every line is reachable and the
+    /// indices are non-decreasing (later samples repeat the tail). `build_schedule`
+    /// already cycles FENs, so duplicate selections are harmless.
+    #[test]
+    fn stride_indices_when_count_exceeds_lines() {
+        let idx = stride_indices(3, 6);
+        assert_eq!(idx.len(), 6);
+        assert_eq!(idx[0], 0);
+        assert!(idx.iter().all(|&i| i < 3), "every index in [0, 3)");
+        assert!(
+            idx.windows(2).all(|w| w[0] <= w[1]),
+            "indices are non-decreasing"
+        );
     }
 
     fn outcome(game_outcome: f32) -> DualGameOutcome {
