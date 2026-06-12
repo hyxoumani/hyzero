@@ -95,9 +95,12 @@ echo "Resume: ${RESUME_FROM:-random init (no checkpoint)}"
 # Decisive-start curriculum: bias self-play toward decisively-winnable starts
 # (white-absolute material |Δ| ≥ 3) to fight value-signal starvation (self-play
 # is ~92.6% draws, ~63.5% of them by repetition). Generated from the base starts
-# file into data/decisive_starts.txt (~70% imbalanced + 30% original-distribution
-# for diversity). Idempotent and cheap; deterministic given the fixed seed. The
-# base data/starting_positions.txt is never modified. Only swap STARTS_FILE to the
+# file into data/decisive_starts.txt (~55% imbalanced + ~25% original-distribution
+# for diversity + ~20% near-mate conversion starts walked back from
+# data/mate_puzzles_v2.pkl, picked up automatically via the generator's default
+# --mate-puzzles path; if that file is absent the share is redistributed).
+# Idempotent and cheap; deterministic given the fixed seed. The base
+# data/starting_positions.txt is never modified. Only swap STARTS_FILE to the
 # curriculum when generation succeeds — otherwise keep the original starts.
 DECISIVE_STARTS_FILE="data/decisive_starts.txt"
 if [ -n "$STARTS_FILE" ] && [ -f "$STARTS_FILE" ]; then
