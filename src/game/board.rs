@@ -465,8 +465,17 @@ impl GameBoard {
             return false;
         }
 
-        // Check if king can escape
-        let mut king_moves = self.get_move_mask(
+        // Check if king can escape.
+        //
+        // Each candidate escape square must be evaluated against the occupancy
+        // *after* the king has left its current square. Testing against the
+        // original `self.combined_pieces` leaves the king on the board, where it
+        // blocks the checking slider's own ray — so the square directly behind
+        // the king reads as "safe" and a real slider mate is misclassified as
+        // "check" (xray bug). `validate_move` clones, applies the move (handling
+        // any capture on the destination), and recomputes attackers against the
+        // post-move occupancy, which is exactly the recompute we need here.
+        let king_moves = self.get_move_mask(
             king_sq,
             color,
             PieceType::King,
@@ -474,19 +483,23 @@ impl GameBoard {
             self.white_pieces,
             self.black_pieces,
         );
-        while king_moves != 0 {
-            let escape_sq = king_moves.trailing_zeros() as usize;
-            if self.get_attackers(
-                escape_sq,
-                opp_color,
+        for escape_sq in BitIterator::new(king_moves) {
+            let escape_move = Move {
+                from: Square::from(king_sq as u8),
+                to: Square::from(escape_sq as u8),
+                promotion_piece_type: None,
+                castle_option: None,
+                en_passant: false,
+            };
+            if self.validate_move(
+                escape_move,
+                color,
                 self.combined_pieces,
                 self.white_pieces,
                 self.black_pieces,
-            ) == 0
-            {
+            ) {
                 return false;
             }
-            king_moves &= king_moves - 1;
         }
 
         // Double check = must move king, and we already checked king can't escape
@@ -1499,6 +1512,105 @@ mod tests {
             !board.calculate_checkmate(Color::White),
             "white should NOT be checkmated when king has escape squares"
         );
+    }
+
+    // --- Slider-mate xray regression (calculate_checkmate) ---
+    //
+    // Before the king-escape occupancy fix, escape squares were tested against
+    // the original occupancy with the king still on its square. The king blocked
+    // the checking slider's own ray, so the square directly behind the king read
+    // as "safe" and these real slider mates were misclassified as "check".
+    // Each FEN below is a confirmed checkmate (verified with python-chess); they
+    // span back-rank, queen, rook, and bishop geometries and fail without the fix.
+
+    fn assert_checkmate(fen: &str) {
+        let (mut board, color) = board_from_fen_unwrap(fen);
+        assert_eq!(
+            board.game_status(color),
+            "checkmate",
+            "expected checkmate for FEN: {fen}"
+        );
+    }
+
+    fn assert_not_checkmate(fen: &str) {
+        let (mut board, color) = board_from_fen_unwrap(fen);
+        assert_ne!(
+            board.game_status(color),
+            "checkmate",
+            "expected NON-checkmate for FEN: {fen}"
+        );
+    }
+
+    #[test]
+    fn test_back_rank_rook_mate_is_checkmate() {
+        // Back-rank mate: black king g8 boxed by own pawns, white rook on a8.
+        assert_checkmate("R5k1/5ppp/8/8/8/8/8/6K1 b - - 0 1");
+    }
+
+    #[test]
+    fn test_rook_mate_behind_king_is_checkmate() {
+        // King on b1 cornered; rooks deliver mate along rank 1 (square behind king
+        // on the checking ray previously read "safe" due to the xray bug).
+        assert_checkmate("8/8/8/8/8/8/1r6/1kr3K1 w - - 1 2");
+    }
+
+    #[test]
+    fn test_queen_diagonal_mate_is_checkmate() {
+        // Two black queens mate the boxed white king on e8.
+        assert_checkmate("3qK3/8/k7/3q4/8/8/8/8 w - - 1 2");
+    }
+
+    #[test]
+    fn test_queen_file_mate_is_checkmate() {
+        // Black queen + king coordinate a mate against the white king.
+        assert_checkmate("8/8/8/k7/3q4/4K3/8/3q4 w - - 1 2");
+    }
+
+    #[test]
+    fn test_double_rook_ladder_mate_is_checkmate() {
+        // Rook ladder mate against the white king in the corner area.
+        assert_checkmate("k7/7r/6r1/8/8/7K/8/8 w - - 1 2");
+    }
+
+    #[test]
+    fn test_pinned_defender_cannot_block_is_checkmate() {
+        // White king a1 in check from black bishop e5 along the a1-h8 diagonal.
+        // The white knight on b3 could jump to d4 to block, but it is absolutely
+        // pinned on the b-file by the black rook on b8 and may not move. King
+        // escapes a2/b1/b2 are all covered. This is a true mate; the pinned piece
+        // must NOT be counted as a defender.
+        assert_checkmate("1r5k/8/8/4b3/8/1N6/7r/K6r w - - 0 1");
+    }
+
+    #[test]
+    fn test_king_escapes_along_ray_off_check_is_not_checkmate() {
+        // White king e1 checked by a rook on e8 down the e-file. The king can
+        // step to d1/f1 (off the ray). With the xray bug, behind-king squares
+        // looked safe for the wrong reason; this verifies a genuine escape still
+        // classifies as non-mate (not a false positive).
+        assert_not_checkmate("4r2k/8/8/8/8/8/8/4K3 w - - 0 1");
+    }
+
+    #[test]
+    fn test_defender_can_block_check_is_not_checkmate() {
+        // White king e1 checked by black rook e8. White rook on a2 can interpose
+        // on e2 — not mate.
+        assert_not_checkmate("4r2k/8/8/8/8/8/R7/4K3 w - - 0 1");
+    }
+
+    #[test]
+    fn test_defender_can_capture_checker_is_not_checkmate() {
+        // White king e1 checked by black rook e2; white rook on a2 captures the
+        // checker on e2 — not mate.
+        assert_not_checkmate("7k/8/8/8/8/8/R3r3/4K3 w - - 0 1");
+    }
+
+    #[test]
+    fn test_pinned_defender_can_capture_along_pin_is_not_checkmate() {
+        // White king e1 checked by black queen on e2 (adjacent, down the e-file).
+        // The white rook on e3 is pinned on the e-file by the queen, but it can
+        // still capture the checking queen on e2 along the pin line — not mate.
+        assert_not_checkmate("7k/8/8/8/8/4R3/4q3/4K3 w - - 0 1");
     }
 
     #[test]
