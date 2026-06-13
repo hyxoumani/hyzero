@@ -10,6 +10,7 @@ use crate::data::{
 use crate::data::encoding::flip_action;
 use crate::game::board::GameResult;
 use crate::game::fen::board_from_fen;
+use crate::game::mate_solver::find_forced_mate;
 use crate::game::{GameBoard, Move, Player};
 use crate::mcts::evaluator::Evaluator;
 use crate::mcts::tree::{MCTSConfig, MCTSTree};
@@ -167,6 +168,25 @@ pub fn temperature_moves_override() -> Option<u32> {
         .ok()
         .and_then(|v| v.parse::<u32>().ok())
         .map(|n| n.clamp(1, 200))
+}
+
+/// Maximum ply depth for the root forced-mate solver. `HYZERO_ROOT_MATE_SOLVER_PLIES`,
+/// default 0 (DISABLED), clamped to [0, 7]. Counted in half-moves: mate-in-1 = 1,
+/// mate-in-2 = 3, mate-in-3 = 5. Read per-call (TestEnvGuard-compatible), parsed
+/// like the sibling knobs above.
+///
+/// When > 0, both `play_game` (self-play) and `play_game_dual` (eval/arena) call
+/// `find_forced_mate` at each move-selection point and, on a hit, play the mating
+/// move directly — overriding MCTS selection. In `play_game` the stored policy
+/// target for that ply is forced one-hot onto the mating move so the network can
+/// distill the solver's choice (see the call site). Default 0 leaves both code
+/// paths bit-identical to before this knob existed.
+fn root_mate_solver_plies() -> u32 {
+    std::env::var("HYZERO_ROOT_MATE_SOLVER_PLIES")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .map(|n| n.clamp(0, 7))
+        .unwrap_or(0)
 }
 
 /// Compute the self-play temperature for `turn_count` given the
@@ -519,14 +539,33 @@ pub async fn play_game_dual(
         tree.run_simulations(evaluator.as_ref()).await;
 
         // Use near-greedy temperature for eval games (no exploration needed).
-        let selected_action = tree.select_action(0.01);
+        let mut selected_action = tree.select_action(0.01);
 
         // Flip action back to absolute coordinates before applying to the board.
-        let absolute_action = if side_to_move == Color::Black {
+        let mut absolute_action = if side_to_move == Color::Black {
             flip_action(selected_action as usize) as ActionIndex
         } else {
             selected_action
         };
+
+        // Root forced-mate override (HYZERO_ROOT_MATE_SOLVER_PLIES > 0). Eval/arena
+        // games keep no training targets, so we only override the chosen move when
+        // the side to move has a forced mate within the configured ply budget.
+        let mate_plies = root_mate_solver_plies();
+        if mate_plies > 0 {
+            if let Some(mate_mv) = find_forced_mate(&board, side_to_move, mate_plies) {
+                let mate_absolute = move_to_action(&mate_mv);
+                let mate_selected = if side_to_move == Color::Black {
+                    flip_action(mate_absolute as usize) as ActionIndex
+                } else {
+                    mate_absolute
+                };
+                if legal_actions.contains(&mate_selected) {
+                    selected_action = mate_selected;
+                    absolute_action = mate_absolute;
+                }
+            }
+        }
 
         let snapshot = board_to_snapshot(&board);
 
@@ -690,7 +729,7 @@ pub async fn play_game(
         tree.run_simulations(evaluator.as_ref()).await;
 
         // Extract results
-        let visit_distribution = tree.extract_visit_distribution();
+        let mut visit_distribution = tree.extract_visit_distribution();
         let root_value = tree.root_value();
 
         // Optional MCTS diagnostics for the replay viewer (raw visits, priors,
@@ -710,14 +749,45 @@ pub async fn play_game(
         // window when HYZERO_TEMP_ANNEAL is on; hard step to 0.01 when off).
         let temperature = selfplay_temperature(turn_count, config.temperature_moves);
         // selected_action is in current-player (flipped) coordinate space for Black.
-        let selected_action = tree.select_action(temperature);
+        let mut selected_action = tree.select_action(temperature);
 
         // Flip action back to absolute coordinates before applying to the board.
-        let absolute_action = if side_to_move == Color::Black {
+        let mut absolute_action = if side_to_move == Color::Black {
             flip_action(selected_action as usize) as ActionIndex
         } else {
             selected_action
         };
+
+        // Root forced-mate override (HYZERO_ROOT_MATE_SOLVER_PLIES > 0). If the
+        // side to move has a forced mate within the configured ply budget, play
+        // that move directly instead of the MCTS choice. MCTS still ran above, so
+        // `root_value` and replay diagnostics stay valid. The training policy
+        // target is forced ONE-HOT onto the mating move (visit_distribution is
+        // parallel to `legal_actions`, like `extract_visit_distribution`), so the
+        // network distills the solver's choice even though MCTS never visited it.
+        let mate_plies = root_mate_solver_plies();
+        if mate_plies > 0 {
+            if let Some(mate_mv) = find_forced_mate(&board, side_to_move, mate_plies) {
+                // The mating move is in absolute board coordinates; convert to the
+                // current-player (flipped-for-Black) action space used by
+                // `legal_actions` / the policy target.
+                let mate_absolute = move_to_action(&mate_mv);
+                let mate_selected = if side_to_move == Color::Black {
+                    flip_action(mate_absolute as usize) as ActionIndex
+                } else {
+                    mate_absolute
+                };
+                if let Some(idx) = legal_actions.iter().position(|&a| a == mate_selected) {
+                    selected_action = mate_selected;
+                    absolute_action = mate_absolute;
+                    // One-hot policy target onto the mating move (same length and
+                    // ordering as `legal_actions`).
+                    let mut forced = vec![0.0f32; legal_actions.len()];
+                    forced[idx] = 1.0;
+                    visit_distribution = forced;
+                }
+            }
+        }
 
         if let Some(diag) = diagnostics {
             replay_records.push(ReplayRecord {
@@ -2079,6 +2149,56 @@ mod tests {
             std::env::set_var("HYZERO_TEMPERATURE_MOVES", "9999");
         }
         assert_eq!(temperature_moves_override(), Some(200));
+    }
+
+    /// Unset (or unparseable) HYZERO_ROOT_MATE_SOLVER_PLIES disables the solver
+    /// (returns 0). The self-play / eval move-selection hooks are gated on
+    /// `mate_plies > 0`, so a 0 here leaves both code paths bit-identical to
+    /// before the knob existed.
+    #[test]
+    fn root_mate_solver_plies_disabled_when_unset_or_unparseable() {
+        let _env = TestEnvGuard::new(&["HYZERO_ROOT_MATE_SOLVER_PLIES"]);
+        // SAFETY: env mutation serialized by TestEnvGuard for this test's duration.
+        unsafe {
+            std::env::remove_var("HYZERO_ROOT_MATE_SOLVER_PLIES");
+        }
+        assert_eq!(root_mate_solver_plies(), 0, "unset must disable the solver");
+        // SAFETY: still under the same TestEnvGuard.
+        unsafe {
+            std::env::set_var("HYZERO_ROOT_MATE_SOLVER_PLIES", "not-a-number");
+        }
+        assert_eq!(
+            root_mate_solver_plies(),
+            0,
+            "unparseable input must disable the solver"
+        );
+    }
+
+    /// A valid HYZERO_ROOT_MATE_SOLVER_PLIES value is parsed as-is.
+    #[test]
+    fn root_mate_solver_plies_parses_valid_value() {
+        let _env = TestEnvGuard::new(&["HYZERO_ROOT_MATE_SOLVER_PLIES"]);
+        // SAFETY: env mutation serialized by TestEnvGuard for this test's duration.
+        unsafe {
+            std::env::set_var("HYZERO_ROOT_MATE_SOLVER_PLIES", "5");
+        }
+        assert_eq!(root_mate_solver_plies(), 5);
+    }
+
+    /// Out-of-range HYZERO_ROOT_MATE_SOLVER_PLIES values clamp into [0, 7].
+    #[test]
+    fn root_mate_solver_plies_clamps_out_of_range() {
+        let _env = TestEnvGuard::new(&["HYZERO_ROOT_MATE_SOLVER_PLIES"]);
+        // SAFETY: env mutation serialized by TestEnvGuard for this test's duration.
+        unsafe {
+            std::env::set_var("HYZERO_ROOT_MATE_SOLVER_PLIES", "99");
+        }
+        assert_eq!(root_mate_solver_plies(), 7, "above-range clamps to 7");
+        // SAFETY: still under the same TestEnvGuard.
+        unsafe {
+            std::env::set_var("HYZERO_ROOT_MATE_SOLVER_PLIES", "0");
+        }
+        assert_eq!(root_mate_solver_plies(), 0, "0 stays 0 (disabled)");
     }
 
     /// A set HYZERO_TEMPERATURE_MOVES reaches the self-play GameConfig: the

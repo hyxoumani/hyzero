@@ -2,6 +2,7 @@ pub mod board;
 pub mod externplayer;
 pub mod fen;
 pub mod history;
+pub mod mate_solver;
 pub mod perft;
 pub mod playerobj;
 
