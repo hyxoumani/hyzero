@@ -64,3 +64,24 @@ e1d2 138. e6d5 d1e3 139. d5a2 b6b7 140. h1h2 b7c8 141. a2c4 d2e1q 142. c4b3
 e3g2 143. h2g2 c8b8 144. b3f7 e1g3 145. f7d5 g3f2 146. g2h1 b8a7 147. d5b7 a7b8
 148. h1g2 f2b6 149. b7f3 b6c7 150. g2f2 c7h2 1/2-1/2
 
+[Event "Selfplay model_v1"]
+[White "selfplay_white"]
+[Black "selfplay_black"]
+[Result "1-0"]
+
+1. b2b3 h7h5 2. e2e3 h8h7 3. c2c4 a7a6 4. b1c3 b7b5 5. g2g3 g7g6 6. f1d3 c7c6
+7. g3g4 h5h4 8. g1f3 d8b6 9. c3b1 f7f6 10. c4b5 g8h6 11. b5a6 h7h8 12. a2a4
+c8b7 13. d3c2 b7a6 14. a1a2 e8f7 15. c1a3 d7d5 16. a2b2 c6c5 17. g4g5 b6b4 18. f3g1
+b4b5 19. d1g4 b5d7 20. g4e2 a8a7 21. e1f1 f7e6 22. e2a6 a7a6 23. g5h6 h8g8 24. h6h7
+a6c6 25. d2d3 c6c7 26. h7g8n e6f7 27. b3b4 c7c8 28. g1h3 c8c7 29. b4c5 e7e5
+30. h3g5 f7e8 31. h2h3 c7c6 32. b1c3 f6g5 33. g8f6 e8d8 34. f1e2 d7f5 35. b2b5
+b8d7 36. h1b1 d7b8 37. f6e4 f8h6 38. b1b3 b8d7 39. e4f6 d7f6 40. b3b2 f5d3 41. c2d3
+c6c8 42. e2e1 f6e8 43. d3g6 h6f8 44. b2d2 d8d7 45. b5b1 e8g7 46. g6e4 d7c7 47. c3d1
+d5e4 48. b1b2 c8e8 49. b2b7 c7c8 50. d2d7 e8e6 51. d7c7 c8d8 52. e1e2 d8e8 53. b7a7
+e8d8 54. a7a5 e6c6 55. a3b4 c6c5 56. b4c3 f8d6 57. f2f3 c5c4 58. c3e5 d6a3 59. d1c3
+g7h5 60. c7c8q d8d7 61. a5a8 a3b4 62. e5c7 h5g7 63. f3f4 g7h5 64. c3b5 h5g3
+65. e2f2 b4d2 66. a8b8 d7c6 67. c7d6 c6d5 68. d6b4 g3f1 69. b8b7 c4c2 70. b7b6
+f1g3 71. b5a3 g3h5 72. a3c2 g5g4 73. c8c4 d2e3 74. f2e3 h5g7 75. b6b7 d5e6 76. f4f5
+g7f5 77. e3f2 f5e3 78. b7a7 e6f5 79. b4c3 f5f4 80. a7a5 e3c4 81. c2e1 c4b2 82. e1g2
+1-0
+
