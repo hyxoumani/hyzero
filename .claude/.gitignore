@@ -1,2 +1,4 @@
 settings.local.json
 state/
+!state/
+!state/**
