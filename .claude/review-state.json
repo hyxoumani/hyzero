@@ -1,0 +1,18 @@
+{
+  "last_reviewed_sha": "bde4f9be00d1c59b648a4f3c8e59d63c9121d99c",
+  "last_reviewed_short": "bde4f9b",
+  "last_reviewed_branch": "claude/modest-rubin-7mzysd",
+  "last_reviewed_date": "2026-06-25",
+  "commits_reviewed": [
+    {
+      "sha": "bde4f9b",
+      "subject": "logs: refresh baseline, eval, and self-play artifacts"
+    },
+    {
+      "sha": "06e6129",
+      "subject": "docs: restructure wiki into fresh topic pages"
+    }
+  ],
+  "findings": "none",
+  "scope": "docs/wiki restructure + log refresh; no source changes"
+}
