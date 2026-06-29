@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "last_reviewed_sha": "bde4f9be00d1c59b648a4f3c8e59d63c9121d99c",
+  "last_reviewed_branch": "claude/modest-rubin-yhf0ai",
+  "reviewed_through": "elo-promotion change set (7b53e5d..bde4f9b)",
+  "open_findings": {
+    "high": 3,
+    "med": 5,
+    "low": 2
+  },
+  "notes": "Findings delivered via PushNotification on 2026-06-29. Next routine run: start from the commit after last_reviewed_sha."
+}
