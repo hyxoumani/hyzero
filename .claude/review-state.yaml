@@ -1,0 +1,25 @@
+# Tracks which commits have been reviewed by the /loop review routine.
+# Keyed by branch; `last_reviewed_sha` is the most recent commit that has been
+# bug-reviewed. Next run only needs to review commits after this SHA.
+version: 1
+branches:
+  claude/modest-rubin-swjx1u:
+    last_reviewed_sha: bde4f9be00d1c59b648a4f3c8e59d63c9121d99c
+    last_reviewed_at: 2026-06-30
+    scope_covered:
+      - "7b5dd87..bde4f9b: elo-ladder / elo-promotion feature"
+      - "5f30ea8: mcts Gumbel-Top-K + sequential halving root selection"
+    findings_summary:
+      high:
+        - "scripts/run_baseline.sh:215-219 — baseline score collapses by -75 when EVAL_CYCLES>0 but ladder_match line missing"
+        - "src/selfplay/evaluation.rs:422-428,460-466 — PGN game numbering duplicates across pool opponents"
+        - "src/selfplay/evaluation.rs:346-376 — silent version drop when pool nonempty but opponent_handle unset"
+        - "src/mcts/tree.rs ~668 — caller picks most-visited child instead of Gumbel argmax g+logit+sigma(q)"
+        - "src/mcts/gumbel.rs:31 — unseeded rand::rng() breaks reproducibility"
+      medium:
+        - "src/mcts/tree.rs ~554 — sims_per_candidate integer-division drops phases in low-budget regime"
+        - "src/mcts/tree.rs ~614,620 — forced-root sign convention on terminal/unexpanded child (inherited from PUCT)"
+        - "src/mcts/gumbel.rs:48 — sigma_q uses survivor-set max_visits, not root-wide maxN"
+      low:
+        - "src/mcts/gumbel.rs:57 — default_top_k(0) returns 0 (dead path, latent foot-gun)"
+        - "src/bin/selfplay.rs:209-234,412-437 — .expect() panics on Python InferenceServer init failure"
