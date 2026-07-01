@@ -1,0 +1,25 @@
+{
+  "last_reviewed_sha": "bde4f9be00d1c59b648a4f3c8e59d63c9121d99c",
+  "reviewed_at": "2026-07-01",
+  "reviewer": "scheduled-routine (analyst-dispatched bug review)",
+  "branch": "claude/modest-rubin-z3zhk5",
+  "range_reviewed": "0ab40d4^..bde4f9b",
+  "scope": "elo-promotion feature (research/plan/impl/logs) + iter-2 policy entropy + iter-5 cosine LR",
+  "findings_summary": {
+    "confirmed_high": [
+      "docs/wiki/elo-ladder-eval.md:108-109 and champion-pool-promotion.md:52 — doc drift: 'first promotion switches gating to Elo permanently' is false. pool.rs:33 excludes the current champion's own version, so the win-rate bootstrap path keeps firing until the SECOND promotion lands.",
+      "src/selfplay/champion.rs:93-107 — archive_files does not enumerate pre-existing best_v*.pt on startup, so archive_depth pruning under-prunes across restarts (masked in practice by run_baseline.sh wiping archives on startup)."
+    ],
+    "plausible_medium": [
+      "src/selfplay/evaluation.rs:264 + scripts/run_baseline.sh:210-218,251 — candidate_elo is reset per cycle but baseline SCORE consumes only the LAST cycle's value as if it were cumulative progress; a run that swept +200 mid-run then drew at the end scores identically to a flat run.",
+      "src/selfplay/evaluation.rs:395-410 — load_weights on shared opp_handle races with opponent InferenceBatcher's in-flight root_setup_batch; no lock in python/hyzero/inference/server.py:127-144 around the state-dict swap. Likely benign due to sequential .await ordering but design has no explicit synchronization."
+    ],
+    "cosmetic": [
+      "src/selfplay/evaluation.rs:277-281 — spurious 'WARN: pool empty despite champion_version=1 > 0' fires every eval cycle in the default resume-from-checkpoint path (consequence of the doc-drift bug above).",
+      "src/bin/selfplay.rs:257-266 — resume checkpoint that does not match any best_v*.pt still sets starting_version=1, so PGN champion labels can be misleading."
+    ],
+    "gaps": [
+      "iter-2 (7b5dd87 policy entropy) and iter-5 (aff97fb cosine LR): env-var exports added to run_baseline.sh with no end-to-end regression test asserting the vars are consumed by the trainer path."
+    ]
+  }
+}
