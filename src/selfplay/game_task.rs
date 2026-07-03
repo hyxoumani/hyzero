@@ -347,7 +347,7 @@ fn starting_positions() -> &'static Vec<String> {
 
 /// Pick a random starting FEN from the configured list, or `None` if no
 /// diverse-starts file is configured or it is empty.
-fn pick_starting_position() -> Option<&'static str> {
+pub(crate) fn pick_starting_position() -> Option<&'static str> {
     let starts = starting_positions();
     if starts.is_empty() {
         return None;

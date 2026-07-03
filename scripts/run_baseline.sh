@@ -195,6 +195,12 @@ export HYZERO_MATERIAL_SHAPING_SCALE=3.0
 # because a +0.9 shaped repetition earned ~90% of mating. 0.3 sharpens the
 # mate-vs-shuffle gradient while keeping the defender's prefer-repetition signal.
 export HYZERO_SHAPING_REP_DISCOUNT=0.3
+# Mirrored (antithetic) eval start pairs: each eval-ladder slot samples ONE
+# curriculum start and plays it twice with the challenger's color swapped, so
+# both games share the identical position. Reduces win_rate/candidate_elo
+# variance without changing the total game count or the promotion gates. Bench
+# opts in here; the code default stays OFF.
+export HYZERO_EVAL_MIRRORED_STARTS=${HYZERO_EVAL_MIRRORED_STARTS:-1}
 export HYZERO_LR_SCHEDULE=cosine
 # Cosine T_max tracks the run length so the LR completes one full decay over the
 # run instead of a fixed 14000 steps. Throughput is ~18 trainer steps/min at the

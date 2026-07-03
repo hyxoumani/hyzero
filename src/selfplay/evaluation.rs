@@ -5,11 +5,18 @@ use async_trait::async_trait;
 use pyo3::prelude::*;
 use tokio::sync::watch;
 
+use std::sync::OnceLock;
+
 use crate::data::{ActionIndex, BoardObservation, HiddenState, Policy, NUM_ACTIONS};
+use crate::game::board::GameResult;
+use crate::game::fen::board_from_fen;
+use crate::game::{GameBoard, Player};
 use crate::mcts::evaluator::Evaluator;
 use crate::selfplay::champion::ChampionStore;
-use crate::selfplay::game_task::{play_game_dual, DualGameOutcome, GameConfig};
-use crate::PrecomputedItems;
+use crate::selfplay::game_task::{
+    pick_starting_position, play_game_dual, play_game_dual_from, DualGameOutcome, GameConfig,
+};
+use crate::{Color, PrecomputedItems};
 
 // --- Eval-side adjudication (HYZERO_EVAL_ADJUDICATE* gates) ---
 //
@@ -42,6 +49,110 @@ fn eval_adjudication_margin() -> i32 {
         .and_then(|v| v.parse::<i32>().ok())
         .filter(|&m| m >= 1)
         .unwrap_or(5)
+}
+
+// --- Mirrored (antithetic) eval start pairs (HYZERO_EVAL_MIRRORED_STARTS) ---
+//
+// When enabled, each of the `games_per_side` ladder slots becomes a PAIR: one
+// curriculum start is sampled once and played twice with the challenger's color
+// swapped, so both games of a pair begin from the identical position. This is an
+// antithetic-variates scheme that correlates the start within a pair to reduce
+// win_rate/candidate_elo variance without changing the total game count, the
+// aggregation, the Elo math, or either promotion gate. DEFAULT OFF: with the gate
+// off, the two legacy `play_game_dual` loops are byte-identical to before.
+
+/// Pure parse helper for `HYZERO_EVAL_MIRRORED_STARTS`. Enabled only when the
+/// (trimmed, lowercased) value is `"1"` or `"true"`; anything else (including
+/// unset/`None`) is OFF. Extracted from the cached gate so env-parse tests can
+/// exercise it without tripping the process-wide `OnceLock`.
+fn parse_mirrored_starts(value: Option<&str>) -> bool {
+    match value {
+        Some(v) => {
+            let s = v.trim().to_ascii_lowercase();
+            s == "1" || s == "true"
+        }
+        None => false,
+    }
+}
+
+/// Cached env-gate: true when `HYZERO_EVAL_MIRRORED_STARTS` is `"1"`/`"true"`.
+/// Read once per process via `OnceLock`, mirroring the other self-play knobs.
+fn eval_mirrored_starts_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        parse_mirrored_starts(std::env::var("HYZERO_EVAL_MIRRORED_STARTS").ok().as_deref())
+    })
+}
+
+/// Sample ONE curriculum start for a mirrored eval pair, reusing the self-play
+/// `pick_starting_position` + `board_from_fen` path. Mirrors
+/// `init_self_play_board`: an already-terminal or unparseable sampled FEN falls
+/// back to the standard initial position so eval never aborts on a bad start.
+/// Sampled exactly once per pair (never per game) so both games of the pair share
+/// the identical board.
+fn sample_eval_start(precomputed: &Arc<PrecomputedItems>) -> (GameBoard, Color, Option<String>) {
+    if let Some(fen) = pick_starting_position() {
+        match board_from_fen(fen, precomputed.clone()) {
+            Ok((board, side_to_move, _fullmove)) => {
+                if board.result() == GameResult::Ongoing {
+                    return (board, side_to_move, Some(fen.to_string()));
+                }
+                eprintln!(
+                    "[eval] WARN: sampled start FEN is already terminal; \
+                     falling back to standard start"
+                );
+            }
+            Err(e) => {
+                eprintln!(
+                    "[eval] WARN: failed to parse start FEN {fen:?}: {e}; \
+                     falling back to standard start"
+                );
+            }
+        }
+    }
+    let player1 = Player::init_player(true);
+    let player2 = Player::init_player(false);
+    let board = GameBoard::init_game_board(precomputed.clone(), player1, player2);
+    (board, Color::White, None)
+}
+
+/// A mirrored evaluation pair: one shared start played twice with the
+/// challenger's color swapped. `board_a`/`board_b` are clones of the SAME sampled
+/// position, so both games begin identically; only the White/Black role differs.
+/// Game A = challenger White vs. opponent Black; Game B = opponent White vs.
+/// challenger Black.
+struct MirroredPair {
+    white_a: Arc<dyn Evaluator>,
+    black_a: Arc<dyn Evaluator>,
+    board_a: GameBoard,
+    white_b: Arc<dyn Evaluator>,
+    black_b: Arc<dyn Evaluator>,
+    board_b: GameBoard,
+    side_to_move: Color,
+    starting_fen: Option<String>,
+}
+
+/// Build a mirrored pair from a single sampled start: the challenger takes White
+/// in game A and Black in game B; the opponent (bootstrap champion or pool
+/// member) takes the complementary color. The board is sampled once and cloned so
+/// the two games are true antithetic variates on the start.
+fn build_mirrored_pair(
+    precomputed: &Arc<PrecomputedItems>,
+    challenger: &Arc<dyn Evaluator>,
+    opponent: &Arc<dyn Evaluator>,
+) -> MirroredPair {
+    let (board_a, side_to_move, starting_fen) = sample_eval_start(precomputed);
+    let board_b = board_a.clone();
+    MirroredPair {
+        white_a: challenger.clone(),
+        black_a: opponent.clone(),
+        board_a,
+        white_b: opponent.clone(),
+        black_b: challenger.clone(),
+        board_b,
+        side_to_move,
+        starting_fen,
+    }
 }
 
 /// Evaluator that returns uniform policy and zero value — a pure random baseline.
@@ -372,59 +483,127 @@ impl EvaluationTask {
                 }
                 let champion_eval = self.champion_store.champion().await;
 
-                // games_per_side games with challenger as White, champion as Black.
-                for game_idx in 0..gps {
-                    let outcome = play_game_dual(
-                        self.precomputed.clone(),
-                        self.challenger_evaluator.clone(),
-                        champion_eval.clone(),
-                        game_config.clone(),
-                    )
-                    .await;
+                if eval_mirrored_starts_enabled() {
+                    // Mirrored pairs: sample one start per pair and play it twice
+                    // with the challenger's color swapped. Total games unchanged
+                    // (2*gps); only the start is correlated within a pair.
+                    for pair in 0..gps {
+                        let mp = build_mirrored_pair(
+                            &self.precomputed,
+                            &self.challenger_evaluator,
+                            &champion_eval,
+                        );
 
-                    Self::write_pgn_game(
-                        &self.config.eval_pgn_path,
-                        self.cycle,
-                        game_idx + 1,
-                        &format!("challenger v{challenger_version}"),
-                        &format!("champion v{champion_version}"),
-                        &outcome,
-                    );
+                        // Game A: challenger White, champion Black.
+                        let outcome_a = play_game_dual_from(
+                            mp.white_a,
+                            mp.black_a,
+                            game_config.clone(),
+                            mp.board_a,
+                            mp.side_to_move,
+                            mp.starting_fen.clone(),
+                        )
+                        .await;
 
-                    match outcome.game_outcome {
-                        o if o > 0.5 => ladder_wins += 1,
-                        o if o < -0.5 => ladder_losses += 1,
-                        _ => ladder_draws += 1,
+                        Self::write_pgn_game(
+                            &self.config.eval_pgn_path,
+                            self.cycle,
+                            pair * 2 + 1,
+                            &format!("challenger v{challenger_version}"),
+                            &format!("champion v{champion_version}"),
+                            &outcome_a,
+                        );
+
+                        match outcome_a.game_outcome {
+                            o if o > 0.5 => ladder_wins += 1,
+                            o if o < -0.5 => ladder_losses += 1,
+                            _ => ladder_draws += 1,
+                        }
+                        self.total_games_since_last_promotion += 1;
+
+                        // Game B: champion White, challenger Black (same start).
+                        let outcome_b = play_game_dual_from(
+                            mp.white_b,
+                            mp.black_b,
+                            game_config.clone(),
+                            mp.board_b,
+                            mp.side_to_move,
+                            mp.starting_fen,
+                        )
+                        .await;
+
+                        Self::write_pgn_game(
+                            &self.config.eval_pgn_path,
+                            self.cycle,
+                            pair * 2 + 2,
+                            &format!("champion v{champion_version}"),
+                            &format!("challenger v{challenger_version}"),
+                            &outcome_b,
+                        );
+
+                        let challenger_perspective = -outcome_b.game_outcome;
+                        match challenger_perspective {
+                            o if o > 0.5 => ladder_wins += 1,
+                            o if o < -0.5 => ladder_losses += 1,
+                            _ => ladder_draws += 1,
+                        }
+                        self.total_games_since_last_promotion += 1;
                     }
-                    self.total_games_since_last_promotion += 1;
-                }
+                } else {
+                    // games_per_side games with challenger as White, champion as Black.
+                    for game_idx in 0..gps {
+                        let outcome = play_game_dual(
+                            self.precomputed.clone(),
+                            self.challenger_evaluator.clone(),
+                            champion_eval.clone(),
+                            game_config.clone(),
+                        )
+                        .await;
 
-                // games_per_side games with champion as White, challenger as Black.
-                for game_idx in 0..gps {
-                    let outcome = play_game_dual(
-                        self.precomputed.clone(),
-                        champion_eval.clone(),
-                        self.challenger_evaluator.clone(),
-                        game_config.clone(),
-                    )
-                    .await;
+                        Self::write_pgn_game(
+                            &self.config.eval_pgn_path,
+                            self.cycle,
+                            game_idx + 1,
+                            &format!("challenger v{challenger_version}"),
+                            &format!("champion v{champion_version}"),
+                            &outcome,
+                        );
 
-                    Self::write_pgn_game(
-                        &self.config.eval_pgn_path,
-                        self.cycle,
-                        gps + game_idx + 1,
-                        &format!("champion v{champion_version}"),
-                        &format!("challenger v{challenger_version}"),
-                        &outcome,
-                    );
-
-                    let challenger_perspective = -outcome.game_outcome;
-                    match challenger_perspective {
-                        o if o > 0.5 => ladder_wins += 1,
-                        o if o < -0.5 => ladder_losses += 1,
-                        _ => ladder_draws += 1,
+                        match outcome.game_outcome {
+                            o if o > 0.5 => ladder_wins += 1,
+                            o if o < -0.5 => ladder_losses += 1,
+                            _ => ladder_draws += 1,
+                        }
+                        self.total_games_since_last_promotion += 1;
                     }
-                    self.total_games_since_last_promotion += 1;
+
+                    // games_per_side games with champion as White, challenger as Black.
+                    for game_idx in 0..gps {
+                        let outcome = play_game_dual(
+                            self.precomputed.clone(),
+                            champion_eval.clone(),
+                            self.challenger_evaluator.clone(),
+                            game_config.clone(),
+                        )
+                        .await;
+
+                        Self::write_pgn_game(
+                            &self.config.eval_pgn_path,
+                            self.cycle,
+                            gps + game_idx + 1,
+                            &format!("champion v{champion_version}"),
+                            &format!("challenger v{challenger_version}"),
+                            &outcome,
+                        );
+
+                        let challenger_perspective = -outcome.game_outcome;
+                        match challenger_perspective {
+                            o if o > 0.5 => ladder_wins += 1,
+                            o if o < -0.5 => ladder_losses += 1,
+                            _ => ladder_draws += 1,
+                        }
+                        self.total_games_since_last_promotion += 1;
+                    }
                 }
             } else {
                 // Elo-gate path: per-opponent ladder against archived champions.
@@ -501,83 +680,175 @@ impl EvaluationTask {
                         continue 'pool_loop;
                     }
 
-                    // games_per_side games challenger=White vs. this opponent.
-                    for game_idx in 0..gps {
-                        let outcome = play_game_dual(
-                            self.precomputed.clone(),
-                            self.challenger_evaluator.clone(),
-                            opp_eval.clone(),
-                            game_config.clone(),
-                        )
-                        .await;
+                    if eval_mirrored_starts_enabled() {
+                        // Mirrored pairs against this pool member: one shared start
+                        // per pair, played both colors. Game count, Elo updates, and
+                        // scored_games accounting are unchanged (2*gps per opponent).
+                        for pair in 0..gps {
+                            let mp = build_mirrored_pair(
+                                &self.precomputed,
+                                &self.challenger_evaluator,
+                                &opp_eval,
+                            );
 
-                        Self::write_pgn_game(
-                            &self.config.eval_pgn_path,
-                            self.cycle,
-                            game_idx + 1,
-                            &format!("challenger v{challenger_version}"),
-                            &format!("pool v{opponent_version}"),
-                            &outcome,
-                        );
+                            // Game A: challenger White vs. this opponent.
+                            let outcome_a = play_game_dual_from(
+                                mp.white_a,
+                                mp.black_a,
+                                game_config.clone(),
+                                mp.board_a,
+                                mp.side_to_move,
+                                mp.starting_fen.clone(),
+                            )
+                            .await;
 
-                        let challenger_score: f32 = if outcome.game_outcome > 0.5 {
-                            ladder_wins += 1;
-                            1.0
-                        } else if outcome.game_outcome < -0.5 {
-                            ladder_losses += 1;
-                            0.0
-                        } else {
-                            ladder_draws += 1;
-                            0.5
-                        };
-                        candidate_elo = crate::selfplay::elo::update_rating(
-                            candidate_elo,
-                            opp_initial,
-                            challenger_score,
-                            k,
-                        );
-                        scored_games.push(challenger_score);
-                        self.total_games_since_last_promotion += 1;
-                    }
+                            Self::write_pgn_game(
+                                &self.config.eval_pgn_path,
+                                self.cycle,
+                                pair * 2 + 1,
+                                &format!("challenger v{challenger_version}"),
+                                &format!("pool v{opponent_version}"),
+                                &outcome_a,
+                            );
 
-                    // games_per_side games opponent=White vs. challenger=Black.
-                    for game_idx in 0..gps {
-                        let outcome = play_game_dual(
-                            self.precomputed.clone(),
-                            opp_eval.clone(),
-                            self.challenger_evaluator.clone(),
-                            game_config.clone(),
-                        )
-                        .await;
+                            let challenger_score: f32 = if outcome_a.game_outcome > 0.5 {
+                                ladder_wins += 1;
+                                1.0
+                            } else if outcome_a.game_outcome < -0.5 {
+                                ladder_losses += 1;
+                                0.0
+                            } else {
+                                ladder_draws += 1;
+                                0.5
+                            };
+                            candidate_elo = crate::selfplay::elo::update_rating(
+                                candidate_elo,
+                                opp_initial,
+                                challenger_score,
+                                k,
+                            );
+                            scored_games.push(challenger_score);
+                            self.total_games_since_last_promotion += 1;
 
-                        Self::write_pgn_game(
-                            &self.config.eval_pgn_path,
-                            self.cycle,
-                            gps + game_idx + 1,
-                            &format!("pool v{opponent_version}"),
-                            &format!("challenger v{challenger_version}"),
-                            &outcome,
-                        );
+                            // Game B: opponent White vs. challenger Black (same start).
+                            let outcome_b = play_game_dual_from(
+                                mp.white_b,
+                                mp.black_b,
+                                game_config.clone(),
+                                mp.board_b,
+                                mp.side_to_move,
+                                mp.starting_fen,
+                            )
+                            .await;
 
-                        let challenger_perspective = -outcome.game_outcome;
-                        let challenger_score: f32 = if challenger_perspective > 0.5 {
-                            ladder_wins += 1;
-                            1.0
-                        } else if challenger_perspective < -0.5 {
-                            ladder_losses += 1;
-                            0.0
-                        } else {
-                            ladder_draws += 1;
-                            0.5
-                        };
-                        candidate_elo = crate::selfplay::elo::update_rating(
-                            candidate_elo,
-                            opp_initial,
-                            challenger_score,
-                            k,
-                        );
-                        scored_games.push(challenger_score);
-                        self.total_games_since_last_promotion += 1;
+                            Self::write_pgn_game(
+                                &self.config.eval_pgn_path,
+                                self.cycle,
+                                pair * 2 + 2,
+                                &format!("pool v{opponent_version}"),
+                                &format!("challenger v{challenger_version}"),
+                                &outcome_b,
+                            );
+
+                            let challenger_perspective = -outcome_b.game_outcome;
+                            let challenger_score: f32 = if challenger_perspective > 0.5 {
+                                ladder_wins += 1;
+                                1.0
+                            } else if challenger_perspective < -0.5 {
+                                ladder_losses += 1;
+                                0.0
+                            } else {
+                                ladder_draws += 1;
+                                0.5
+                            };
+                            candidate_elo = crate::selfplay::elo::update_rating(
+                                candidate_elo,
+                                opp_initial,
+                                challenger_score,
+                                k,
+                            );
+                            scored_games.push(challenger_score);
+                            self.total_games_since_last_promotion += 1;
+                        }
+                    } else {
+                        // games_per_side games challenger=White vs. this opponent.
+                        for game_idx in 0..gps {
+                            let outcome = play_game_dual(
+                                self.precomputed.clone(),
+                                self.challenger_evaluator.clone(),
+                                opp_eval.clone(),
+                                game_config.clone(),
+                            )
+                            .await;
+
+                            Self::write_pgn_game(
+                                &self.config.eval_pgn_path,
+                                self.cycle,
+                                game_idx + 1,
+                                &format!("challenger v{challenger_version}"),
+                                &format!("pool v{opponent_version}"),
+                                &outcome,
+                            );
+
+                            let challenger_score: f32 = if outcome.game_outcome > 0.5 {
+                                ladder_wins += 1;
+                                1.0
+                            } else if outcome.game_outcome < -0.5 {
+                                ladder_losses += 1;
+                                0.0
+                            } else {
+                                ladder_draws += 1;
+                                0.5
+                            };
+                            candidate_elo = crate::selfplay::elo::update_rating(
+                                candidate_elo,
+                                opp_initial,
+                                challenger_score,
+                                k,
+                            );
+                            scored_games.push(challenger_score);
+                            self.total_games_since_last_promotion += 1;
+                        }
+
+                        // games_per_side games opponent=White vs. challenger=Black.
+                        for game_idx in 0..gps {
+                            let outcome = play_game_dual(
+                                self.precomputed.clone(),
+                                opp_eval.clone(),
+                                self.challenger_evaluator.clone(),
+                                game_config.clone(),
+                            )
+                            .await;
+
+                            Self::write_pgn_game(
+                                &self.config.eval_pgn_path,
+                                self.cycle,
+                                gps + game_idx + 1,
+                                &format!("pool v{opponent_version}"),
+                                &format!("challenger v{challenger_version}"),
+                                &outcome,
+                            );
+
+                            let challenger_perspective = -outcome.game_outcome;
+                            let challenger_score: f32 = if challenger_perspective > 0.5 {
+                                ladder_wins += 1;
+                                1.0
+                            } else if challenger_perspective < -0.5 {
+                                ladder_losses += 1;
+                                0.0
+                            } else {
+                                ladder_draws += 1;
+                                0.5
+                            };
+                            candidate_elo = crate::selfplay::elo::update_rating(
+                                candidate_elo,
+                                opp_initial,
+                                challenger_score,
+                                k,
+                            );
+                            scored_games.push(challenger_score);
+                            self.total_games_since_last_promotion += 1;
+                        }
                     }
                 }
             }
@@ -734,6 +1005,64 @@ mod tests {
         std::env::remove_var("HYZERO_EVAL_ADJ_MARGIN");
         assert!(eval_adjudicate_enabled());
         assert_eq!(eval_adjudication_margin(), 5);
+    }
+
+    /// Env-parse (pure helper): `HYZERO_EVAL_MIRRORED_STARTS` is OFF by default
+    /// and turns ON only for "1"/"true" (space/case-insensitive). Any other value
+    /// — including "0", "false", empty, and unset — stays OFF.
+    #[test]
+    fn mirrored_starts_env_parse_default_off_truthy_on() {
+        assert!(!parse_mirrored_starts(None));
+        assert!(!parse_mirrored_starts(Some("")));
+        assert!(!parse_mirrored_starts(Some("0")));
+        assert!(!parse_mirrored_starts(Some("false")));
+        assert!(!parse_mirrored_starts(Some("no")));
+        assert!(parse_mirrored_starts(Some("1")));
+        assert!(parse_mirrored_starts(Some("true")));
+        assert!(parse_mirrored_starts(Some("  TRUE  ")));
+    }
+
+    /// With the env unset the cached gate reports OFF, so `run()` takes the legacy
+    /// per-game `play_game_dual` sampling branch rather than the mirrored-pair
+    /// path. Serialized via `TestEnvGuard` so the ambient env is deterministically
+    /// unset when the process-wide gate first reads it.
+    #[test]
+    fn mirrored_starts_disabled_preserves_per_game_sampling() {
+        let _env = TestEnvGuard::new(&["HYZERO_EVAL_MIRRORED_STARTS"]);
+        std::env::remove_var("HYZERO_EVAL_MIRRORED_STARTS");
+        assert!(
+            !eval_mirrored_starts_enabled(),
+            "gate must default OFF so the legacy per-game sampling path runs"
+        );
+    }
+
+    /// The mirrored-pair builder samples ONE start and hands both games the
+    /// identical board (same Zobrist) and starting FEN, with the challenger's
+    /// color swapped between game A (White) and game B (Black).
+    #[test]
+    fn mirrored_pair_games_share_identical_start() {
+        let precomputed = Arc::new(crate::PrecomputedItems::begin_precomputing());
+        let challenger: Arc<dyn Evaluator> = Arc::new(RandomEvaluator);
+        let opponent: Arc<dyn Evaluator> = Arc::new(RandomEvaluator);
+
+        let mp = build_mirrored_pair(&precomputed, &challenger, &opponent);
+
+        // Both games of the pair begin from the identical position.
+        assert_eq!(
+            mp.board_a.zobrist_hash, mp.board_b.zobrist_hash,
+            "pair games must share the identical start board"
+        );
+        assert_eq!(
+            mp.starting_fen, None,
+            "default (no starts file) yields the standard start for both games"
+        );
+
+        // Colors swapped: challenger is White in game A and Black in game B; the
+        // opponent takes the complementary color in each.
+        assert!(Arc::ptr_eq(&mp.white_a, &challenger));
+        assert!(Arc::ptr_eq(&mp.black_a, &opponent));
+        assert!(Arc::ptr_eq(&mp.white_b, &opponent));
+        assert!(Arc::ptr_eq(&mp.black_b, &challenger));
     }
 
     #[tokio::test]
