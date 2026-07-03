@@ -223,6 +223,14 @@ export HYZERO_DIRICHLET_ALPHA=${HYZERO_DIRICHLET_ALPHA:-0.3}
 # HYZERO_TEMP_MOVES/RunConfig-default-15 chain (bit-identical to pre-knob
 # behavior); eval ladder is always unaffected (it uses HYZERO_TEMP_MOVES).
 export HYZERO_TEMPERATURE_MOVES=${HYZERO_TEMPERATURE_MOVES:-12}
+# High-threshold material adjudication for SELF-PLAY games: an otherwise-Ongoing
+# position with a white-absolute material lead >= HYZERO_SELFPLAY_ADJ_MARGIN ends
+# decisively for the leading side (scored ±1 into value/TD targets, like a real
+# checkmate) instead of grinding to the move cap / repetition. Margin 12 is high
+# so only overwhelmingly-decided positions adjudicate. Code default is OFF; bench
+# opts in here. Eval games are unaffected (they use HYZERO_EVAL_ADJUDICATE).
+export HYZERO_SELFPLAY_ADJUDICATE=${HYZERO_SELFPLAY_ADJUDICATE:-1}
+export HYZERO_SELFPLAY_ADJ_MARGIN=${HYZERO_SELFPLAY_ADJ_MARGIN:-12}
 echo "[env] $(env | grep '^HYZERO_' | sort | tr '\n' ' ')"
 HYZERO_DEVICE=$DEVICE \
 HYZERO_SIMS=$SIMS \

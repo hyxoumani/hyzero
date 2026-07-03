@@ -703,12 +703,32 @@ pub async fn play_game(
     let mut would_resign_ply: Option<usize> = None;
     let mut would_resign_side: Option<Color> = None;
 
+    // Self-play material adjudication (HYZERO_SELFPLAY_ADJUDICATE, default OFF).
+    // Cached once per process. When enabled, an otherwise-Ongoing position with a
+    // material lead >= `adjudication_margin` ends the game decisively for the
+    // leading side; `adjudicated_side` records the WINNER (converted to a
+    // White-absolute outcome after the loop, exactly like a real checkmate).
+    let adjudicate_selfplay = selfplay_adjudicate_enabled();
+    let adjudication_margin = selfplay_adjudication_margin();
+    let mut adjudicated_side: Option<Color> = None;
+
     loop {
         if board.result() != GameResult::Ongoing {
             break;
         }
 
         if turn_count >= MAX_GAME_LENGTH {
+            break;
+        }
+
+        // Self-play adjudication: on an otherwise-Ongoing position (real
+        // terminals broke above and take precedence) with a material lead at or
+        // beyond the margin, terminate decisively for the leading side. Gated
+        // strictly — OFF (the default) leaves this a no-op and the loop unchanged.
+        if let Some(winner) =
+            selfplay_adjudicated_winner(&board, adjudicate_selfplay, adjudication_margin)
+        {
+            adjudicated_side = Some(winner);
             break;
         }
 
@@ -925,6 +945,8 @@ pub async fn play_game(
     // otherwise map the board result (or move-cap) to a standard label.
     let termination = if resigned_side.is_some() {
         "resignation".to_string()
+    } else if adjudicated_side.is_some() {
+        "adjudication".to_string()
     } else {
         termination_label(board_result).to_string()
     };
@@ -932,6 +954,11 @@ pub async fn play_game(
         // Value-based resignation: the side that resigned loses, opponent wins.
         // White-absolute: White resigns → -1.0 (Black wins); Black resigns → +1.0.
         let outcome = if loser == Color::White { -1.0f32 } else { 1.0f32 };
+        (outcome, false)
+    } else if let Some(winner) = adjudicated_side {
+        // Material adjudication: decisive win for the leading side, scored as a
+        // real win (±1, not a draw) so it flows into value/TD targets identically.
+        let outcome = if winner == Color::White { 1.0f32 } else { -1.0f32 };
         (outcome, false)
     } else {
         score_board_terminal(board_result, &board)
@@ -1380,6 +1407,84 @@ fn adjudicate_non_checkmate(board: &GameBoard, enabled: bool, margin: i32) -> f3
         -1.0
     } else {
         0.0
+    }
+}
+
+// --- Self-play material adjudication (HYZERO_SELFPLAY_ADJUDICATE* gates) ---
+//
+// High-threshold material adjudication for SELF-PLAY games, mirroring the
+// eval-side plumbing (`adjudicate_non_checkmate`) but gated behind its own
+// OnceLock knobs and OFF by default. When enabled, an otherwise-Ongoing self-play
+// position with a white-absolute material lead >= margin is terminated as a
+// decisive ±1 for the leading side (flowing into value/TD targets exactly like a
+// real checkmate), instead of continuing to the move cap / repetition. Real
+// terminals (checkmate/stalemate/etc.) always take precedence: the loop only
+// consults adjudication on positions whose `board.result()` is `Ongoing`.
+//
+// Default OFF because material adjudication historically drove a passivity
+// attractor in training. The default margin (12) is deliberately high so only
+// overwhelmingly-decided positions ever adjudicate.
+
+/// Pure parse helper for `HYZERO_SELFPLAY_ADJUDICATE`. Enabled only when the
+/// (trimmed, lowercased) value is `"1"` or `"true"`; anything else (including
+/// `"0"`, `"false"`, empty, and unset/`None`) is OFF. Extracted from the cached
+/// gate so env-parse tests can exercise it without tripping the `OnceLock`.
+fn parse_selfplay_adjudicate(value: Option<&str>) -> bool {
+    match value {
+        Some(v) => {
+            let s = v.trim().to_ascii_lowercase();
+            s == "1" || s == "true"
+        }
+        None => false,
+    }
+}
+
+/// Cached env-gate: true when `HYZERO_SELFPLAY_ADJUDICATE` is `"1"`/`"true"`.
+/// Read once per process via `OnceLock`, mirroring the other self-play knobs.
+/// DEFAULT OFF — self-play behavior is byte-identical to before when unset.
+fn selfplay_adjudicate_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        parse_selfplay_adjudicate(std::env::var("HYZERO_SELFPLAY_ADJUDICATE").ok().as_deref())
+    })
+}
+
+/// Pure parse helper for `HYZERO_SELFPLAY_ADJ_MARGIN`: the white-absolute material
+/// lead (standard piece values) required to adjudicate a self-play position as
+/// decisive. Default 12, clamped to `>= 1`; unparseable/unset falls back to 12.
+fn parse_selfplay_adj_margin(value: Option<&str>) -> i32 {
+    value
+        .and_then(|v| v.trim().parse::<i32>().ok())
+        .filter(|&m| m >= 1)
+        .unwrap_or(12)
+}
+
+/// Cached material-lead margin for self-play adjudication. Read once per process
+/// via `OnceLock`, mirroring the other self-play knobs.
+fn selfplay_adjudication_margin() -> i32 {
+    static MARGIN: OnceLock<i32> = OnceLock::new();
+    *MARGIN.get_or_init(|| {
+        parse_selfplay_adj_margin(std::env::var("HYZERO_SELFPLAY_ADJ_MARGIN").ok().as_deref())
+    })
+}
+
+/// Self-play adjudication decision for an OTHERWISE-ONGOING position. Returns
+/// `Some(Color)` (the leading side, awarded the decisive win) when `enabled` and
+/// the white-absolute material lead reaches `margin`, else `None`. Uses the same
+/// `compute_material_diff` piece-value count as the eval-side
+/// `adjudicate_non_checkmate`. Only ever called on positions the game loop has
+/// already confirmed are `Ongoing`, so real terminals take precedence.
+fn selfplay_adjudicated_winner(board: &GameBoard, enabled: bool, margin: i32) -> Option<Color> {
+    if !enabled {
+        return None;
+    }
+    let delta = compute_material_diff(board);
+    if delta >= margin {
+        Some(Color::White)
+    } else if delta <= -margin {
+        Some(Color::Black)
+    } else {
+        None
     }
 }
 
@@ -2364,6 +2469,84 @@ mod tests {
             0.0,
             "a within-margin material lead should stay a draw",
         );
+    }
+
+    /// Self-play adjudication: with the knob enabled, an otherwise-Ongoing
+    /// position with a material lead at/above the margin (12) is decided for the
+    /// leading side. White up a queen + rook (+14 ≥ 12) → Some(White). Tests the
+    /// decision seam directly (not a whole game). FAILS without the adjudication
+    /// branch (the pre-fix self-play loop never terminates on material).
+    #[test]
+    fn selfplay_adjudicates_win_at_margin_twelve() {
+        let precomputed = Arc::new(PrecomputedItems::begin_precomputing());
+        // White up a rook + queen (delta +14 ≥ margin 12), no checkmate present.
+        let (board, _, _) = board_from_fen("4k3/8/8/8/8/8/8/R2QK3 w - - 0 1", precomputed)
+            .expect("invalid FEN");
+        assert_eq!(
+            selfplay_adjudicated_winner(&board, true, 12),
+            Some(Color::White),
+            "white up +14 material must adjudicate a decisive win for white",
+        );
+    }
+
+    /// Self-play adjudication must NOT fire when the material lead is below the
+    /// margin: an 11-pawn lead (queen + two pawns = +11 < 12) leaves the game
+    /// Ongoing (returns None), so play continues to a natural terminal / move cap.
+    #[test]
+    fn selfplay_no_adjudication_below_margin() {
+        let precomputed = Arc::new(PrecomputedItems::begin_precomputing());
+        // White up a queen + two pawns (delta +11 < margin 12).
+        let (board, _, _) = board_from_fen("4k3/8/8/8/8/8/3PP3/3QK3 w - - 0 1", precomputed)
+            .expect("invalid FEN");
+        assert_eq!(
+            selfplay_adjudicated_winner(&board, true, 12),
+            None,
+            "a below-margin material lead must leave the game Ongoing",
+        );
+    }
+
+    /// Gate: with self-play adjudication DISABLED (the default), even an
+    /// overwhelming material lead is never adjudicated — behavior is preserved
+    /// and the game plays on. FAILS if the decision ever ignores the `enabled` flag.
+    #[test]
+    fn selfplay_adjudication_disabled_preserves_behavior() {
+        let precomputed = Arc::new(PrecomputedItems::begin_precomputing());
+        // White up a rook + queen (delta +14) — huge lead, but adjudication off.
+        let (board, _, _) = board_from_fen("4k3/8/8/8/8/8/8/R2QK3 w - - 0 1", precomputed)
+            .expect("invalid FEN");
+        assert_eq!(
+            selfplay_adjudicated_winner(&board, false, 12),
+            None,
+            "adjudication OFF must never terminate a self-play game on material",
+        );
+    }
+
+    /// Env-parse (pure helper): `HYZERO_SELFPLAY_ADJUDICATE` is OFF by default and
+    /// turns ON only for "1"/"true" (space/case-insensitive). Any other value —
+    /// including "0", "false", empty, and unset — stays OFF.
+    #[test]
+    fn selfplay_adjudicate_env_parse_default_off_truthy_on() {
+        assert!(!parse_selfplay_adjudicate(None));
+        assert!(!parse_selfplay_adjudicate(Some("")));
+        assert!(!parse_selfplay_adjudicate(Some("0")));
+        assert!(!parse_selfplay_adjudicate(Some("false")));
+        assert!(!parse_selfplay_adjudicate(Some("no")));
+        assert!(parse_selfplay_adjudicate(Some("1")));
+        assert!(parse_selfplay_adjudicate(Some("true")));
+        assert!(parse_selfplay_adjudicate(Some("  TRUE  ")));
+    }
+
+    /// Env-parse (pure helper): `HYZERO_SELFPLAY_ADJ_MARGIN` defaults to 12 on
+    /// unset/unparseable input, clamps sub-1 values back to the default, and
+    /// otherwise parses the supplied margin verbatim.
+    #[test]
+    fn selfplay_adj_margin_env_parse_default_twelve() {
+        assert_eq!(parse_selfplay_adj_margin(None), 12);
+        assert_eq!(parse_selfplay_adj_margin(Some("not-a-number")), 12);
+        assert_eq!(parse_selfplay_adj_margin(Some("0")), 12);
+        assert_eq!(parse_selfplay_adj_margin(Some("-3")), 12);
+        assert_eq!(parse_selfplay_adj_margin(Some("8")), 8);
+        assert_eq!(parse_selfplay_adj_margin(Some("  20 ")), 20);
     }
 
     /// Regression: with material shaping ON, a repetition draw with a material
