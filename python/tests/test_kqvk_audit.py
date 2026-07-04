@@ -1,8 +1,9 @@
 """Tests for scripts/kqvk_audit.py game selection and outcome counting.
 
 Builds a small inline PGN fixture — a KQvK checkmate, a KQvK stalemate, a
-non-KQvK game (must be excluded), and a malformed KQvK game with an illegal
-move (must be skipped) — then asserts the audit selects and counts correctly.
+KRvK checkmate, a non-basic-mate game (must be excluded), and a malformed KQvK
+game with an illegal move (must be skipped) — then asserts the audit selects and
+counts correctly across both tracked classes and the combined roll-up.
 
 Run with: cd python && pytest tests/test_kqvk_audit.py -v
 """
@@ -42,7 +43,9 @@ def _write_fixture(path: Path) -> None:
         _make_pgn("5k2/7Q/5K2/8/8/8/8/8 w - - 0 1", ["h7h8"]),
         # KQvK -> stalemate (Qc2-g6).
         _make_pgn("7k/5K2/8/8/8/8/2Q5/8 w - - 0 1", ["c2g6"]),
-        # Non-KQvK standard-start game — must be excluded from selection.
+        # KRvK -> checkmate (Ra1-a8#).
+        _make_pgn("7k/8/6K1/8/8/8/8/R7 w - - 0 1", ["a1a8"]),
+        # Non-basic-mate standard-start game — must be excluded from selection.
         _make_pgn(chess.STARTING_FEN, ["e2e4", "e7e5"]),
         # Malformed KQvK game: illegal SAN "Qa1" — must be skipped, not counted.
         '[FEN "5k2/7Q/5K2/8/8/8/8/8 w - - 0 1"]\n[SetUp "1"]\n\n1. Qa1 1-0\n',
@@ -50,20 +53,32 @@ def _write_fixture(path: Path) -> None:
     path.write_text("\n\n".join(games) + "\n", encoding="utf-8")
 
 
-def test_selects_kqvk_and_counts_outcomes(tmp_path):
-    """Only well-formed KQvK games are selected; outcomes classified correctly."""
+def test_selects_basic_mates_and_counts_outcomes(tmp_path):
+    """Well-formed KQvK/KRvK games are selected; outcomes classified per class."""
     pgn = tmp_path / "sample.pgn"
     _write_fixture(pgn)
 
     result = kqvk_audit.audit_pgn(str(pgn))
 
-    assert result["kqvk_games"] == 2
-    assert result["mates"] == 1
-    assert result["stalemate"] == 1
-    assert result["insufficient_material"] == 0
-    assert result["repetition"] == 0
-    assert result["other"] == 0
-    assert abs(result["mate_rate"] - 0.5) < 1e-9
+    kq = result["classes"]["KQvK"]
+    assert kq["games"] == 2
+    assert kq["mates"] == 1
+    assert kq["stalemate"] == 1
+    assert abs(kq["mate_rate"] - 0.5) < 1e-9
+
+    kr = result["classes"]["KRvK"]
+    assert kr["games"] == 1
+    assert kr["mates"] == 1
+    assert abs(kr["mate_rate"] - 1.0) < 1e-9
+
+    combined = result["combined"]
+    assert combined["games"] == 3
+    assert combined["mates"] == 2
+    assert combined["stalemate"] == 1
+    assert combined["insufficient_material"] == 0
+    assert combined["repetition"] == 0
+    assert combined["other"] == 0
+    assert abs(combined["mate_rate"] - (2 / 3)) < 1e-9
 
 
 def test_parse_material_kq():
@@ -77,5 +92,6 @@ def test_empty_pgn_yields_zero_games(tmp_path):
     pgn = tmp_path / "empty.pgn"
     pgn.write_text("", encoding="utf-8")
     result = kqvk_audit.audit_pgn(str(pgn))
-    assert result["kqvk_games"] == 0
-    assert result["mate_rate"] == 0.0
+    assert result["combined"]["games"] == 0
+    assert result["combined"]["mate_rate"] == 0.0
+    assert result["valid"] is False

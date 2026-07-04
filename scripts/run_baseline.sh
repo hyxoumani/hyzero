@@ -461,7 +461,7 @@ cat > "$BASELINE_FILE" << EOF
         "tablebase_cache": "$TB_CACHE",
         "tablebase_frac": $TB_FRAC
     },
-    "kqvk": $KQVK_JSON,
+    "conversion": $KQVK_JSON,
     "log_file": "$LOG_FILE"
 }
 EOF
