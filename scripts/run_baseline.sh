@@ -410,6 +410,75 @@ if [ -f scripts/kqvk_audit.py ]; then
     fi
 fi
 
+# ── Endgame conversion probe (opt-in) ──────────────────────────
+# After the timed self-play window, replay the run's FINAL candidate net over
+# the 120 fixed won-endgame starts and count how many it drives to an actual
+# checkmate (vs shuffling to a draw). Self-play probe: the SAME checkpoint plays
+# both sides via the arena tool, so conversion is measured by checkmate
+# terminations regardless of which side delivers mate. Adjudication is forced
+# OFF for the probe process only (HYZERO_EVAL_ADJUDICATE=0) so a material lead at
+# the move cap does NOT count as a conversion — only real mates do. Robust: any
+# failure writes null into the baseline JSON and never breaks the score run.
+# Runs AFTER the timed window (adds ~5-8 min); gate off with HYZERO_CONVERSION_PROBE=0.
+CONVERSION_PROBE=${HYZERO_CONVERSION_PROBE:-1}
+PROBE_JSON="null"
+if [ "$CONVERSION_PROBE" != "0" ]; then
+    echo "[4c/5] Running endgame conversion probe..."
+    # Stable probe-starts location; data/ is untracked, so copy from the campaign
+    # runs/ path at runtime (existence-guarded) if it isn't there yet.
+    PROBE_STARTS="data/probe_won_starts_120.txt"
+    PROBE_STARTS_SRC="runs/auto-20260610-101529/probe_won_starts_120.txt"
+    if [ ! -f "$PROBE_STARTS" ] && [ -f "$PROBE_STARTS_SRC" ]; then
+        cp "$PROBE_STARTS_SRC" "$PROBE_STARTS"
+    fi
+    # Pick the run's FINAL candidate checkpoint: newest by mtime among the
+    # training candidates (model_v*.pt) and champions (best_v*.pt) the run
+    # produced. Fall back to the resume checkpoint if the run wrote none.
+    PROBE_CKPT=$(find checkpoints -maxdepth 1 \( -name 'model_v*.pt' -o -name 'best_v*.pt' \) -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)
+    [ -z "$PROBE_CKPT" ] && PROBE_CKPT="$RESUME_FROM"
+    if [ ! -f "$PROBE_STARTS" ]; then
+        echo "  WARN: probe starts file missing ($PROBE_STARTS) — writing null"
+    elif [ -z "$PROBE_CKPT" ] || [ ! -f "$PROBE_CKPT" ]; then
+        echo "  WARN: no candidate checkpoint for probe — writing null"
+    else
+        echo "  probe checkpoint: $PROBE_CKPT"
+        cargo build --release --bin arena 2>&1 | tail -1
+        _PROBE_LOG="${LOG_DIR}/probe_${TIMESTAMP}.log"
+        # 120 starts × mirrored pairs = 240 games (each start played from both
+        # colors by the same net). --games 240 makes the stride sampler select
+        # every one of the 120 lines exactly once as a pair. EVAL_ADJUDICATE=0 is
+        # scoped to this process only via the env prefix.
+        set +e
+        HYZERO_EVAL_ADJUDICATE=0 target/release/arena \
+            --model-a "$PROBE_CKPT" --model-b "$PROBE_CKPT" \
+            --games 240 --sims 100 --concurrency 8 \
+            --starts "$PROBE_STARTS" --device "$DEVICE" \
+            > "$_PROBE_LOG" 2>&1
+        _PROBE_RC=$?
+        set -e
+        if [ "$_PROBE_RC" -eq 0 ]; then
+            # Each played game emits one per-game line carrying `termination=<T>`;
+            # the checkmate ones are a subset. awk counts (never exits nonzero, so
+            # it is safe under set -e / pipefail).
+            _PROBE_GAMES=$(awk '/termination=/{n++} END{print n+0}' "$_PROBE_LOG")
+            _PROBE_MATES=$(awk '/termination=checkmate/{n++} END{print n+0}' "$_PROBE_LOG")
+            if [ "$_PROBE_GAMES" -gt 0 ]; then
+                PROBE_JSON=$(awk -v g="$_PROBE_GAMES" -v m="$_PROBE_MATES" \
+                    -v ck="$(basename "$PROBE_CKPT")" \
+                    'BEGIN{printf "{\"games\": %d, \"checkmates\": %d, \"rate\": %.4f, \"checkpoint\": \"%s\"}", g, m, m/g, ck}')
+                echo "  probe: $PROBE_JSON"
+                echo "[conversion_probe] $PROBE_JSON" >> "$LOG_FILE"
+            else
+                echo "  WARN: probe produced no games — writing null"
+                echo "[conversion_probe] FAILED (no games)" >> "$LOG_FILE"
+            fi
+        else
+            echo "  WARN: probe arena run failed (rc=$_PROBE_RC) — writing null"
+            echo "[conversion_probe] FAILED (rc=$_PROBE_RC)" >> "$LOG_FILE"
+        fi
+    fi
+fi
+
 # ── Write baseline ─────────────────────────────────────────────
 echo "[5/5] Writing baseline..."
 
@@ -462,6 +531,7 @@ cat > "$BASELINE_FILE" << EOF
         "tablebase_frac": $TB_FRAC
     },
     "conversion": $KQVK_JSON,
+    "probe": $PROBE_JSON,
     "log_file": "$LOG_FILE"
 }
 EOF
