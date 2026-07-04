@@ -235,10 +235,12 @@ export HYZERO_VALUE_TARGET_MODE=${HYZERO_VALUE_TARGET_MODE:-outcome}
 export HYZERO_EVAL_MIRRORED_STARTS=${HYZERO_EVAL_MIRRORED_STARTS:-1}
 export HYZERO_LR_SCHEDULE=cosine
 # Cosine T_max tracks the run length so the LR completes one full decay over the
-# run instead of a fixed 14000 steps. Throughput is ~18 trainer steps/min at the
-# current settings, so T_max ≈ duration_minutes * 18 = DURATION/60 * 18. Integer
-# arithmetic; floored at 100 to respect the trainer's lower clamp on short runs.
-LR_COSINE_T_MAX=$(( DURATION / 60 * 18 ))
+# run instead of re-warming mid-run. Measured throughput is ~43 trainer steps/min
+# (the old 18 undershot: T_max wrapped and the LR re-warmed on long runs, observed
+# at 6h). Size to 45 steps/min = DURATION/60 * 45 — a small overshoot so annealing
+# ends slightly above eta_min and never re-warms. Integer arithmetic; floored at
+# 100 to respect the trainer's lower clamp on short runs.
+LR_COSINE_T_MAX=$(( DURATION / 60 * 45 ))
 [ "$LR_COSINE_T_MAX" -lt 100 ] && LR_COSINE_T_MAX=100
 export HYZERO_LR_COSINE_T_MAX=$LR_COSINE_T_MAX
 export HYZERO_LR_COSINE_ETA_MIN=1e-5
