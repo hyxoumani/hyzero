@@ -180,6 +180,100 @@ pub fn board_from_fen(
     Ok((board, side_to_move, fullmove_number))
 }
 
+impl GameBoard {
+    /// Emit the first four FEN fields (piece placement, active color, castling
+    /// availability, en passant target) space-joined into a "normalized FEN".
+    ///
+    /// The halfmove clock and fullmove number are intentionally omitted so the
+    /// key is clock-invariant: two positions that differ only in their move
+    /// counters produce the same normfen. This matches the normfen emitted by
+    /// `scripts/export_tb_wdl.py`, which reconstructs the ep field from the raw
+    /// ep target square (python-chess `board.ep_square`) rather than the
+    /// legality-filtered `board.fen()` field, so both sides agree on the key.
+    ///
+    /// `side_to_move` is supplied explicitly because the board does not store it.
+    pub fn to_normfen(&self, side_to_move: Color) -> String {
+        // ---- Field 1: piece placement (rank 8 down to rank 1) ----
+        let mut placement = String::new();
+        for board_rank in (0..8).rev() {
+            let mut empty = 0u32;
+            for file in 0..8 {
+                let sq = board_rank * 8 + file;
+                match self.board_arr[sq] {
+                    Some(piece) => {
+                        if empty > 0 {
+                            placement.push_str(&empty.to_string());
+                            empty = 0;
+                        }
+                        placement.push(piece_to_char(piece));
+                    }
+                    None => empty += 1,
+                }
+            }
+            if empty > 0 {
+                placement.push_str(&empty.to_string());
+            }
+            if board_rank > 0 {
+                placement.push('/');
+            }
+        }
+
+        // ---- Field 2: active color ----
+        let color = if side_to_move == Color::White {
+            "w"
+        } else {
+            "b"
+        };
+
+        // ---- Field 3: castling availability ----
+        let mut castling = String::new();
+        if self.white_kingside {
+            castling.push('K');
+        }
+        if self.white_queenside {
+            castling.push('Q');
+        }
+        if self.black_kingside {
+            castling.push('k');
+        }
+        if self.black_queenside {
+            castling.push('q');
+        }
+        if castling.is_empty() {
+            castling.push('-');
+        }
+
+        // ---- Field 4: en passant target (raw target square) ----
+        let ep = match self.en_passant_target {
+            Some(sq) => {
+                let file = (b'a' + (sq % 8) as u8) as char;
+                let rank = (b'1' + (sq / 8) as u8) as char;
+                format!("{file}{rank}")
+            }
+            None => "-".to_string(),
+        };
+
+        format!("{placement} {color} {castling} {ep}")
+    }
+}
+
+/// Map a piece to its FEN character (uppercase White, lowercase Black).
+fn piece_to_char(piece: Piece) -> char {
+    let c = match piece.piece_type {
+        PieceType::Pawn => 'p',
+        PieceType::Knight => 'n',
+        PieceType::Bishop => 'b',
+        PieceType::Rook => 'r',
+        PieceType::Queen => 'q',
+        PieceType::King => 'k',
+    };
+    if piece.color == Color::White {
+        c.to_ascii_uppercase()
+    } else {
+        c
+    }
+}
+
 fn char_to_piece(ch: char) -> Result<(PieceType, Color), String> {
     let color = if ch.is_uppercase() {
         Color::White
@@ -281,5 +375,36 @@ mod tests {
         )
         .unwrap();
         assert_eq!(color, Color::Black);
+    }
+
+    /// `to_normfen` reproduces exactly the first four fields of the source FEN.
+    #[test]
+    fn normfen_reproduces_first_four_fen_fields() {
+        let fen = "r1bqkb1r/pppp1ppp/2n2n2/4p3/2B1P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 4 4";
+        let (board, color, _) = board_from_fen(fen, precomputed()).unwrap();
+        let expected: String = fen.split_whitespace().take(4).collect::<Vec<_>>().join(" ");
+        assert_eq!(board.to_normfen(color), expected);
+    }
+
+    /// The halfmove and fullmove clock fields are ignored: two positions that
+    /// differ only in their move counters produce the SAME normfen.
+    #[test]
+    fn normfen_ignores_clock_fields() {
+        let base = "4k3/8/4K3/8/8/8/4R3/8 w - -";
+        let (b1, c1, _) = board_from_fen(&format!("{base} 0 1"), precomputed()).unwrap();
+        let (b2, c2, _) = board_from_fen(&format!("{base} 37 99"), precomputed()).unwrap();
+        assert_eq!(b1.to_normfen(c1), b2.to_normfen(c2));
+        assert_eq!(b1.to_normfen(c1), base);
+    }
+
+    /// The en passant target survives the round-trip as its raw square.
+    #[test]
+    fn normfen_preserves_en_passant_square() {
+        let fen = "rnbqkbnr/ppp1pppp/8/3pP3/8/8/PPPP1PPP/RNBQKBNR w KQkq d6 0 3";
+        let (board, color, _) = board_from_fen(fen, precomputed()).unwrap();
+        assert_eq!(
+            board.to_normfen(color),
+            "rnbqkbnr/ppp1pppp/8/3pP3/8/8/PPPP1PPP/RNBQKBNR w KQkq d6"
+        );
     }
 }

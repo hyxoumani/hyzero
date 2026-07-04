@@ -138,6 +138,27 @@ if [ -n "$TB_CACHE" ] && [ ! -f "$TB_CACHE" ]; then
     TB_CACHE=""
 fi
 echo "Supervision: starts=$([ -n "$STARTS_FILE" ] && echo "$STARTS_FILE" || echo "off"), tb_frac=$([ -n "$TB_CACHE" ] && echo "$TB_FRAC ($TB_CACHE)" || echo "off")"
+
+# ── Tablebase WDL rescoring (HYZERO_TB_RESCORE, default 1) ──────
+# lc0-style tail-rescoring: self-play value targets for positions covered by the
+# Syzygy WDL export are overridden with the exact tablebase result (STM POV),
+# superseding the outcome/bootstrap target only for those covered steps. Generate
+# the normfen->wdl CSV from the supervision cache before launch — export_tb_wdl.py
+# is idempotent (skips when the CSV is newer than the cache). If the cache is
+# missing or the export fails, rescoring is turned off so behavior is unchanged.
+TB_RESCORE=${HYZERO_TB_RESCORE:-1}
+TB_WDL_PATH=${HYZERO_TB_WDL_PATH:-data/syzygy/tb_wdl.csv}
+if [ "$TB_RESCORE" != "0" ] && [ -n "$TB_CACHE" ] && [ -f "$TB_CACHE" ]; then
+    echo "[pre-run] Exporting tablebase WDL CSV -> $TB_WDL_PATH"
+    if ! HYZERO_TABLEBASE_CACHE_PATH="$TB_CACHE" HYZERO_TB_WDL_PATH="$TB_WDL_PATH" \
+        python3 scripts/export_tb_wdl.py; then
+        echo "  WARN: tablebase WDL export failed — rescoring disabled"
+        TB_RESCORE=0
+    fi
+else
+    TB_RESCORE=0
+fi
+echo "Rescore: $([ "$TB_RESCORE" != "0" ] && echo "on ($TB_WDL_PATH)" || echo "off")"
 echo "Log: ${LOG_FILE}"
 
 # ── Build ──────────────────────────────────────────────────────
@@ -250,6 +271,8 @@ HYZERO_STARTS_FILE=$STARTS_FILE \
 HYZERO_TABLEBASE_PATH=$TB_PATH \
 HYZERO_TABLEBASE_CACHE_PATH=$TB_CACHE \
 HYZERO_TABLEBASE_FRAC=$TB_FRAC \
+HYZERO_TB_RESCORE=$TB_RESCORE \
+HYZERO_TB_WDL_PATH=$TB_WDL_PATH \
 HYZERO_RESUME_FROM=$RESUME_FROM \
 HYZERO_PGN_SAMPLE_RATE=${HYZERO_PGN_SAMPLE_RATE:-1.0} \
 target/release/selfplay > "$LOG_FILE" 2>&1 &

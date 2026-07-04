@@ -1,6 +1,7 @@
 pub mod encoding;
 pub mod replay_buffer;
 pub mod replay_record;
+pub mod tb_rescore;
 pub mod types;
 
 pub use encoding::*;

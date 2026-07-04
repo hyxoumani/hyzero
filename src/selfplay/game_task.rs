@@ -8,6 +8,7 @@ use crate::data::{
     ReplayFile, ReplayRecord, StepRecord, NUM_BASE_ACTIONS,
 };
 use crate::data::encoding::flip_action;
+use crate::data::tb_rescore::{tb_rescore_active, tb_rescore_lookup};
 use crate::game::board::GameResult;
 use crate::game::fen::board_from_fen;
 use crate::game::mate_solver::find_forced_mate;
@@ -663,6 +664,12 @@ pub async fn play_game(
     let (mut board, mut side_to_move, starting_fen) = init_self_play_board(precomputed.clone());
 
     let mut steps: Vec<StepRecord> = Vec::new();
+    // lc0-style tablebase tail-rescoring (HYZERO_TB_RESCORE). When active, each
+    // recorded step's normfen is looked up in the WDL map and the STM-POV WDL is
+    // carried as a per-step override parallel to `steps`. When inactive the flag
+    // is false, no normfen is computed, and `tb_values` stays empty (no override).
+    let tb_active = tb_rescore_active();
+    let mut tb_values: Vec<Option<f32>> = Vec::new();
     // Optional replay capture: per-ply MCTS dump, written to disk at game end
     // when `GameConfig.replay_dir` is set (typically from HYZERO_REPLAY_DIR).
     let capture_replay = config.replay_dir.is_some();
@@ -864,6 +871,18 @@ pub async fn play_game(
             legal_moves: legal_actions,
             white_to_move: side_to_move == Color::White,
         });
+
+        // Tablebase rescore hit for this step. Only recorded when rescoring is
+        // active, so `tb_values` is either empty (inactive ⇒ no overrides at all,
+        // byte-identical to pre-rescore) or has exactly one entry per `steps`
+        // element (pushed in lockstep here so the vectors stay index-aligned across
+        // every early-exit path below). `board`/`side_to_move` describe exactly the
+        // position just recorded — the move is applied later this iteration. The
+        // WDL is STM POV, matching the value-target convention; `None` when the
+        // position is not covered by the tablebase map.
+        if tb_active {
+            tb_values.push(tb_rescore_lookup(&board.to_normfen(side_to_move)));
+        }
 
         // Value-based resignation. `root_value` is in the current side-to-move's
         // POV, so a value at/below the (negative) threshold means the side to
@@ -1070,6 +1089,7 @@ pub async fn play_game(
         game_outcome,
         model_version,
         is_draw,
+        tb_values,
     }
 }
 

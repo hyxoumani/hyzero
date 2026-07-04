@@ -102,6 +102,15 @@ pub struct GameTrajectory {
     /// True if game ended non-decisively (stalemate, repetition, 50-move, cap, insufficient material).
     /// False only for actual checkmate. Used by trainer to apply non-zero-sum draw penalty.
     pub is_draw: bool,
+    /// Optional per-step tablebase WDL value overrides, one entry per `steps`
+    /// element, in the SAME side-to-move POV as the computed TD targets. `Some(v)`
+    /// on a step forces that step's value target to `v` (tablebase tail-rescoring);
+    /// `None` keeps the normal TD/outcome target. Empty when tablebase rescoring is
+    /// inactive (the common case) — a length-0 vec means "no overrides at all".
+    /// `#[serde(default)]` keeps pre-rescore on-disk `ReplayBuffer.bin` loadable
+    /// (a missing field deserializes to an empty vec ⇒ no override).
+    #[serde(default)]
+    pub tb_values: Vec<Option<f32>>,
 }
 
 /// Crate-wide lock serializing tests that mutate `std::env`.

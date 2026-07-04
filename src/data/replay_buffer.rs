@@ -306,9 +306,20 @@ impl ReplayBuffer {
             // (the K+1 slice is not enough — the n-step tail can extend past it).
             // When TD is disabled, push `None` for every step so the trainer keeps
             // the legacy β-blend value target byte-for-byte.
+            //
+            // Tablebase tail-rescoring (HYZERO_TB_RESCORE): if the trajectory carries
+            // a `Some(v)` in `tb_values` for this absolute step, that WDL is ground
+            // truth and supersedes the TD/bootstrap/outcome target — even when TD is
+            // disabled. Override rule: EXACTLY the steps that hit are overridden
+            // (per-step); steps without a hit keep their normal target. `tb_values`
+            // is empty when rescoring is inactive, so `.get(..).flatten()` is `None`
+            // and the target is byte-identical to the pre-rescore path. The WDL is
+            // already in this step's side-to-move POV, matching `compute_td_target`.
             let td_targets: Vec<Option<f32>> = (0..unroll_k + 1)
                 .map(|k| {
-                    if td_on {
+                    if let Some(tb) = traj.tb_values.get(start + k).copied().flatten() {
+                        Some(tb)
+                    } else if td_on {
                         Some(compute_td_target(traj, start + k, td_n, td_g))
                     } else {
                         None
@@ -375,6 +386,7 @@ mod tests {
             game_outcome: 1.0,
             model_version: 1,
             is_draw: false,
+            tb_values: Vec::new(),
         }
     }
 
@@ -561,6 +573,7 @@ mod tests {
             game_outcome: 1.0,
             model_version: 1,
             is_draw: false,
+            tb_values: Vec::new(),
         };
 
         let g = 0.9f32;
@@ -605,6 +618,7 @@ mod tests {
             game_outcome: 1.0, // White wins (white-absolute)
             model_version: 1,
             is_draw: false,
+            tb_values: Vec::new(),
         };
 
         // n=5 (>= last-0=2) so the window runs to the end. m=2, t+m==last.
@@ -684,6 +698,91 @@ mod tests {
         }
     }
 
+    /// Tablebase rescoring overrides EXACTLY the steps that carry a `Some` WDL in
+    /// `tb_values`, leaving every other step's target byte-identical to the
+    /// no-override path. Synthetic 6-step trajectory with hits at absolute steps
+    /// 3 and 4; sampled with k=5 (forced start=0), so slice index == absolute step.
+    #[test]
+    fn tb_rescore_overrides_only_hit_steps() {
+        let _env = TestEnvGuard::new(&["HYZERO_TD"]);
+        // SAFETY: protected by TestEnvGuard; no concurrent env-var access.
+        unsafe {
+            std::env::set_var("HYZERO_TD", "1");
+        }
+
+        // Distinct rewards/values so normal targets are far from the WDL sentinels.
+        let rewards = [0.0f32, 0.1, -0.2, 0.3, -0.4, 0.0];
+        let root_values = [0.1f32, 0.3, 0.7, -0.5, 0.2, -0.9];
+        let mk = || GameTrajectory {
+            steps: (0..6)
+                .map(|i| make_step_full(i % 2 == 0, root_values[i], rewards[i]))
+                .collect(),
+            game_outcome: 1.0,
+            model_version: 1,
+            is_draw: false,
+            tb_values: Vec::new(),
+        };
+
+        // Baseline: empty tb_values ⇒ no overrides.
+        let mut buf_none = ReplayBuffer::new(4);
+        buf_none.add(mk());
+        let none = buf_none.sample_batch(1, 5);
+        assert_eq!(none.len(), 1);
+        let none = &none[0].td_targets;
+
+        // With hits at steps 3 and 4 (WDL sentinels 0.5 and -0.75, STM POV).
+        let mut hit_traj = mk();
+        hit_traj.tb_values = vec![None, None, None, Some(0.5), Some(-0.75), None];
+        let mut buf_hit = ReplayBuffer::new(4);
+        buf_hit.add(hit_traj);
+        let hit = buf_hit.sample_batch(1, 5);
+        assert_eq!(hit.len(), 1);
+        let hit = &hit[0].td_targets;
+
+        // Hit steps take the WDL exactly.
+        assert_eq!(hit[3], Some(0.5), "step 3 overridden to its WDL");
+        assert_eq!(hit[4], Some(-0.75), "step 4 overridden to its WDL");
+        // Every non-hit step is byte-identical to the no-override baseline.
+        for k in [0usize, 1, 2, 5] {
+            assert_eq!(hit[k], none[k], "step {k} must be untouched by rescoring");
+        }
+    }
+
+    /// With rescoring off (empty `tb_values`, the inactive-loader case), the value
+    /// targets are byte-identical to a direct legacy TD computation for every step.
+    #[test]
+    fn tb_rescore_off_is_byte_identical() {
+        let _env = TestEnvGuard::new(&["HYZERO_TD", "HYZERO_VALUE_TARGET_MODE"]);
+        // SAFETY: protected by TestEnvGuard; no concurrent env-var access.
+        unsafe {
+            std::env::set_var("HYZERO_TD", "1");
+        }
+
+        let rewards = [0.0f32, 0.2, -0.4, 0.1, 0.0, 0.3];
+        let root_values = [0.1f32, 0.3, 0.7, -0.5, 0.2, -0.1];
+        let traj = GameTrajectory {
+            steps: (0..6)
+                .map(|i| make_step_full(i % 2 == 0, root_values[i], rewards[i]))
+                .collect(),
+            game_outcome: 1.0,
+            model_version: 1,
+            is_draw: false,
+            tb_values: Vec::new(), // loader off ⇒ no overrides
+        };
+
+        let (td_on, n, g) = effective_td_params(value_target_mode());
+        assert!(td_on);
+
+        let mut buf = ReplayBuffer::new(4);
+        buf.add(traj.clone());
+        let samples = buf.sample_batch(1, 5);
+        assert_eq!(samples.len(), 1);
+        for (k, got) in samples[0].td_targets.iter().enumerate() {
+            let expected = compute_td_target(&traj, k, n, g);
+            assert_eq!(*got, Some(expected), "step {k} must match legacy TD target");
+        }
+    }
+
     /// `parse_value_target_mode` recognizes `outcome` (case-insensitive, trimmed)
     /// and maps everything else — including `td`, unknown strings, and absence — to
     /// the legacy `Td` mode.
@@ -743,6 +842,7 @@ mod tests {
             game_outcome: 1.0,
             model_version: 1,
             is_draw: false,
+            tb_values: Vec::new(),
         };
         for t in 0..traj.steps.len() {
             let resolved = compute_td_target(&traj, t, n, g);
@@ -778,6 +878,7 @@ mod tests {
             game_outcome: 1.0,
             model_version: 1,
             is_draw: false,
+            tb_values: Vec::new(),
         };
 
         for t in 0..n_steps {
