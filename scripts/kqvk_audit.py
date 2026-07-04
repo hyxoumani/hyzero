@@ -7,7 +7,11 @@ terminal state (checkmate / stalemate / insufficient material / repetition /
 other). Emits a single JSON line summarizing conversion:
 
     {"kqvk_games": N, "mates": n1, "insufficient_material": n2,
-     "repetition": n3, "stalemate": n4, "other": n5, "mate_rate": r}
+     "repetition": n3, "stalemate": n4, "other": n5, "mate_rate": r,
+     "valid": bool}
+
+``valid`` is false when fewer than 30 KQvK games were found, signaling the
+sample is too small for ``mate_rate`` to be meaningful.
 
 Robust to interleaving corruption: games that fail to parse or replay (illegal
 SAN, truncated move text) are skipped rather than aborting the whole scan.
@@ -137,6 +141,9 @@ def audit_pgn(path: str, strong_extra: Counter | None = None) -> dict:
 
     n = counts["kqvk_games"]
     counts["mate_rate"] = (counts["mates"] / n) if n else 0.0
+    # `valid` tells downstream consumers whether the sample is large enough to
+    # trust mate_rate. Fewer than 30 KQvK games is too small to be meaningful.
+    counts["valid"] = n >= 30
     return counts
 
 

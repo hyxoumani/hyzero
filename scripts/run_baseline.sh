@@ -40,6 +40,16 @@ LOG_FILE="${LOG_DIR}/baseline_${TIMESTAMP}.log"
 
 mkdir -p "$LOG_DIR"
 
+# Rotate the append-only game PGNs out of the way so this run's writer creates a
+# fresh file and the KQvK audit measures ONLY the current run's games. Both
+# logs/selfplay_sample.pgn and logs/eval_games.pgn are opened create+append and
+# never truncated (see src/selfplay/pgn.rs write_pgn_game), so without rotation
+# the audit would score a month-old accumulator. Rotation (not deletion)
+# preserves history for later inspection.
+_ROTATE_STAMP=$(date +%s)
+mv logs/selfplay_sample.pgn "logs/selfplay_sample_prev_${_ROTATE_STAMP}.pgn" 2>/dev/null || true
+mv logs/eval_games.pgn "logs/eval_games_prev_${_ROTATE_STAMP}.pgn" 2>/dev/null || true
+
 echo "=== hyzero Baseline Run ==="
 echo "Duration: ${DURATION}s"
 echo "Device: ${DEVICE}"
