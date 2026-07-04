@@ -6,13 +6,15 @@
 //! hit the position's side-to-move WDL supersedes the computed TD/outcome value
 //! target for that step (see `replay_buffer::sample_batch`).
 //!
-//! POV / sign mapping: the CSV `wdl` column is already expressed from the
+//! POV / sign mapping: the CSV `value` column is already expressed from the
 //! side-to-move point of view (STM POV), exactly the convention that
 //! `compute_td_target` uses for its targets. The mapping is therefore the
-//! IDENTITY — the stored `i8` WDL becomes the `f32` target directly, with no
-//! sign flip. Concretely, for a White-winning KQvK position the CSV holds `+1`
-//! on the White-to-move row and `-1` on the Black-to-move row, so the override
-//! target is `+1.0` when White is to move and `-1.0` when Black is to move.
+//! IDENTITY — the stored `f32` value becomes the `f32` target directly, with no
+//! sign flip. The value may be a plain WDL (`+1`/`0`/`-1`) or a DTZ-graded
+//! magnitude in `[V_MIN, 1]` with the WDL sign (see `export_tb_wdl.py`). For a
+//! White-winning KQvK position the CSV holds a positive value on the
+//! White-to-move row and its negation on the Black-to-move row, so the override
+//! target is `+v` when White is to move and `-v` when Black is to move.
 //!
 //! When the env is off or the file is missing, the map resolves to `None`, every
 //! lookup returns `None`, and behavior is byte-identical to the pre-rescore code.
@@ -35,14 +37,16 @@ fn env_truthy(name: &str) -> bool {
     }
 }
 
-/// Parse the CSV body into a `normfen -> wdl` map.
+/// Parse the CSV body into a `normfen -> value` map.
 ///
-/// Each non-empty line is `normfen,wdl` where `normfen` is the first four FEN
-/// fields (which themselves contain spaces) and `wdl ∈ {-1,0,1}`. The split is
-/// on the LAST comma so the space-bearing normfen is preserved verbatim. Blank
-/// lines, a leading `normfen,wdl` header, and lines with an unparseable WDL are
-/// skipped. Pure: no env or filesystem access.
-fn parse_csv(contents: &str) -> HashMap<String, i8> {
+/// Each non-empty line is `normfen,value` where `normfen` is the first four FEN
+/// fields (which themselves contain spaces) and `value` is an `f32` STM-POV
+/// target: either a plain WDL (`-1`/`0`/`1`) or a DTZ-graded magnitude in
+/// `[V_MIN, 1]` carrying the WDL sign. The split is on the LAST comma so the
+/// space-bearing normfen is preserved verbatim. Blank lines, a leading
+/// `normfen,value` header, and lines with an unparseable value are skipped.
+/// Pure: no env or filesystem access.
+fn parse_csv(contents: &str) -> HashMap<String, f32> {
     let mut map = HashMap::new();
     for line in contents.lines() {
         let line = line.trim_end_matches(['\r', '\n']);
@@ -52,31 +56,26 @@ fn parse_csv(contents: &str) -> HashMap<String, i8> {
         let Some(comma) = line.rfind(',') else {
             continue;
         };
-        let (normfen, wdl_str) = (&line[..comma], &line[comma + 1..]);
-        let Ok(wdl) = wdl_str.trim().parse::<i8>() else {
-            continue; // skips a "normfen,wdl" header row too
+        let (normfen, value_str) = (&line[..comma], &line[comma + 1..]);
+        let Ok(value) = value_str.trim().parse::<f32>() else {
+            continue; // skips a "normfen,value" header row too
         };
-        map.insert(normfen.to_string(), wdl);
+        map.insert(normfen.to_string(), value);
     }
     map
 }
 
-/// Convert a stored WDL (`i8`, STM POV) into a value target (`f32`, STM POV).
-/// Identity mapping — see the module POV note.
-fn wdl_to_target(wdl: i8) -> f32 {
-    wdl as f32
-}
-
 /// Look up a normfen in an explicit map, returning the STM-POV value target.
-/// Pure; used by both the global path and the unit tests.
-fn lookup_in(map: &HashMap<String, i8>, normfen: &str) -> Option<f32> {
-    map.get(normfen).copied().map(wdl_to_target)
+/// Pure; used by both the global path and the unit tests. Identity mapping —
+/// the stored `f32` value is already the STM-POV target (see the module note).
+fn lookup_in(map: &HashMap<String, f32>, normfen: &str) -> Option<f32> {
+    map.get(normfen).copied()
 }
 
-/// The process-wide WDL map, loaded once. `None` when rescoring is disabled or
+/// The process-wide value map, loaded once. `None` when rescoring is disabled or
 /// the CSV is absent/unreadable — every lookup then returns `None`.
-fn wdl_map() -> Option<&'static HashMap<String, i8>> {
-    static MAP: OnceLock<Option<HashMap<String, i8>>> = OnceLock::new();
+fn wdl_map() -> Option<&'static HashMap<String, f32>> {
+    static MAP: OnceLock<Option<HashMap<String, f32>>> = OnceLock::new();
     MAP.get_or_init(|| {
         if !env_truthy("HYZERO_TB_RESCORE") {
             return None;
@@ -87,7 +86,7 @@ fn wdl_map() -> Option<&'static HashMap<String, i8>> {
             Ok(contents) => {
                 let map = parse_csv(&contents);
                 eprintln!(
-                    "[tb_rescore] loaded {} WDL entries from {}",
+                    "[tb_rescore] loaded {} value entries from {}",
                     map.len(),
                     path
                 );
@@ -119,19 +118,31 @@ mod tests {
     use super::*;
 
     /// `parse_csv` keeps the space-bearing normfen intact by splitting on the last
-    /// comma, and skips a header row with a non-numeric WDL.
+    /// comma, and skips a header row with a non-numeric value.
     #[test]
     fn parse_csv_preserves_normfen_and_skips_header() {
-        let csv = "normfen,wdl\n\
+        let csv = "normfen,value\n\
                    4k3/8/4K3/8/8/8/4R3/8 w - -,1\n\
                    8/8/8/8/8/8/8/k1K5 b - -,0\n\
                    \n\
                    8/8/8/8/8/8/8/K1k5 w - -,-1\n";
         let map = parse_csv(csv);
         assert_eq!(map.len(), 3, "header + blank line skipped");
-        assert_eq!(map.get("4k3/8/4K3/8/8/8/4R3/8 w - -"), Some(&1i8));
-        assert_eq!(map.get("8/8/8/8/8/8/8/k1K5 b - -"), Some(&0i8));
-        assert_eq!(map.get("8/8/8/8/8/8/8/K1k5 w - -"), Some(&-1i8));
+        assert_eq!(map.get("4k3/8/4K3/8/8/8/4R3/8 w - -"), Some(&1.0f32));
+        assert_eq!(map.get("8/8/8/8/8/8/8/k1K5 b - -"), Some(&0.0f32));
+        assert_eq!(map.get("8/8/8/8/8/8/8/K1k5 w - -"), Some(&-1.0f32));
+    }
+
+    /// `parse_csv` reads DTZ-graded fractional f32 values verbatim (STM POV),
+    /// so a near-mate `0.9925` and a distant-win `0.2500` survive round-trip.
+    #[test]
+    fn parse_csv_reads_graded_fractional_values() {
+        let csv = "normfen,value\n\
+                   4k3/8/4K3/8/8/8/4R3/8 w - -,0.9925\n\
+                   8/8/8/8/8/8/8/K1k5 w - -,-0.2500\n";
+        let map = parse_csv(csv);
+        assert_eq!(map.get("4k3/8/4K3/8/8/8/4R3/8 w - -"), Some(&0.9925f32));
+        assert_eq!(map.get("8/8/8/8/8/8/8/K1k5 w - -"), Some(&-0.25f32));
     }
 
     /// WDL is STM POV and passes through unchanged: a White-winning KQvK position
@@ -150,9 +161,9 @@ mod tests {
             board_from_fen("4k3/8/8/8/8/8/Q7/4K3 b - - 0 1", pre.clone()).unwrap();
 
         // The CSV stores STM POV: +1 on the White-to-move row, −1 on the Black row.
-        let mut map: HashMap<String, i8> = HashMap::new();
-        map.insert(wtm_board.to_normfen(wtm_color), 1);
-        map.insert(btm_board.to_normfen(btm_color), -1);
+        let mut map: HashMap<String, f32> = HashMap::new();
+        map.insert(wtm_board.to_normfen(wtm_color), 1.0);
+        map.insert(btm_board.to_normfen(btm_color), -1.0);
 
         assert_eq!(
             lookup_in(&map, &wtm_board.to_normfen(wtm_color)),
@@ -169,7 +180,7 @@ mod tests {
     /// A normfen not present in the map yields no override.
     #[test]
     fn lookup_miss_returns_none() {
-        let map: HashMap<String, i8> = HashMap::new();
+        let map: HashMap<String, f32> = HashMap::new();
         assert_eq!(lookup_in(&map, "8/8/8/8/8/8/8/K1k5 w - -"), None);
     }
 

@@ -14,6 +14,8 @@ import pickle
 import sys
 from pathlib import Path
 
+import pytest
+
 # Import the exporter module directly from the scripts directory.
 _EXPORT_PATH = Path(__file__).resolve().parents[2] / "scripts" / "export_tb_wdl.py"
 _spec = importlib.util.spec_from_file_location("export_tb_wdl", _EXPORT_PATH)
@@ -57,6 +59,26 @@ def test_export_writes_normfen_wdl_lines(tmp_path, monkeypatch):
         "4k3/8/8/8/8/8/Q7/4K3 w - -,1",
         "4k3/8/8/8/8/8/Q7/4K3 b - -,-1",
     }
+
+
+def test_graded_export_scales_by_dtz():
+    """DTZ grading: a near-mate win (dtz=1) ≈ ±0.9925; a distant win (dtz=100) = ±0.25."""
+    near_win, near_fb = export_tb_wdl.graded_value(1, 1)
+    assert near_win == pytest.approx(0.9925)
+    assert near_fb is False
+
+    far_win, _ = export_tb_wdl.graded_value(1, 100)
+    assert far_win == pytest.approx(0.25)
+
+    far_loss, _ = export_tb_wdl.graded_value(-1, 100)
+    assert far_loss == pytest.approx(-0.25)
+
+
+def test_graded_zero_wdl_stays_zero():
+    """A drawn position (wdl=0) grades to exactly 0.0 regardless of dtz, no fallback."""
+    value, fell_back = export_tb_wdl.graded_value(0, 42)
+    assert value == 0.0
+    assert fell_back is False
 
 
 def test_export_is_idempotent_and_rebuilds_on_stale(tmp_path, monkeypatch):

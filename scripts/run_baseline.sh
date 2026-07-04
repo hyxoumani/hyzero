@@ -148,9 +148,14 @@ echo "Supervision: starts=$([ -n "$STARTS_FILE" ] && echo "$STARTS_FILE" || echo
 # missing or the export fails, rescoring is turned off so behavior is unchanged.
 TB_RESCORE=${HYZERO_TB_RESCORE:-1}
 TB_WDL_PATH=${HYZERO_TB_WDL_PATH:-data/syzygy/tb_wdl.csv}
+# DTZ-graded rescoring targets (default on): winning/losing magnitudes decay with
+# distance-to-zeroing instead of a flat ±1, concentrating the value gradient near
+# conversion. Entries without a dtz field fall back to ±1 (export reports the count).
+TB_WDL_GRADED=${HYZERO_TB_WDL_GRADED:-1}
 if [ "$TB_RESCORE" != "0" ] && [ -n "$TB_CACHE" ] && [ -f "$TB_CACHE" ]; then
     echo "[pre-run] Exporting tablebase WDL CSV -> $TB_WDL_PATH"
     if ! HYZERO_TABLEBASE_CACHE_PATH="$TB_CACHE" HYZERO_TB_WDL_PATH="$TB_WDL_PATH" \
+        HYZERO_TB_WDL_GRADED="$TB_WDL_GRADED" \
         python3 scripts/export_tb_wdl.py; then
         echo "  WARN: tablebase WDL export failed — rescoring disabled"
         TB_RESCORE=0
