@@ -2,6 +2,7 @@ use std::collections::VecDeque;
 use std::fs;
 use std::io;
 use std::path::Path;
+use std::sync::OnceLock;
 
 use super::types::{GameTrajectory, StepRecord};
 use rand::Rng;
@@ -57,6 +58,72 @@ fn td_gamma() -> f32 {
         .and_then(|v| v.parse::<f32>().ok())
         .map(|v| v.clamp(0.0, 1.0))
         .unwrap_or(0.997)
+}
+
+/// How value targets are computed for each sampled step. Read once from
+/// `HYZERO_VALUE_TARGET_MODE` (see [`value_target_mode`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ValueTargetMode {
+    /// Legacy n-step TD path governed by `HYZERO_TD` / `HYZERO_TD_NSTEP` /
+    /// `HYZERO_TD_GAMMA`. Default; behavior byte-identical to pre-mode code.
+    Td,
+    /// MuZero board-game convention: the full terminal game outcome propagated to
+    /// EVERY step with γ=1 and no bootstrap. Implemented by forcing the TD path
+    /// with γ=1.0 and an `n` large enough that every window runs to the trajectory
+    /// end, so `compute_td_target`'s terminal branch always fires with `γ^m == 1`.
+    Outcome,
+}
+
+/// The n-step horizon used in `Outcome` mode: large enough that `min(n, last - t)`
+/// always equals `last - t` for any realistic trajectory (chess games never reach
+/// 100k plies), forcing the terminal-outcome bootstrap for every step.
+const OUTCOME_NSTEP: usize = 100_000;
+
+/// Parse a `HYZERO_VALUE_TARGET_MODE` value into a [`ValueTargetMode`]. Pure; no
+/// env access. `"outcome"` (case-insensitive, trimmed) selects [`ValueTargetMode::Outcome`];
+/// everything else — including `"td"`, empty, absent, and unknown strings — maps to
+/// the legacy [`ValueTargetMode::Td`].
+fn parse_value_target_mode(raw: Option<&str>) -> ValueTargetMode {
+    match raw {
+        Some(v) if v.trim().eq_ignore_ascii_case("outcome") => ValueTargetMode::Outcome,
+        _ => ValueTargetMode::Td,
+    }
+}
+
+/// The active value-target mode, read once from `HYZERO_VALUE_TARGET_MODE` and cached.
+///
+/// When `outcome` is selected AND any of the `HYZERO_TD*` knobs are also set, outcome
+/// mode wins (it forces γ=1 / full-outcome bootstrap) and a one-time notice is logged
+/// so the effective config is unambiguous.
+fn value_target_mode() -> ValueTargetMode {
+    static MODE: OnceLock<ValueTargetMode> = OnceLock::new();
+    *MODE.get_or_init(|| {
+        let raw = std::env::var("HYZERO_VALUE_TARGET_MODE").ok();
+        let mode = parse_value_target_mode(raw.as_deref());
+        if mode == ValueTargetMode::Outcome {
+            let td_set = std::env::var_os("HYZERO_TD").is_some()
+                || std::env::var_os("HYZERO_TD_NSTEP").is_some()
+                || std::env::var_os("HYZERO_TD_GAMMA").is_some();
+            if td_set {
+                eprintln!(
+                    "[replay_buffer] HYZERO_VALUE_TARGET_MODE=outcome overrides \
+                     HYZERO_TD/HYZERO_TD_NSTEP/HYZERO_TD_GAMMA (full outcome, γ=1)"
+                );
+            }
+        }
+        mode
+    })
+}
+
+/// Resolve a mode into the `(td_on, n, γ)` triple passed to `compute_td_target`.
+///
+/// `Td` mode reads the legacy `HYZERO_TD*` knobs (byte-identical to pre-mode code).
+/// `Outcome` mode forces the TD path on with γ=1.0 and `n = OUTCOME_NSTEP`.
+fn effective_td_params(mode: ValueTargetMode) -> (bool, usize, f32) {
+    match mode {
+        ValueTargetMode::Outcome => (true, OUTCOME_NSTEP, 1.0),
+        ValueTargetMode::Td => (td_enabled(), td_nstep(), td_gamma()),
+    }
 }
 
 /// Compute the n-step TD return `G_t` for the step at absolute trajectory index `t`,
@@ -187,10 +254,10 @@ impl ReplayBuffer {
             return Vec::new();
         }
 
-        // Read n-step TD config once for the whole batch; env-var overhead amortized.
-        let td_on = td_enabled();
-        let td_n = td_nstep();
-        let td_g = td_gamma();
+        // Read the value-target mode + n-step TD config once for the whole batch;
+        // env-var overhead amortized. `Outcome` mode forces γ=1 / full-outcome
+        // bootstrap; `Td` mode preserves the legacy HYZERO_TD* behavior exactly.
+        let (td_on, td_n, td_g) = effective_td_params(value_target_mode());
 
         let mut rng = rand::rng();
         let mut samples = Vec::with_capacity(batch_size);
@@ -613,6 +680,116 @@ mod tests {
             assert!(
                 s.td_targets.iter().all(|t| t.is_some()),
                 "TD enabled must yield all-Some td_targets"
+            );
+        }
+    }
+
+    /// `parse_value_target_mode` recognizes `outcome` (case-insensitive, trimmed)
+    /// and maps everything else — including `td`, unknown strings, and absence — to
+    /// the legacy `Td` mode.
+    #[test]
+    fn parse_value_target_mode_recognizes_outcome_and_defaults_to_td() {
+        assert_eq!(parse_value_target_mode(None), ValueTargetMode::Td);
+        assert_eq!(parse_value_target_mode(Some("td")), ValueTargetMode::Td);
+        assert_eq!(parse_value_target_mode(Some("TD")), ValueTargetMode::Td);
+        assert_eq!(
+            parse_value_target_mode(Some("garbage")),
+            ValueTargetMode::Td
+        );
+        assert_eq!(parse_value_target_mode(Some("")), ValueTargetMode::Td);
+        assert_eq!(
+            parse_value_target_mode(Some("outcome")),
+            ValueTargetMode::Outcome
+        );
+        assert_eq!(
+            parse_value_target_mode(Some("  OUTCOME  ")),
+            ValueTargetMode::Outcome
+        );
+    }
+
+    /// In default (Td) mode the effective TD params are the legacy 5-step,
+    /// γ=0.997, TD-on triple, and produce identical targets to a direct legacy call.
+    #[test]
+    fn td_mode_unchanged_by_default() {
+        let _env = TestEnvGuard::new(&[
+            "HYZERO_VALUE_TARGET_MODE",
+            "HYZERO_TD",
+            "HYZERO_TD_NSTEP",
+            "HYZERO_TD_GAMMA",
+        ]);
+        // SAFETY: protected by TestEnvGuard; no concurrent env-var access.
+        unsafe {
+            std::env::remove_var("HYZERO_VALUE_TARGET_MODE");
+            std::env::remove_var("HYZERO_TD");
+            std::env::remove_var("HYZERO_TD_NSTEP");
+            std::env::remove_var("HYZERO_TD_GAMMA");
+        }
+
+        let mode = parse_value_target_mode(None);
+        assert_eq!(mode, ValueTargetMode::Td);
+
+        let (on, n, g) = effective_td_params(mode);
+        assert!(on, "default Td mode keeps TD on");
+        assert_eq!(n, 5, "default n-step horizon is 5");
+        assert!((g - 0.997).abs() < 1e-6, "default γ is 0.997, got {g}");
+
+        // Targets under the resolved params equal a direct legacy 5-step / γ=0.997 call.
+        let rewards = [0.0f32, 0.2, -0.4, 0.1, 0.0];
+        let root_values = [0.1f32, 0.3, 0.7, -0.5, 0.2];
+        let traj = GameTrajectory {
+            steps: (0..5)
+                .map(|i| make_step_full(i % 2 == 0, root_values[i], rewards[i]))
+                .collect(),
+            game_outcome: 1.0,
+            model_version: 1,
+            is_draw: false,
+        };
+        for t in 0..traj.steps.len() {
+            let resolved = compute_td_target(&traj, t, n, g);
+            let legacy = compute_td_target(&traj, t, 5, 0.997);
+            assert!(
+                (resolved - legacy).abs() < 1e-6,
+                "step {t}: resolved {resolved} != legacy {legacy}"
+            );
+        }
+    }
+
+    /// Outcome mode propagates the terminal game outcome to EVERY step with γ=1 and
+    /// no bootstrap: each step's target is ±1 in that step's point of view (the
+    /// side-to-move POV convention), independent of the step's own root_value.
+    #[test]
+    fn outcome_mode_propagates_terminal_to_all_steps() {
+        let (on, n, g) = effective_td_params(ValueTargetMode::Outcome);
+        assert!(on, "outcome mode forces TD path on");
+        assert_eq!(
+            n, OUTCOME_NSTEP,
+            "outcome mode uses a trajectory-spanning n"
+        );
+        assert!((g - 1.0).abs() < 1e-6, "outcome mode uses γ=1.0, got {g}");
+
+        // 10-step trajectory, alternating sides W,B,W,...; zero intermediate rewards
+        // so the outcome fully determines every target. game_outcome = +1 (White wins).
+        // root_values are deliberate distractors: outcome mode must ignore them.
+        let n_steps = 10usize;
+        let traj = GameTrajectory {
+            steps: (0..n_steps)
+                .map(|i| make_step_full(i % 2 == 0, 0.9, 0.0))
+                .collect(),
+            game_outcome: 1.0,
+            model_version: 1,
+            is_draw: false,
+        };
+
+        for t in 0..n_steps {
+            let target = compute_td_target(&traj, t, n, g);
+            let expected = if traj.steps[t].white_to_move {
+                1.0
+            } else {
+                -1.0
+            };
+            assert!(
+                (target - expected).abs() < 1e-6,
+                "step {t}: outcome target expected {expected}, got {target}"
             );
         }
     }

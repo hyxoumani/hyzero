@@ -182,19 +182,15 @@ export HYZERO_POLICY_ENTROPY_WEIGHT=${HYZERO_POLICY_ENTROPY_WEIGHT:-0.0}
 # run; TB value/reward supervision is unaffected. Code default 1.0 = legacy.
 export HYZERO_TB_POLICY_WEIGHT=${HYZERO_TB_POLICY_WEIGHT:-0.0}
 export HYZERO_ANTISYM_LOSS_WEIGHT=0.01
-# Material shaping (opt-in): give rule-draws (repetition, fifty-move, move-cap)
-# a tanh(Δmaterial/scale) value target so the value head keeps learning when
-# 92%+ of self-play games draw 0.0. True draws (stalemate, insufficient material)
-# stay 0.0 — see score_board_terminal in src/selfplay/game_task.rs. Scale is
-# lowered to 3.0 (from the code default 5.0) for a stronger draw-shaping gradient:
-# a lower divisor in tanh(Δmaterial/scale) yields a stronger shaping signal.
-export HYZERO_MATERIAL_SHAPING=1
-export HYZERO_MATERIAL_SHAPING_SCALE=3.0
-# Discount repetition/move-cap draw shaping (NOT fifty-move): from won KQ/KR-vs-K
-# positions models mated in only 3/120 games, shuffling to repetition instead
-# because a +0.9 shaped repetition earned ~90% of mating. 0.3 sharpens the
-# mate-vs-shuffle gradient while keeping the defender's prefer-repetition signal.
-export HYZERO_SHAPING_REP_DISCOUNT=0.3
+# Material shaping is OFF (SOTA alignment): rule-draws (repetition, fifty-move,
+# move-cap) return their true 0.0 terminal value instead of a tanh(Δmaterial)
+# surrogate. SOTA board-game agents (MuZero/AlphaZero) train on exact game
+# outcomes; shaped draw labels bias the value head away from the true objective.
+# HYZERO_MATERIAL_SHAPING is intentionally unset here (code default = OFF).
+# Value-target mode (SOTA alignment): `outcome` propagates the full game outcome
+# to every step with γ=1 (MuZero board-game convention). `td` keeps the legacy
+# n-step TD path (HYZERO_TD*). Default here is outcome; override to switch back.
+export HYZERO_VALUE_TARGET_MODE=${HYZERO_VALUE_TARGET_MODE:-outcome}
 # Mirrored (antithetic) eval start pairs: each eval-ladder slot samples ONE
 # curriculum start and plays it twice with the challenger's color swapped, so
 # both games share the identical position. Reduces win_rate/candidate_elo
@@ -386,6 +382,24 @@ echo "  ────────────────────"
 echo "  SCORE:               $SCORE"
 echo ""
 
+# ── KQvK conversion audit ──────────────────────────────────────
+# Report how often self-play converts won K+Q vs K starts into actual mates
+# (vs shuffling to repetition / move-cap). Robust: if the audit script is absent
+# or fails, write null into the baseline JSON — never break the score run.
+KQVK_JSON="null"
+if [ -f scripts/kqvk_audit.py ]; then
+    echo "[4b/5] Running KQvK conversion audit..."
+    if _KQVK_OUT=$(python3 scripts/kqvk_audit.py logs/selfplay_sample.pgn 2>>"$LOG_FILE") \
+        && [ -n "$_KQVK_OUT" ]; then
+        KQVK_JSON="$_KQVK_OUT"
+        echo "  kqvk: $KQVK_JSON"
+        echo "[kqvk_audit] $KQVK_JSON" >> "$LOG_FILE"
+    else
+        echo "  WARN: kqvk audit failed — writing null"
+        echo "[kqvk_audit] FAILED (null)" >> "$LOG_FILE"
+    fi
+fi
+
 # ── Write baseline ─────────────────────────────────────────────
 echo "[5/5] Writing baseline..."
 
@@ -437,6 +451,7 @@ cat > "$BASELINE_FILE" << EOF
         "tablebase_cache": "$TB_CACHE",
         "tablebase_frac": $TB_FRAC
     },
+    "kqvk": $KQVK_JSON,
     "log_file": "$LOG_FILE"
 }
 EOF
