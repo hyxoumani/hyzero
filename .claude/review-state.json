@@ -1,0 +1,10 @@
+{
+  "last_reviewed_sha": "bde4f9be00d1c59b648a4f3c8e59d63c9121d99c",
+  "last_reviewed_at": "2026-07-04",
+  "reviewed_scope": [
+    "elo-ladder feature series (7b53e5d..9450e38)",
+    "Gumbel-Top-K + sequential halving MCTS root selection (5f30ea8)"
+  ],
+  "findings_count": 9,
+  "note": "Initialization run — no prior checkpoint. Next run should review commits with SHA newer than last_reviewed_sha on origin/main."
+}
