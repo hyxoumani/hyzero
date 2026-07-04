@@ -81,6 +81,35 @@ def test_graded_zero_wdl_stays_zero():
     assert fell_back is False
 
 
+def test_probe_dtz_skips_positions_beyond_table_reach():
+    """probe_dtz returns None for boards over the man cap or with castling rights."""
+    import chess
+
+    # Six men > a 4-man cap ⇒ skipped before any table lookup.
+    over = chess.Board("4k3/8/8/8/8/8/PPP5/4K3 w - - 0 1")
+    assert export_tb_wdl.probe_dtz(object(), 4, over) is None
+
+    # Castling rights are undefined for Syzygy ⇒ skipped.
+    castled = chess.Board("4k3/8/8/8/8/8/8/R3K3 w Q - 0 1")
+    assert export_tb_wdl.probe_dtz(object(), 5, castled) is None
+
+
+def test_probe_dtz_grades_kqvk_from_real_tables():
+    """With tables present, a KQvK win probes a finite |DTZ| and grades below ±1."""
+    import chess
+
+    tablebase, max_men = export_tb_wdl.open_tablebase()
+    if tablebase is None:
+        pytest.skip("no Syzygy tables in data/syzygy")
+    board = chess.Board("4k3/8/8/8/8/8/Q7/4K3 w - - 0 1")
+    dtz = export_tb_wdl.probe_dtz(tablebase, max_men, board)
+    assert dtz is not None and dtz > 0
+    value, fell_back = export_tb_wdl.graded_value(1, dtz)
+    assert fell_back is False
+    assert 0.25 <= value < 1.0
+    tablebase.close()
+
+
 def test_export_is_idempotent_and_rebuilds_on_stale(tmp_path, monkeypatch):
     """A second run skips when the CSV is newer; touching the cache forces a rebuild."""
     cache = tmp_path / "cache.pkl"

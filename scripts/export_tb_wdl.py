@@ -20,10 +20,14 @@ emits `data/syzygy/tb_wdl.csv`, one `normfen,value` line per distinct position:
               and the POV the Rust value targets use, so the Rust loader (an f32
               parser) stores it with no sign flip.
 
-DTZ source: the graded scaling needs a per-record `dtz` field. Current caches do
-not carry one (the trajectory builder probes DTZ to pick optimal moves but does
-not store it), so every nonzero-WDL entry falls back to the full ±1 magnitude and
-the fallback count is reported. A future cache that stores `dtz` grades automatically.
+DTZ source: the graded scaling needs a per-position `dtz`. Caches do not carry one
+(the trajectory builder probes DTZ to pick optimal moves but does not store it), so
+in graded mode each nonzero-WDL position is probed live against the Syzygy tables in
+HYZERO_SYZYGY_PATH (default data/syzygy) via python-chess. Positions with more men
+than the tables cover, positions with castling rights, or positions whose table is
+missing fail probing and fall back to the full ±1 magnitude (the fallback count is
+reported). When the directory holds no table files at all every nonzero-WDL position
+falls back to ±1, so graded mode degrades to the ungraded win/loss magnitude.
 
 Idempotent: regeneration is skipped when the CSV already exists and is newer than
 the input cache. Delete the CSV (or touch the cache) to force a rebuild.
@@ -36,6 +40,8 @@ Environment variables:
     HYZERO_TB_WDL_PATH:          Output CSV.  Default data/syzygy/tb_wdl.csv.
     HYZERO_TB_WDL_GRADED:        Truthy ⇒ emit DTZ-graded f32 values. Default off
                                  (plain WDL ints), so behavior is unchanged unless set.
+    HYZERO_SYZYGY_PATH:          Syzygy tablebase directory probed for DTZ in graded
+                                 mode. Default data/syzygy.
 
 Output:
     Prints: "export_tb_wdl: wrote N entries to <path>" (or a skip/empty notice).
@@ -43,10 +49,13 @@ Output:
 
 from __future__ import annotations
 
+import glob
 import os
 import sys
+import time
 
 import chess
+import chess.syzygy
 
 # DTZ grading shape (STM-POV magnitude). A near-mate win (dtz=1) scores
 # ~V_MIN + (1-V_MIN)*(1-1/DTZ_MAX) = 0.9925; a distant win (dtz>=DTZ_MAX) floors
@@ -55,18 +64,60 @@ V_MIN = 0.25
 DTZ_MAX = 100.0
 
 
-def normfen(fen: str) -> str:
-    """Return the clock-invariant first-four-field FEN with a RAW ep target.
+def normfen_from_board(board: "chess.Board") -> str:
+    """Return the clock-invariant first-four-field FEN for an already-built board.
 
     Matches the Rust `GameBoard::to_normfen` emitter: placement + active color +
     castling come from python-chess's FEN, but the en passant field is taken from
     the raw `board.ep_square` (set after any double push, regardless of whether a
     capture is legal) rather than the legality-filtered `board.fen()` ep field.
     """
-    board = chess.Board(fen)
     placement, color, castling = board.fen().split(" ")[:3]
     ep = chess.square_name(board.ep_square) if board.ep_square is not None else "-"
     return f"{placement} {color} {castling} {ep}"
+
+
+def normfen(fen: str) -> str:
+    """Return the clock-invariant first-four-field FEN with a RAW ep target."""
+    return normfen_from_board(chess.Board(fen))
+
+
+def open_tablebase() -> "tuple[chess.syzygy.Tablebase | None, int]":
+    """Open the Syzygy dir and return (tablebase, max_men), or (None, 0) if empty.
+
+    max_men is the largest piece count covered by any `.rtbz` file present (parsed
+    from filenames like `KRvKP` ⇒ 4), so positions with more men can be skipped
+    without a doomed probe. HYZERO_SYZYGY_PATH overrides the directory.
+    """
+    path = os.environ.get("HYZERO_SYZYGY_PATH", "data/syzygy")
+    tables = glob.glob(os.path.join(path, "*.rtbz"))
+    if not tables:
+        return None, 0
+    max_men = 0
+    for table in tables:
+        stem = os.path.splitext(os.path.basename(table))[0]
+        max_men = max(max_men, sum(1 for c in stem if c in "KQRBNP"))
+    return chess.syzygy.open_tablebase(path), max_men
+
+
+def probe_dtz(
+    tablebase: "chess.syzygy.Tablebase | None", max_men: int, board: "chess.Board"
+) -> "int | None":
+    """Return |DTZ| for a board via Syzygy, or None when it cannot be probed.
+
+    Skips boards with more men than the tables cover or with castling rights (both
+    undefined for Syzygy). A missing table or any probe error also yields None so
+    the caller falls back to the full ±1 magnitude. Only the magnitude is returned;
+    the win/loss sign comes from the cache WDL.
+    """
+    if tablebase is None or chess.popcount(board.occupied) > max_men:
+        return None
+    if board.castling_rights:
+        return None
+    try:
+        return abs(tablebase.probe_dtz(board))
+    except (KeyError, ValueError, chess.syzygy.MissingTableError):
+        return None
 
 
 def iter_positions(cache) -> "list[tuple[str, int, int | None]]":
@@ -145,21 +196,37 @@ def main() -> int:
     cache = TablebaseCache(cache_path)
     graded = _graded_enabled()
 
-    # Dedup by normfen; a position's result is invariant across occurrences.
-    # In graded mode `table` holds f32 values; otherwise plain WDL ints.
+    # In graded mode probe each nonzero-WDL position's DTZ live against the tables.
+    tablebase, max_men = (open_tablebase() if graded else (None, 0))
+    if graded:
+        where = f"{max_men}-man tables" if tablebase is not None else "no tables"
+        print(f"export_tb_wdl: graded DTZ probe against {where}")
+
+    # Dedup by normfen; a position's result is invariant across occurrences, so the
+    # first sighting settles both the value and the probe. `table` holds f32 values
+    # in graded mode and plain WDL ints otherwise.
     table: dict[str, float] = {}
-    fell_back: set[str] = set()
+    graded_n = flat_n = draw_n = 0
+    start = time.monotonic()
     for fen, wdl, dtz in iter_positions(cache):
-        nf = normfen(fen)
         if graded:
-            value, fb = graded_value(wdl, dtz)
+            board = chess.Board(fen)
+            nf = normfen_from_board(board)
+            if nf in table:
+                continue
+            if dtz is None and wdl != 0:
+                dtz = probe_dtz(tablebase, max_men, board)
+            value, fell_back = graded_value(wdl, dtz)
             table[nf] = value
-            if fb:
-                fell_back.add(nf)
+            if wdl == 0:
+                draw_n += 1
+            elif fell_back:
+                flat_n += 1
             else:
-                fell_back.discard(nf)
+                graded_n += 1
         else:
-            table[nf] = wdl
+            table[normfen(fen)] = wdl
+    elapsed = time.monotonic() - start
 
     if not table:
         print(f"export_tb_wdl: cache {cache_path} produced 0 positions — writing empty CSV")
@@ -176,10 +243,10 @@ def main() -> int:
 
     mode = "graded" if graded else "wdl"
     print(f"export_tb_wdl: wrote {len(table)} entries to {out_path} ({mode} mode)")
-    if graded and fell_back:
+    if graded:
         print(
-            f"export_tb_wdl: {len(fell_back)} of {len(table)} entries lacked dtz "
-            f"— fell back to full ±1"
+            f"export_tb_wdl: dtz-graded {graded_n}, flat-fallback {flat_n}, "
+            f"draws {draw_n} — probe pass {elapsed:.1f}s"
         )
     return 0
 
