@@ -604,7 +604,7 @@ pub async fn play_game_dual_from(
 
         let snapshot = board_to_snapshot(&board);
 
-        let move_str = action_to_notation(absolute_action, side_to_move);
+        let move_str = action_to_notation(absolute_action, side_to_move, &board);
         moves.push(move_str.clone());
         match board.process_move(&move_str, side_to_move, turn_count) {
             Ok(_) => {}
@@ -923,7 +923,7 @@ pub async fn play_game(
         let snapshot = board_to_snapshot(&board);
 
         // Convert absolute action to move notation and apply
-        let move_str = action_to_notation(absolute_action, side_to_move);
+        let move_str = action_to_notation(absolute_action, side_to_move, &board);
         moves.push(move_str.clone());
         match board.process_move(&move_str, side_to_move, turn_count) {
             Ok(_) => {}
@@ -1104,7 +1104,13 @@ pub async fn play_game(
 /// For underpromotion actions (>= NUM_BASE_ACTIONS) the from/to squares are
 /// derived from the encoded file indices and the color's promotion rank.
 /// The suffix is "n", "b", or "r" for knight/bishop/rook underpromotion.
-fn action_to_notation(action: ActionIndex, color: Color) -> String {
+///
+/// `board` supplies the moving piece's type so the queen-promotion suffix is
+/// appended ONLY for a pawn reaching the back rank. Keying the suffix on the
+/// destination rank alone appended a spurious "q" to non-pawn moves that land on
+/// rank 1/8 (back-rank rook/queen/king moves), which python-chess rejects as an
+/// illegal promotion and corrupts the logged game.
+fn action_to_notation(action: ActionIndex, color: Color, board: &GameBoard) -> String {
     if action as usize >= NUM_BASE_ACTIONS {
         // Decode underpromotion: piece_idx encodes suffix, from_file and to_file
         // give from/to squares at the promotion rank for this color.
@@ -1146,13 +1152,22 @@ fn action_to_notation(action: ActionIndex, color: Color) -> String {
     let to_file = (b'a' + to_sq % 8) as char;
     let to_rank = (b'1' + to_sq / 8) as char;
 
-    // Only add queen promotion suffix for moves from penultimate rank to back rank.
-    // This avoids erroneously appending 'q' to king/rook moves that happen to land
-    // on rank 1 or 8 (e.g. castling, back-rank rook moves).
+    // Only add the queen-promotion suffix for a PAWN reaching the back rank.
+    // Keying on the destination rank alone appended a spurious 'q' to non-pawn
+    // moves that land on rank 1/8 (back-rank rook/queen/king moves), which
+    // python-chess parses as an illegal promotion and drops the game. Query the
+    // moving piece from the board (from_sq is absolute) to gate on pawn-ness.
     let from_rank_num = from_sq / 8;
     let to_rank_num = to_sq / 8;
-    let is_promotion = (color == Color::White && from_rank_num == 6 && to_rank_num == 7)
-        || (color == Color::Black && from_rank_num == 1 && to_rank_num == 0);
+    let mover = if color == Color::White {
+        &board.player1
+    } else {
+        &board.player2
+    };
+    let is_pawn = mover.get_piece_type_at(from_sq) == Some(PieceType::Pawn);
+    let is_promotion = is_pawn
+        && ((color == Color::White && from_rank_num == 6 && to_rank_num == 7)
+            || (color == Color::Black && from_rank_num == 1 && to_rank_num == 0));
     if is_promotion {
         format!("{}{}{}{}q", from_file, from_rank, to_file, to_rank)
     } else {
@@ -1737,14 +1752,57 @@ mod tests {
         );
     }
 
+    /// Build a board from a FEN for notation tests. Panics on an invalid FEN.
+    fn board_for_notation(fen: &str) -> GameBoard {
+        use crate::game::fen::board_from_fen;
+        use crate::PrecomputedItems;
+        use std::sync::Arc;
+        let precomputed = Arc::new(PrecomputedItems::begin_precomputing());
+        let (board, _, _) = board_from_fen(fen, precomputed).expect("valid FEN");
+        board
+    }
+
     #[test]
     fn test_action_to_notation() {
+        // White pawns on e2 and a7 so both moves resolve as pawn moves.
+        let board = board_for_notation("4k3/P7/8/8/8/8/4P3/4K3 w - - 0 1");
+
         // e2 = sq 12, e4 = sq 28 → action = 12*64 + 28 = 796
-        let notation = action_to_notation(796, Color::White);
+        let notation = action_to_notation(796, Color::White, &board);
         assert_eq!(notation, "e2e4");
 
-        // a7 = sq 48, a8 = sq 56 → action = 48*64 + 56 = 3128 (promotion)
-        let notation = action_to_notation(3128, Color::White);
+        // a7 = sq 48, a8 = sq 56 → action = 48*64 + 56 = 3128 (pawn promotion)
+        let notation = action_to_notation(3128, Color::White, &board);
+        assert_eq!(notation, "a7a8q");
+    }
+
+    /// A non-pawn move that lands on the back rank must NOT carry a promotion
+    /// suffix — the token stays 4 chars. FAILS before the fix (the destination
+    /// rank alone appended a spurious "q", e.g. "a7a8q" for a rook), which
+    /// python-chess rejects as an illegal promotion and drops the game.
+    #[test]
+    fn non_pawn_move_to_back_rank_has_no_promotion_suffix() {
+        // White rook on a7, white queen on h2, black king in a corner. No pawns.
+        let board = board_for_notation("4k3/R7/8/8/8/8/7Q/4K3 w - - 0 1");
+
+        // Rook a7→a8: from sq 48, to sq 56 → action 3128 (same as the promotion
+        // encoding), but the mover is a rook, so no suffix.
+        let notation = action_to_notation(3128, Color::White, &board);
+        assert_eq!(notation, "a7a8");
+
+        // Queen h2→h1: from sq 15, to sq 7 → action = 15*64 + 7 = 967. Black-rank
+        // landing is on rank 1 but the mover is a queen (checked for white here).
+        let notation = action_to_notation(15 * 64 + 7, Color::White, &board);
+        assert_eq!(notation, "h2h1");
+    }
+
+    /// A genuine pawn promotion keeps its suffix (queen for base actions,
+    /// underpromotion letter for the underpromotion range).
+    #[test]
+    fn pawn_promotion_keeps_suffix() {
+        let board = board_for_notation("4k3/P7/8/8/8/8/8/4K3 w - - 0 1");
+        // a7→a8 by the pawn → queen-promotion suffix.
+        let notation = action_to_notation(3128, Color::White, &board);
         assert_eq!(notation, "a7a8q");
     }
 
@@ -1753,6 +1811,7 @@ mod tests {
         use crate::data::encoding::move_to_action as m2a;
         use crate::game::Move;
 
+        let board = board_for_notation("4k3/4P3/8/8/8/8/8/4K3 w - - 0 1");
         // White pawn e7→e8 with knight underpromotion
         // from_sq = 52 (e7), to_sq = 60 (e8)
         let mv = Move {
@@ -1767,7 +1826,7 @@ mod tests {
             action as usize >= NUM_BASE_ACTIONS,
             "expected underpromo action, got {action}"
         );
-        let notation = action_to_notation(action, Color::White);
+        let notation = action_to_notation(action, Color::White, &board);
         assert_eq!(notation, "e7e8n");
     }
 
@@ -1776,6 +1835,7 @@ mod tests {
         use crate::data::encoding::move_to_action as m2a;
         use crate::game::Move;
 
+        let board = board_for_notation("4k3/P7/8/8/8/8/8/4K3 w - - 0 1");
         // White pawn a7→a8 with rook underpromotion
         let mv = Move {
             from: Square::A7,
@@ -1786,7 +1846,7 @@ mod tests {
         };
         let action = m2a(&mv);
         assert!(action as usize >= NUM_BASE_ACTIONS);
-        let notation = action_to_notation(action, Color::White);
+        let notation = action_to_notation(action, Color::White, &board);
         assert_eq!(notation, "a7a8r");
     }
 
