@@ -73,6 +73,7 @@ class PredictionNetwork(nn.Module):
         num_actions: int = 4672,
         value_head: str = "scalar",
         value_support_size: int = VALUE_SUPPORT_SIZE,
+        moves_left_head: bool = False,
     ) -> None:
         super().__init__()
         board_size = 8 * 8  # 64 spatial positions
@@ -83,6 +84,11 @@ class PredictionNetwork(nn.Module):
             )
         self.value_head_mode = value_head
         self.value_support_size = value_support_size
+        # lc0-style moves-left head (MLH): predicts normalized plies-remaining in
+        # [0, 1] via sigmoid. Only built when enabled so legacy checkpoints and the
+        # default configuration are byte-identical (no extra params in the f
+        # state_dict). See hyzero.config.moves_left_head_enabled.
+        self.moves_left_head_enabled = moves_left_head
 
         # Policy head: 1x1 conv (64->2) -> BN -> ReLU -> flatten -> linear (128->4672)
         self.policy_head = nn.Sequential(
@@ -124,6 +130,21 @@ class PredictionNetwork(nn.Module):
                 "value_support", build_value_support(value_support_size)
             )
 
+        if moves_left_head:
+            # Moves-left head: same 1x1-conv trunk shape as the scalar value head,
+            # final linear -> Sigmoid so the output is a normalized plies-remaining
+            # estimate m in [0, 1] (m = plies_to_terminal / MLH_CAP, clamped).
+            self.moves_left_head = nn.Sequential(
+                nn.Conv2d(hidden_channels, 1, kernel_size=1, bias=False),
+                nn.BatchNorm2d(1),
+                nn.ReLU(inplace=True),
+                nn.Flatten(),
+                nn.Linear(board_size, hidden_channels),
+                nn.ReLU(inplace=True),
+                nn.Linear(hidden_channels, 1),
+                nn.Sigmoid(),
+            )
+
     def forward(
         self, hidden_state: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -147,3 +168,26 @@ class PredictionNetwork(nn.Module):
             probs = F.softmax(value_out, dim=-1)  # [B, N]
             return (probs * self.value_support).sum(dim=-1)  # [B]
         return value_out.squeeze(-1)
+
+    def moves_left(self, hidden_state: torch.Tensor) -> torch.Tensor:
+        """Predict normalized plies-remaining m in [0, 1] for a hidden state.
+
+        Kept out of :meth:`forward` so the (policy_logits, value) contract that the
+        trainer and inference server unpack stays unchanged; callers invoke this
+        separately only when the moves-left head is enabled.
+
+        Args:
+            hidden_state: [B, hidden_channels, 8, 8].
+
+        Returns:
+            [B] float tensor in [0, 1] (sigmoid output squeezed).
+
+        Raises:
+            RuntimeError: if the moves-left head is not enabled on this network.
+        """
+        if not self.moves_left_head_enabled:
+            raise RuntimeError(
+                "moves_left() called but the moves-left head is disabled; "
+                "construct PredictionNetwork with moves_left_head=True"
+            )
+        return self.moves_left_head(hidden_state).squeeze(-1)  # [B]

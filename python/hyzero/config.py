@@ -36,3 +36,36 @@ def value_head_mode() -> str:
         )
         mode = "scalar"
     return mode
+
+
+def moves_left_head_enabled() -> bool:
+    """Return whether the lc0-style moves-left head (MLH) is enabled.
+
+    Read from ``HYZERO_MOVES_LEFT_HEAD``; default OFF (legacy). Any value that is
+    not "0" / "false" / "no" / empty (case-insensitive, trimmed) enables it. When
+    enabled, the prediction network grows a small scalar head predicting the
+    normalized plies-remaining to the trajectory terminal in [0, 1].
+    """
+    raw = os.environ.get("HYZERO_MOVES_LEFT_HEAD", "").strip().lower()
+    return raw not in ("", "0", "false", "no")
+
+
+def moves_left_cap() -> float:
+    """Return the moves-left normalization cap (plies) from ``HYZERO_MLH_CAP``.
+
+    Plies-remaining targets are normalized as ``plies / cap`` and clamped to
+    [0, 1]. Default 100.0. Non-positive or unparseable values fall back to 100.0.
+    """
+    raw = os.environ.get("HYZERO_MLH_CAP")
+    if raw is None:
+        return 100.0
+    try:
+        value = float(raw)
+    except (ValueError, TypeError):
+        print(
+            f"[config] WARNING: HYZERO_MLH_CAP={raw!r} is not a valid float;"
+            " using default 100.0",
+            file=sys.stderr,
+        )
+        return 100.0
+    return value if value > 0.0 else 100.0
