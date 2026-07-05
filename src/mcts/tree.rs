@@ -526,13 +526,18 @@ impl MCTSTree {
                 } else {
                     // Expand: call evaluator
                     let action = parent.legal_actions[leaf_action_idx];
-                    let (new_hidden, reward, policy, value) =
+                    let (new_hidden, reward, policy, value, moves_left) =
                         evaluator.expand_leaf(&parent.hidden_state, action).await;
 
                     // MuZero internal nodes: top-K=64 action candidates by prior policy.
                     // (Real legality isn't computable from the hidden state alone.)
                     let child_actions = top_k_actions(&policy, 64);
-                    let child = MCTSNode::new(new_hidden, &policy, child_actions, reward);
+                    let mut child = MCTSNode::new(new_hidden, &policy, child_actions, reward);
+                    // Lift the network's moves-left estimate into the node when the
+                    // backend produced one (MLH on); otherwise keep the neutral 0.5.
+                    if let Some(m) = moves_left {
+                        child.m = m;
+                    }
                     parent.children[leaf_action_idx] = Some(Box::new(child));
 
                     value
@@ -688,10 +693,13 @@ impl MCTSTree {
         if !root_child_was_some {
             // Expand the root child via evaluator. This is the leaf for this sim.
             let action = self.root.legal_actions[root_action_idx];
-            let (new_hidden, reward, policy, value) =
+            let (new_hidden, reward, policy, value, moves_left) =
                 evaluator.expand_leaf(&self.root.hidden_state, action).await;
             let child_actions = top_k_actions(&policy, 64);
-            let child = MCTSNode::new(new_hidden, &policy, child_actions, reward);
+            let mut child = MCTSNode::new(new_hidden, &policy, child_actions, reward);
+            if let Some(m) = moves_left {
+                child.m = m;
+            }
             self.root.children[root_action_idx] = Some(Box::new(child));
             self.backpropagate(&path, value);
             return;
@@ -734,10 +742,13 @@ impl MCTSTree {
                     let leaf_action_idx = child_idx;
                     let parent = self.navigate_to_parent_mut(&path);
                     let action = parent.legal_actions[leaf_action_idx];
-                    let (new_hidden, reward, policy, value) =
+                    let (new_hidden, reward, policy, value, moves_left) =
                         evaluator.expand_leaf(&parent.hidden_state, action).await;
                     let child_actions = top_k_actions(&policy, 64);
-                    let child = MCTSNode::new(new_hidden, &policy, child_actions, reward);
+                    let mut child = MCTSNode::new(new_hidden, &policy, child_actions, reward);
+                    if let Some(m) = moves_left {
+                        child.m = m;
+                    }
                     parent.children[leaf_action_idx] = Some(Box::new(child));
                     break value;
                 }
@@ -953,18 +964,18 @@ mod tests {
             &self,
             _obs: &BoardObservation,
             _legal_mask: &[bool],
-        ) -> (HiddenState, Policy, f32) {
+        ) -> (HiddenState, Policy, f32, Option<f32>) {
             let policy = vec![1.0 / NUM_ACTIONS as f32; NUM_ACTIONS];
-            (HiddenState::new(64), policy, 0.5)
+            (HiddenState::new(64), policy, 0.5, None)
         }
 
         async fn expand_leaf(
             &self,
             _hs: &HiddenState,
             _action: ActionIndex,
-        ) -> (HiddenState, f32, Policy, f32) {
+        ) -> (HiddenState, f32, Policy, f32, Option<f32>) {
             let policy = vec![1.0 / NUM_ACTIONS as f32; NUM_ACTIONS];
-            (HiddenState::new(64), 0.0, policy, 0.5)
+            (HiddenState::new(64), 0.0, policy, 0.5, None)
         }
     }
 

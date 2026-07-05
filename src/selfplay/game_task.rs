@@ -559,7 +559,10 @@ pub async fn play_game_dual_from(
             black_evaluator.clone()
         };
 
-        let (hidden_state, policy, value) = evaluator.root_setup(&observation, &legal_mask).await;
+        // Root moves-left estimate is not threaded into the root node (the search
+        // bonus reads it only on expanded children); discard it here.
+        let (hidden_state, policy, value, _root_m) =
+            evaluator.root_setup(&observation, &legal_mask).await;
 
         let mut tree = MCTSTree::new(
             hidden_state,
@@ -774,7 +777,10 @@ pub async fn play_game(
         }
 
         // Root setup: encode board into latent space
-        let (hidden_state, policy, value) = evaluator.root_setup(&observation, &legal_mask).await;
+        // Root moves-left estimate is not threaded into the root node (the search
+        // bonus reads it only on expanded children); discard it here.
+        let (hidden_state, policy, value, _root_m) =
+            evaluator.root_setup(&observation, &legal_mask).await;
 
         // Build MCTS tree and run search
         let mut tree = MCTSTree::new(
@@ -1580,18 +1586,18 @@ mod tests {
             &self,
             _obs: &BoardObservation,
             _legal_mask: &[bool],
-        ) -> (HiddenState, Policy, f32) {
+        ) -> (HiddenState, Policy, f32, Option<f32>) {
             let policy = vec![1.0 / NUM_ACTIONS as f32; NUM_ACTIONS];
-            (HiddenState::new(64), policy, 0.0)
+            (HiddenState::new(64), policy, 0.0, None)
         }
 
         async fn expand_leaf(
             &self,
             _hs: &HiddenState,
             _action: ActionIndex,
-        ) -> (HiddenState, f32, Policy, f32) {
+        ) -> (HiddenState, f32, Policy, f32, Option<f32>) {
             let policy = vec![1.0 / NUM_ACTIONS as f32; NUM_ACTIONS];
-            (HiddenState::new(64), 0.0, policy, 0.0)
+            (HiddenState::new(64), 0.0, policy, 0.0, None)
         }
     }
 
@@ -1609,18 +1615,18 @@ mod tests {
             &self,
             _obs: &BoardObservation,
             _legal_mask: &[bool],
-        ) -> (HiddenState, Policy, f32) {
+        ) -> (HiddenState, Policy, f32, Option<f32>) {
             let policy = vec![1.0 / NUM_ACTIONS as f32; NUM_ACTIONS];
-            (HiddenState::new(64), policy, -1.0)
+            (HiddenState::new(64), policy, -1.0, None)
         }
 
         async fn expand_leaf(
             &self,
             _hs: &HiddenState,
             _action: ActionIndex,
-        ) -> (HiddenState, f32, Policy, f32) {
+        ) -> (HiddenState, f32, Policy, f32, Option<f32>) {
             let policy = vec![1.0 / NUM_ACTIONS as f32; NUM_ACTIONS];
-            (HiddenState::new(64), 0.0, policy, 1.0)
+            (HiddenState::new(64), 0.0, policy, 1.0, None)
         }
     }
 

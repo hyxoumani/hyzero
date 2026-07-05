@@ -15,10 +15,10 @@ pub struct MCTSNode {
     pub legal_actions: Vec<ActionIndex>,
     /// Network estimate of normalized plies-remaining (lc0-style moves-left head)
     /// in [0, 1] for this node's position. Defaults to 0.5 (neutral) and is only
-    /// consulted by the env-gated MLH search bonus. NOTE: the pipeline that
-    /// populates this from the inference server's `m` output is not yet wired
-    /// through the async reply channels — until then every node keeps 0.5, so the
-    /// bonus is a no-op even if HYZERO_MLH_SEARCH_BONUS is set.
+    /// consulted by the env-gated MLH search bonus. Expanded child nodes overwrite
+    /// this with the inference server's `m` output when the backend produced one
+    /// (HYZERO_MOVES_LEFT_HEAD=1); when MLH is off the reply carries no `m` and the
+    /// node keeps 0.5, so the bonus stays a no-op.
     pub m: f32,
 }
 
@@ -56,7 +56,8 @@ impl MCTSNode {
             priors,
             children: vec![None; num_children],
             legal_actions,
-            // Neutral until the inference `m` output is plumbed into the tree.
+            // Neutral default; expansion sites overwrite this with the network's
+            // moves-left estimate when the backend supplies one (MLH on).
             m: 0.5,
         }
     }
@@ -168,8 +169,8 @@ mod tests {
 
     #[test]
     fn new_node_moves_left_defaults_to_neutral() {
-        // Until the inference `m` output is plumbed in, a freshly created node
-        // carries the neutral moves-left estimate 0.5.
+        // A freshly created node carries the neutral moves-left estimate 0.5;
+        // expansion sites overwrite it only when the backend supplies an `m`.
         let policy = vec![0.0f32; 8];
         let node = MCTSNode::new(HiddenState::new(64), &policy, vec![0, 1, 2], 0.0);
         assert!(

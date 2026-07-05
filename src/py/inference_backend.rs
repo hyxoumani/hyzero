@@ -5,6 +5,12 @@ use pyo3::types::{PyDict, PyTuple};
 use crate::data::{BoardObservation, HiddenState, Policy, NUM_ACTIONS, NUM_OBS_PLANES};
 use crate::selfplay::inference::{InferenceBackend, InferenceRequest};
 
+/// Reply sender for a batched `RootSetup`: (hidden, policy, value, moves-left `m`).
+/// The trailing `Option<f32>` is `Some` only under HYZERO_MOVES_LEFT_HEAD=1.
+type RootReplySender = tokio::sync::oneshot::Sender<(HiddenState, Policy, f32, Option<f32>)>;
+/// Reply sender for a batched `ExpandLeaf`: (hidden, reward, policy, value, `m`).
+type LeafReplySender = tokio::sync::oneshot::Sender<(HiddenState, f32, Policy, f32, Option<f32>)>;
+
 /// PyO3 backend that delegates batch inference to the Python InferenceServer.
 ///
 /// Holds a reference to a Python `InferenceServer` object and calls
@@ -65,13 +71,11 @@ impl InferenceBackend for PyO3Backend {
         // Separate requests by type, preserving reply senders.
         let mut root_obs: Vec<BoardObservation> = Vec::new();
         let mut root_masks: Vec<Vec<bool>> = Vec::new();
-        let mut root_replies: Vec<tokio::sync::oneshot::Sender<(HiddenState, Policy, f32)>> =
-            Vec::new();
+        let mut root_replies: Vec<RootReplySender> = Vec::new();
 
         let mut leaf_hidden: Vec<HiddenState> = Vec::new();
         let mut leaf_actions: Vec<crate::data::ActionIndex> = Vec::new();
-        let mut leaf_replies: Vec<tokio::sync::oneshot::Sender<(HiddenState, f32, Policy, f32)>> =
-            Vec::new();
+        let mut leaf_replies: Vec<LeafReplySender> = Vec::new();
 
         for req in requests {
             match req {
@@ -141,9 +145,22 @@ impl InferenceBackend for PyO3Backend {
                     let value_arr: PyReadonlyArray1<f32> =
                         tuple.get_item(2)?.cast_into::<PyArray1<f32>>()?.readonly();
 
+                    // Optional trailing moves-left array [B], present only when the
+                    // server runs with HYZERO_MOVES_LEFT_HEAD=1. Absent → every
+                    // reply carries `None` and nodes keep the neutral 0.5.
+                    let moves_left_arr: Option<PyReadonlyArray1<f32>> = if tuple.len() >= 4 {
+                        Some(tuple.get_item(3)?.cast_into::<PyArray1<f32>>()?.readonly())
+                    } else {
+                        None
+                    };
+
                     let hidden_data = hidden_flat.as_slice()?;
                     let policy_data = policy_flat.as_slice()?;
                     let value_data = value_arr.as_slice()?;
+                    let moves_left_data: Option<&[f32]> = match &moves_left_arr {
+                        Some(arr) => Some(arr.as_slice()?),
+                        None => None,
+                    };
 
                     let hidden_stride = self.hidden_channels * 64;
                     let policy_stride = NUM_ACTIONS;
@@ -169,6 +186,15 @@ impl InferenceBackend for PyO3Backend {
                             value_data.len()
                         )));
                     }
+                    if let Some(ml) = moves_left_data {
+                        if ml.len() != b {
+                            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                                "moves_left array size mismatch: expected {}, got {}",
+                                b,
+                                ml.len()
+                            )));
+                        }
+                    }
 
                     for (i, reply) in root_replies.drain(..).enumerate() {
                         let hs = HiddenState {
@@ -178,7 +204,8 @@ impl InferenceBackend for PyO3Backend {
                         let pol: Policy =
                             policy_data[i * policy_stride..(i + 1) * policy_stride].to_vec();
                         let val = value_data[i];
-                        let _ = reply.send((hs, pol, val));
+                        let m = moves_left_data.map(|ml| ml[i]);
+                        let _ = reply.send((hs, pol, val, m));
                     }
                     Ok(())
                 })();
@@ -187,7 +214,12 @@ impl InferenceBackend for PyO3Backend {
                     eprintln!("[PyO3Backend] root_setup_batch error: {e}");
                     // Send fallbacks for any replies not yet consumed
                     for reply in root_replies.drain(..) {
-                        let _ = reply.send((self.fallback_hidden(), Self::fallback_policy(), 0.0));
+                        let _ = reply.send((
+                            self.fallback_hidden(),
+                            Self::fallback_policy(),
+                            0.0,
+                            None,
+                        ));
                     }
                 }
             }
@@ -241,10 +273,22 @@ impl InferenceBackend for PyO3Backend {
                     let value_arr: PyReadonlyArray1<f32> =
                         tuple.get_item(3)?.cast_into::<PyArray1<f32>>()?.readonly();
 
+                    // Optional trailing moves-left array [B]; present only under
+                    // HYZERO_MOVES_LEFT_HEAD=1. Absent → `None` per reply (node 0.5).
+                    let moves_left_arr: Option<PyReadonlyArray1<f32>> = if tuple.len() >= 5 {
+                        Some(tuple.get_item(4)?.cast_into::<PyArray1<f32>>()?.readonly())
+                    } else {
+                        None
+                    };
+
                     let hidden_data = new_hidden_flat.as_slice()?;
                     let reward_data = reward_arr.as_slice()?;
                     let policy_data = policy_flat.as_slice()?;
                     let value_data = value_arr.as_slice()?;
+                    let moves_left_data: Option<&[f32]> = match &moves_left_arr {
+                        Some(arr) => Some(arr.as_slice()?),
+                        None => None,
+                    };
 
                     let hidden_stride = hidden_channels * 64;
                     let policy_stride = NUM_ACTIONS;
@@ -277,6 +321,15 @@ impl InferenceBackend for PyO3Backend {
                             reward_data.len()
                         )));
                     }
+                    if let Some(ml) = moves_left_data {
+                        if ml.len() != b {
+                            return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                                "moves_left array size mismatch: expected {}, got {}",
+                                b,
+                                ml.len()
+                            )));
+                        }
+                    }
 
                     for (i, reply) in leaf_replies.drain(..).enumerate() {
                         let hs = HiddenState {
@@ -287,7 +340,8 @@ impl InferenceBackend for PyO3Backend {
                         let pol: Policy =
                             policy_data[i * policy_stride..(i + 1) * policy_stride].to_vec();
                         let val = value_data[i];
-                        let _ = reply.send((hs, reward, pol, val));
+                        let m = moves_left_data.map(|ml| ml[i]);
+                        let _ = reply.send((hs, reward, pol, val, m));
                     }
                     Ok(())
                 })();
@@ -295,8 +349,13 @@ impl InferenceBackend for PyO3Backend {
                 if let Err(e) = result {
                     eprintln!("[PyO3Backend] expand_leaf_batch error: {e}");
                     for reply in leaf_replies.drain(..) {
-                        let _ =
-                            reply.send((self.fallback_hidden(), 0.0, Self::fallback_policy(), 0.0));
+                        let _ = reply.send((
+                            self.fallback_hidden(),
+                            0.0,
+                            Self::fallback_policy(),
+                            0.0,
+                            None,
+                        ));
                     }
                 }
             }
@@ -338,7 +397,7 @@ mod tests {
 
         backend.evaluate_batch(vec![req]);
 
-        let (hs, policy, value) = rx.try_recv().expect("no reply received");
+        let (hs, policy, value, _m) = rx.try_recv().expect("no reply received");
         assert_eq!(hs.channels, 128, "hidden_channels should be 128");
         assert_eq!(
             hs.data.len(),
@@ -374,7 +433,7 @@ mod tests {
 
         backend.evaluate_batch(vec![req]);
 
-        let (hs_out, reward, policy, value) = rx.try_recv().expect("no reply received");
+        let (hs_out, reward, policy, value, _m) = rx.try_recv().expect("no reply received");
         assert_eq!(hs_out.channels, 128, "hidden_channels should be 128");
         assert_eq!(
             hs_out.data.len(),

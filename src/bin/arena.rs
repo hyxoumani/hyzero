@@ -329,7 +329,7 @@ async fn fingerprint_evaluator(
         legal_mask[a as usize] = true;
     }
 
-    let (_hidden_state, _policy, value) = evaluator.root_setup(&observation, &legal_mask).await;
+    let (_hidden_state, _policy, value, _m) = evaluator.root_setup(&observation, &legal_mask).await;
     value
 }
 

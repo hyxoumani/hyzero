@@ -10,9 +10,16 @@ pub trait Evaluator: Send + Sync {
     ///
     /// `legal_mask` is a boolean mask of length NUM_ACTIONS; `true` entries are legal moves.
     /// Implementations may use this to zero out illegal logits before softmax.
-    async fn root_setup(&self, observation: &BoardObservation, legal_mask: &[bool]) -> (HiddenState, Policy, f32);
+    ///
+    /// The trailing `Option<f32>` is the normalized moves-left estimate `m` in
+    /// [0, 1] from the network's moves-left head (lc0-style MLH). It is `Some(m)`
+    /// only when the backend produced one (HYZERO_MOVES_LEFT_HEAD=1); otherwise
+    /// `None`, and callers keep the neutral node default (0.5).
+    async fn root_setup(&self, observation: &BoardObservation, legal_mask: &[bool]) -> (HiddenState, Policy, f32, Option<f32>);
 
     /// Dynamics + prediction: advance hidden state by one action, predict policy + value.
     /// Combines g() + f() into one call.
-    async fn expand_leaf(&self, hidden_state: &HiddenState, action: ActionIndex) -> (HiddenState, f32, Policy, f32);
+    ///
+    /// The trailing `Option<f32>` is the moves-left estimate `m`; see `root_setup`.
+    async fn expand_leaf(&self, hidden_state: &HiddenState, action: ActionIndex) -> (HiddenState, f32, Policy, f32, Option<f32>);
 }

@@ -40,12 +40,16 @@ pub enum InferenceRequest {
         observation: BoardObservation,
         /// Boolean mask of length NUM_ACTIONS; `true` means the action is legal.
         legal_mask: Vec<bool>,
-        reply: oneshot::Sender<(HiddenState, Policy, f32)>,
+        /// Trailing `Option<f32>` is the moves-left estimate `m` in [0, 1] from the
+        /// network's moves-left head; `Some` only when the backend produced one
+        /// (HYZERO_MOVES_LEFT_HEAD=1), else `None` (callers keep the 0.5 default).
+        reply: oneshot::Sender<(HiddenState, Policy, f32, Option<f32>)>,
     },
     ExpandLeaf {
         hidden_state: HiddenState,
         action: ActionIndex,
-        reply: oneshot::Sender<(HiddenState, f32, Policy, f32)>,
+        /// Trailing `Option<f32>` is the moves-left estimate `m`; see `RootSetup`.
+        reply: oneshot::Sender<(HiddenState, f32, Policy, f32, Option<f32>)>,
     },
 }
 
@@ -74,11 +78,12 @@ impl InferenceBackend for RandomBackend {
             match req {
                 InferenceRequest::RootSetup { reply, .. } => {
                     let hs = HiddenState::new(self.hidden_channels);
-                    let _ = reply.send((hs, uniform_policy.clone(), 0.0));
+                    // Stub backend produces no moves-left estimate → None (neutral).
+                    let _ = reply.send((hs, uniform_policy.clone(), 0.0, None));
                 }
                 InferenceRequest::ExpandLeaf { reply, .. } => {
                     let hs = HiddenState::new(self.hidden_channels);
-                    let _ = reply.send((hs, 0.0, uniform_policy.clone(), 0.0));
+                    let _ = reply.send((hs, 0.0, uniform_policy.clone(), 0.0, None));
                 }
             }
         }
@@ -247,7 +252,7 @@ impl ChannelEvaluator {
         &self,
         observation: &BoardObservation,
         legal_mask: &[bool],
-    ) -> Result<(HiddenState, Policy, f32), EvalError> {
+    ) -> Result<(HiddenState, Policy, f32, Option<f32>), EvalError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         let req = InferenceRequest::RootSetup {
             observation: observation.clone(),
@@ -264,7 +269,7 @@ impl ChannelEvaluator {
         &self,
         hidden_state: &HiddenState,
         action: ActionIndex,
-    ) -> Result<(HiddenState, f32, Policy, f32), EvalError> {
+    ) -> Result<(HiddenState, f32, Policy, f32, Option<f32>), EvalError> {
         let (reply_tx, reply_rx) = oneshot::channel();
         let req = InferenceRequest::ExpandLeaf {
             hidden_state: hidden_state.clone(),
@@ -293,18 +298,19 @@ impl ChannelEvaluator {
 
 #[async_trait]
 impl Evaluator for ChannelEvaluator {
-    async fn root_setup(&self, observation: &BoardObservation, legal_mask: &[bool]) -> (HiddenState, Policy, f32) {
+    async fn root_setup(&self, observation: &BoardObservation, legal_mask: &[bool]) -> (HiddenState, Policy, f32, Option<f32>) {
         match self.try_root_setup(observation, legal_mask).await {
             Ok(result) => result,
             Err(err) => {
                 self.warn_recovery_once("root_setup", err);
                 let policy: Policy = vec![1.0 / NUM_ACTIONS as f32; NUM_ACTIONS];
-                (HiddenState::new(self.hidden_channels), policy, 0.0)
+                // Recovery carries no moves-left estimate → None (neutral).
+                (HiddenState::new(self.hidden_channels), policy, 0.0, None)
             }
         }
     }
 
-    async fn expand_leaf(&self, hidden_state: &HiddenState, action: ActionIndex) -> (HiddenState, f32, Policy, f32) {
+    async fn expand_leaf(&self, hidden_state: &HiddenState, action: ActionIndex) -> (HiddenState, f32, Policy, f32, Option<f32>) {
         match self.try_expand_leaf(hidden_state, action).await {
             Ok(result) => result,
             Err(err) => {
@@ -312,7 +318,7 @@ impl Evaluator for ChannelEvaluator {
                 let policy: Policy = vec![1.0 / NUM_ACTIONS as f32; NUM_ACTIONS];
                 // Reuse the input width so the neutral state matches the tree's
                 // existing hidden-state shape.
-                (HiddenState::new(hidden_state.channels), 0.0, policy, 0.0)
+                (HiddenState::new(hidden_state.channels), 0.0, policy, 0.0, None)
             }
         }
     }
@@ -336,12 +342,13 @@ mod tests {
 
         let obs = BoardObservation::default();
         let mask = vec![true; NUM_ACTIONS];
-        let (hs, policy, value) = evaluator.root_setup(&obs, &mask).await;
+        let (hs, policy, value, m) = evaluator.root_setup(&obs, &mask).await;
 
         assert_eq!(hs.channels, 64);
         assert_eq!(hs.data.len(), 64 * 64);
         assert_eq!(policy.len(), NUM_ACTIONS);
         assert!((value - 0.0).abs() < f32::EPSILON);
+        assert_eq!(m, None, "RandomBackend produces no moves-left estimate");
 
         // Drop evaluator to close channel and stop batcher
         drop(evaluator);
@@ -359,12 +366,13 @@ mod tests {
         let batcher_handle = tokio::spawn(async move { batcher.run().await });
 
         let hs_in = HiddenState::new(64);
-        let (hs_out, reward, policy, value) = evaluator.expand_leaf(&hs_in, 42).await;
+        let (hs_out, reward, policy, value, m) = evaluator.expand_leaf(&hs_in, 42).await;
 
         assert_eq!(hs_out.channels, 64);
         assert_eq!(policy.len(), NUM_ACTIONS);
         assert!((reward - 0.0).abs() < f32::EPSILON);
         assert!((value - 0.0).abs() < f32::EPSILON);
+        assert_eq!(m, None, "RandomBackend produces no moves-left estimate");
 
         drop(evaluator);
         let _ = batcher_handle.await;
@@ -390,10 +398,10 @@ mod tests {
                 for req in requests {
                     match req {
                         InferenceRequest::RootSetup { reply, .. } => {
-                            let _ = reply.send((HiddenState::new(self.channels), policy.clone(), 0.0));
+                            let _ = reply.send((HiddenState::new(self.channels), policy.clone(), 0.0, None));
                         }
                         InferenceRequest::ExpandLeaf { reply, .. } => {
-                            let _ = reply.send((HiddenState::new(self.channels), 0.0, policy.clone(), 0.0));
+                            let _ = reply.send((HiddenState::new(self.channels), 0.0, policy.clone(), 0.0, None));
                         }
                     }
                 }
@@ -518,7 +526,7 @@ mod tests {
 
         let evaluator = ChannelEvaluator::with_channels(tx, 48);
         let mask = vec![true; NUM_ACTIONS];
-        let (hs, policy, value) = tokio::time::timeout(
+        let (hs, policy, value, m) = tokio::time::timeout(
             Duration::from_secs(5),
             evaluator.root_setup(&BoardObservation::default(), &mask),
         )
@@ -528,6 +536,7 @@ mod tests {
         assert_eq!(hs.channels, 48, "recovery hidden state must use configured width");
         assert_eq!(policy.len(), NUM_ACTIONS);
         assert!((value - 0.0).abs() < f32::EPSILON);
+        assert_eq!(m, None, "recovery carries no moves-left estimate");
     }
 
     /// A recovery (neutral fallback) sets the sticky error flag so a higher-level
@@ -579,6 +588,55 @@ mod tests {
 
         assert!(!evaluator.error_seen(), "clean call must leave the error flag unset");
         assert!(!evaluator.take_error(), "take_error must report clean after a clean call");
+
+        drop(evaluator);
+        let _ = batcher_handle.await;
+    }
+
+    /// Backend that answers every request with a fixed `Some(m)` moves-left
+    /// estimate, standing in for the Python inference server with
+    /// HYZERO_MOVES_LEFT_HEAD=1. Used to prove `m` survives the channel round trip.
+    struct MovesLeftBackend {
+        m: f32,
+        channels: usize,
+    }
+    impl InferenceBackend for MovesLeftBackend {
+        fn evaluate_batch(&mut self, requests: Vec<InferenceRequest>) {
+            let policy: Policy = vec![1.0 / NUM_ACTIONS as f32; NUM_ACTIONS];
+            for req in requests {
+                match req {
+                    InferenceRequest::RootSetup { reply, .. } => {
+                        let _ = reply.send((HiddenState::new(self.channels), policy.clone(), 0.0, Some(self.m)));
+                    }
+                    InferenceRequest::ExpandLeaf { reply, .. } => {
+                        let _ = reply.send((HiddenState::new(self.channels), 0.0, policy.clone(), 0.0, Some(self.m)));
+                    }
+                }
+            }
+        }
+    }
+
+    /// SEAM: an `m`-bearing reply (MLH on) round-trips through the channel and
+    /// arrives as `Some(m)` at both `root_setup` and `expand_leaf`, so the tree
+    /// can lift it into `node.m`. Off-path neutrality (`None`) is covered by the
+    /// `RandomBackend` assertions in `test_root_setup_through_channel`.
+    #[tokio::test]
+    async fn moves_left_estimate_round_trips_through_channel() {
+        let (tx, rx) = mpsc::channel(32);
+        let backend = Box::new(MovesLeftBackend { m: 0.75, channels: 64 });
+        let config = BatcherConfig { max_batch_size: 8, batch_timeout_ms: 10 };
+        let mut batcher = InferenceBatcher::new(rx, backend, config);
+        let batcher_handle = tokio::spawn(async move { batcher.run().await });
+
+        let evaluator = ChannelEvaluator::new(tx);
+        let mask = vec![true; NUM_ACTIONS];
+        let (_hs, _policy, _value, root_m) =
+            evaluator.root_setup(&BoardObservation::default(), &mask).await;
+        assert_eq!(root_m, Some(0.75), "root_setup must carry the m estimate through the channel");
+
+        let (_hs2, _reward, _policy2, _value2, leaf_m) =
+            evaluator.expand_leaf(&HiddenState::new(64), 7).await;
+        assert_eq!(leaf_m, Some(0.75), "expand_leaf must carry the m estimate through the channel");
 
         drop(evaluator);
         let _ = batcher_handle.await;

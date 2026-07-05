@@ -164,18 +164,18 @@ impl Evaluator for RandomEvaluator {
         &self,
         _obs: &BoardObservation,
         _legal_mask: &[bool],
-    ) -> (HiddenState, Policy, f32) {
+    ) -> (HiddenState, Policy, f32, Option<f32>) {
         let policy = vec![1.0 / NUM_ACTIONS as f32; NUM_ACTIONS];
-        (HiddenState::new(64), policy, 0.0)
+        (HiddenState::new(64), policy, 0.0, None)
     }
 
     async fn expand_leaf(
         &self,
         _hs: &HiddenState,
         _action: ActionIndex,
-    ) -> (HiddenState, f32, Policy, f32) {
+    ) -> (HiddenState, f32, Policy, f32, Option<f32>) {
         let policy = vec![1.0 / NUM_ACTIONS as f32; NUM_ACTIONS];
-        (HiddenState::new(64), 0.0, policy, 0.0)
+        (HiddenState::new(64), 0.0, policy, 0.0, None)
     }
 }
 
