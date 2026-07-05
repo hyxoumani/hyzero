@@ -45,8 +45,25 @@ MATE_PRETRAIN_POSITIONS=${HYZERO_MATE_PRETRAIN_POSITIONS:-100000}
 # today's behavior byte-for-byte.
 FROM_SCRATCH=${HYZERO_FROM_SCRATCH:-0}
 if [ "$FROM_SCRATCH" != "0" ]; then
-    echo "[from-scratch] random init + categorical value head; champion pool NOT seeded"
-    RESUME_FROM=""
+    # An explicit HYZERO_RESUME_FROM continues a from-scratch lineage (same
+    # categorical head) instead of random-initing. Still NO old-arch champion-pool
+    # seeding (incompatible value head) and NO mate-pretrained auto-build. Only an
+    # unset/empty HYZERO_RESUME_FROM yields random init. The default RESUME_FROM
+    # (checkpoints/mate_pretrained.pt) is old-arch and must NOT leak in here, so we
+    # gate on the raw env var, not the already-defaulted RESUME_FROM.
+    if [ -n "${HYZERO_RESUME_FROM:-}" ]; then
+        if [ ! -f "$HYZERO_RESUME_FROM" ]; then
+            echo "[from-scratch] ERROR: HYZERO_RESUME_FROM=$HYZERO_RESUME_FROM not found —" \
+                 "refusing to random-init an intended continuation"
+            exit 1
+        fi
+        RESUME_FROM="$HYZERO_RESUME_FROM"
+        echo "[from-scratch] resuming lineage from $RESUME_FROM; categorical value head;" \
+             "champion pool NOT seeded; no mate-pretrained auto-build"
+    else
+        echo "[from-scratch] random init + categorical value head; champion pool NOT seeded"
+        RESUME_FROM=""
+    fi
     export HYZERO_VALUE_HEAD=${HYZERO_VALUE_HEAD:-categorical}
 fi
 
