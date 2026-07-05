@@ -29,6 +29,7 @@ batches set ``is_tablebase = True`` to keep the legacy step-0-only masking.
 
 from __future__ import annotations
 
+import os
 import pickle
 import random
 from dataclasses import dataclass
@@ -110,6 +111,47 @@ class TBTrajectory:
     mate_step: int | None
 
 
+def _supervision_grading_enabled() -> bool:
+    """Whether HYZERO_TB_SUPERVISION_GRADED requests graded values (off by default)."""
+    v = os.environ.get("HYZERO_TB_SUPERVISION_GRADED", "0").strip().lower()
+    return v not in ("", "0", "false", "no")
+
+
+def _normfen_from_fen(fen: str) -> str:
+    """Return the clock-invariant first-four-field FEN for a position.
+
+    Mirrors scripts/export_tb_wdl.py's ``normfen_from_board`` byte-for-byte:
+    placement + active color + castling come from python-chess's FEN, but the en
+    passant field is taken from the RAW ``board.ep_square`` (set after any double
+    push, regardless of capture legality) rather than the legality-filtered
+    ``board.fen()`` ep field. This is the key the WDL CSV is written under.
+    """
+    board = chess.Board(fen)
+    placement, color, castling = board.fen().split(" ")[:3]
+    ep = chess.square_name(board.ep_square) if board.ep_square is not None else "-"
+    return f"{placement} {color} {castling} {ep}"
+
+
+def _load_wdl_csv(path: str) -> dict[str, float]:
+    """Load a ``normfen,value`` WDL CSV into a dict. Values parse as f32.
+
+    Blank lines are skipped. The value is the final comma-separated field
+    (normfens never contain commas), so a right-split isolates it whether the
+    CSV holds graded floats or plain WDL ints.
+    """
+    table: dict[str, float] = {}
+    with open(path, "r", encoding="ascii") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            nf, _, val = line.rpartition(",")
+            if not nf:
+                continue
+            table[nf] = float(val)
+    return table
+
+
 class TablebaseCache:
     """Loaded tablebase position cache supporting random sampling.
 
@@ -173,6 +215,60 @@ class TablebaseCache:
                     optimal_actions=list(item.optimal_actions),
                     all_legal_actions=list(item.all_legal_actions),
                 ))
+
+        # Both TB label sources (this cache and the Rust self-play rescore path)
+        # should emit the same graded values. Behind HYZERO_TB_SUPERVISION_GRADED
+        # (default off), replace the flat ±1 target_value with the DTZ-graded
+        # value joined from the WDL CSV once, here at load, so downstream batch
+        # builders inherit the graded labels with no per-batch cost.
+        if _supervision_grading_enabled():
+            self._apply_graded_supervision()
+
+    def _apply_graded_supervision(self) -> None:
+        """Overwrite flat ±1 target values with DTZ-graded values from the WDL CSV.
+
+        Joins each sample's (snapshot) or each real trajectory step's (trajectory)
+        normfen — first four FEN fields with a raw ep target, matching
+        scripts/export_tb_wdl.py exactly — against ``HYZERO_TB_WDL_PATH`` (default
+        data/syzygy/tb_wdl.csv). A hit replaces ``target_value`` with the graded
+        f32; a miss keeps the flat label. Absorbing trajectory steps (FEN=None)
+        are skipped. The hit/miss tally is logged once. A missing CSV is a no-op
+        (all labels stay flat) with a single warning.
+        """
+        csv_path = os.environ.get("HYZERO_TB_WDL_PATH", "data/syzygy/tb_wdl.csv")
+        if not os.path.exists(csv_path):
+            print(
+                f"TablebaseCache: HYZERO_TB_SUPERVISION_GRADED set but "
+                f"{csv_path!r} missing — keeping flat ±1 supervision values"
+            )
+            return
+
+        table = _load_wdl_csv(csv_path)
+        hits = misses = 0
+        if self._is_trajectory:
+            for traj in self._trajectories:
+                for k, fen in enumerate(traj.fens):
+                    if fen is None:
+                        continue
+                    graded = table.get(_normfen_from_fen(fen))
+                    if graded is None:
+                        misses += 1
+                    else:
+                        traj.target_values[k] = graded
+                        hits += 1
+        else:
+            for sample in self._samples:
+                graded = table.get(_normfen_from_fen(sample.fen))
+                if graded is None:
+                    misses += 1
+                else:
+                    sample.target_value = graded
+                    hits += 1
+
+        print(
+            f"TablebaseCache: graded supervision join — {hits} hits, "
+            f"{misses} misses over {len(table)} csv entries ({csv_path})"
+        )
 
     @property
     def is_trajectory_format(self) -> bool:

@@ -499,3 +499,67 @@ def test_tablebase_cache_detects_trajectory_format(tmp_path):
     assert len(traj_cache) == 1
     assert isinstance(snap_cache.sample(1)[0], TBSample)
     assert isinstance(traj_cache.sample(1)[0], TBTrajectory)
+
+
+# ─── Graded-supervision join tests (HYZERO_TB_SUPERVISION_GRADED) ─────────────
+
+# A hit position (normfen "4k3/8/8/8/8/8/Q7/4K3 w - -") and a miss position
+# (a different placement, absent from the fixture CSV).
+_HIT_FEN = "4k3/8/8/8/8/8/Q7/4K3 w - - 0 1"
+_MISS_FEN = "4k3/8/8/8/8/8/8/R3K3 w - - 0 1"
+
+
+def _write_fixture_csv(tmp_path):
+    """Write a WDL CSV holding only the hit position with a graded value."""
+    csv_path = tmp_path / "tb_wdl.csv"
+    with open(csv_path, "w", encoding="ascii") as f:
+        f.write("4k3/8/8/8/8/8/Q7/4K3 w - -,0.5000\n")
+    return csv_path
+
+
+def _write_snapshot_cache(tmp_path):
+    """Pickle a snapshot cache with one hit sample and one miss sample (flat ±1)."""
+    import pickle
+    from hyzero.data.tablebase import TBSample
+
+    path = tmp_path / "snap.pkl"
+    with open(path, "wb") as f:
+        pickle.dump([
+            TBSample(fen=_HIT_FEN, target_value=1.0, mating_actions=[],
+                     optimal_actions=[8], all_legal_actions=[8, 99]),
+            TBSample(fen=_MISS_FEN, target_value=1.0, mating_actions=[],
+                     optimal_actions=[8], all_legal_actions=[8, 99]),
+        ], f)
+    return path
+
+
+def test_supervision_values_graded_when_csv_present(tmp_path, monkeypatch):
+    """With grading on, a CSV-present position gets the graded value; a miss stays ±1."""
+    from hyzero.data.tablebase import TablebaseCache
+
+    csv_path = _write_fixture_csv(tmp_path)
+    cache_path = _write_snapshot_cache(tmp_path)
+    monkeypatch.setenv("HYZERO_TB_SUPERVISION_GRADED", "1")
+    monkeypatch.setenv("HYZERO_TB_WDL_PATH", str(csv_path))
+
+    cache = TablebaseCache(str(cache_path))
+    samples = cache._samples  # noqa: SLF001 (internal access by design)
+
+    assert samples[0].target_value == pytest.approx(0.5)  # hit → graded
+    assert samples[1].target_value == pytest.approx(1.0)  # miss → flat ±1 kept
+
+
+def test_supervision_grading_off_preserves_flat(tmp_path, monkeypatch):
+    """With grading off (env unset), every target_value stays the flat ±1 label."""
+    from hyzero.data.tablebase import TablebaseCache
+
+    csv_path = _write_fixture_csv(tmp_path)
+    cache_path = _write_snapshot_cache(tmp_path)
+    monkeypatch.delenv("HYZERO_TB_SUPERVISION_GRADED", raising=False)
+    monkeypatch.setenv("HYZERO_TB_WDL_PATH", str(csv_path))
+
+    cache = TablebaseCache(str(cache_path))
+    samples = cache._samples  # noqa: SLF001
+
+    assert samples[0].target_value == pytest.approx(1.0)
+    assert samples[1].target_value == pytest.approx(1.0)
