@@ -30,6 +30,14 @@ pub struct BatchArrays {
     pub target_rewards: Vec<f32>,
     /// Boolean mask derived from `steps[0].legal_moves`; shape [B, NUM_ACTIONS].
     pub legal_masks: Vec<bool>,
+    /// RAW plies-remaining targets for the moves-left head; shape [B, K+1].
+    /// Meaningful only where `moves_left_mask` is true. Zero (masked) for samples
+    /// whose `TrainingSample.moves_left` is empty (e.g. hand-built test samples).
+    pub target_moves_left: Vec<f32>,
+    /// Per-entry validity mask for `target_moves_left`; shape [B, K+1]. True where
+    /// a real plies-remaining target exists; false rows are excluded from the MLH
+    /// loss (weight 0). Legacy/non-MLH training simply ignores both arrays.
+    pub moves_left_mask: Vec<bool>,
     pub batch_size: usize,
     pub unroll_k: usize,
 }
@@ -120,6 +128,11 @@ pub fn assemble_batch_arrays(samples: &[TrainingSample], unroll_k: usize) -> Bat
     let mut target_values = vec![0.0f32; b * kp1];
     let mut target_rewards = vec![0.0f32; b * kp1];
     let mut legal_masks = vec![false; b * pol_stride];
+    // Moves-left head (MLH) targets + validity mask, shape [B, K+1]. Populated
+    // from each sample's `moves_left` (RAW plies-remaining). Samples with an empty
+    // `moves_left` (test/legacy) leave their rows at (0.0, false) → masked out.
+    let mut target_moves_left = vec![0.0f32; b * kp1];
+    let mut moves_left_mask = vec![false; b * kp1];
 
     for (bi, sample) in samples.iter().enumerate() {
         let steps = &sample.steps;
@@ -249,6 +262,15 @@ pub fn assemble_batch_arrays(samples: &[TrainingSample], unroll_k: usize) -> Bat
             let reward_target = flip_sign * step.reward;
             target_rewards[bi * kp1 + k] =
                 (1.0 - gamma) * reward_target + gamma * outcome_in_step_perspective;
+
+            // Moves-left target (RAW plies-remaining). POV-invariant — the plies to
+            // the trajectory terminal do not depend on the side to move or the
+            // color-augmentation flip, so no sign/flip is applied. Rows without a
+            // real target (empty `moves_left`, e.g. test samples) stay masked.
+            if let Some(&ml) = sample.moves_left.get(k) {
+                target_moves_left[bi * kp1 + k] = ml;
+                moves_left_mask[bi * kp1 + k] = true;
+            }
         }
 
         // legal_masks[bi]: derive from steps[0].legal_moves (root position only)
@@ -273,6 +295,8 @@ pub fn assemble_batch_arrays(samples: &[TrainingSample], unroll_k: usize) -> Bat
         target_values,
         target_rewards,
         legal_masks,
+        target_moves_left,
+        moves_left_mask,
         batch_size: b,
         unroll_k,
     }
@@ -323,6 +347,15 @@ pub fn train_batch_python(
     let mask_arr = arrays.legal_masks.into_pyarray(py);
     let masks_np = mask_arr.reshape([b, NUM_ACTIONS])?;
 
+    // Moves-left head targets + validity mask, both [B, K+1]. Always supplied; the
+    // Python trainer consumes them only when the MLH is enabled and otherwise
+    // ignores these extra keys (backward-compatible batch contract).
+    let ml_arr = arrays.target_moves_left.into_pyarray(py);
+    let moves_left_np = ml_arr.reshape([b, kp1])?;
+
+    let ml_mask_arr = arrays.moves_left_mask.into_pyarray(py);
+    let moves_left_mask_np = ml_mask_arr.reshape([b, kp1])?;
+
     // Build batch dict
     let batch_dict = PyDict::new(py);
     batch_dict.set_item("observations", obs_np)?;
@@ -331,6 +364,8 @@ pub fn train_batch_python(
     batch_dict.set_item("target_values", values_np)?;
     batch_dict.set_item("target_rewards", rewards_np)?;
     batch_dict.set_item("legal_masks", masks_np)?;
+    batch_dict.set_item("target_moves_left", moves_left_np)?;
+    batch_dict.set_item("moves_left_mask", moves_left_mask_np)?;
 
     // Call train_batch
     let result_dict = trainer.call_method1(py, "train_batch", (batch_dict,))?;
@@ -670,6 +705,7 @@ mod tests {
             game_outcome: 1.0,
             is_draw: false,
             td_targets: Vec::new(),
+            moves_left: Vec::new(),
         }
     }
 
@@ -767,6 +803,7 @@ mod tests {
             game_outcome: 0.0,
             is_draw: false,
             td_targets: Vec::new(),
+            moves_left: Vec::new(),
         };
 
         // Run many trials to cover both apply_flip paths (50/50 random) — the invariant
@@ -835,6 +872,7 @@ mod tests {
             game_outcome: 1.0,
             is_draw: false,
             td_targets: Vec::new(),
+            moves_left: Vec::new(),
         };
 
         let arrays = assemble_batch_arrays(&[sample], k);
@@ -1035,6 +1073,7 @@ mod tests {
             game_outcome: 1.0, // White wins (checkmate)
             is_draw: false,
             td_targets: Vec::new(),
+            moves_left: Vec::new(),
         };
 
         // β=0.1; root_value=0.0; game_outcome=1.0; root_side_sign=+1.
@@ -1079,6 +1118,7 @@ mod tests {
             game_outcome: -1.0, // Black wins (checkmate)
             is_draw: false,
             td_targets: Vec::new(),
+            moves_left: Vec::new(),
         };
 
         // β=0.1; root_value=0.0; game_outcome=-1.0; root_side_sign=-1.
@@ -1117,6 +1157,7 @@ mod tests {
             game_outcome: 0.0,
             is_draw: true,
             td_targets: Vec::new(),
+            moves_left: Vec::new(),
         };
 
         // β=0.1; root_value=0.5; game_outcome=0.0 (draw); outcome term = 0.
@@ -1166,6 +1207,7 @@ mod tests {
             game_outcome: 1.0, // White wins (checkmate), but γ=0 so outcome shouldn't matter
             is_draw: false,
             td_targets: Vec::new(),
+            moves_left: Vec::new(),
         };
 
         // With γ=0.0, target_rewards[k] = step.reward for all k (unflipped), or
@@ -1225,6 +1267,7 @@ mod tests {
             game_outcome: 1.0, // White wins (checkmate)
             is_draw: false,
             td_targets: Vec::new(),
+            moves_left: Vec::new(),
         };
 
         // γ=0.5; step.reward=0.0; game_outcome=1.0; root_side_sign=+1.
@@ -1274,6 +1317,7 @@ mod tests {
             game_outcome: 1.0,
             is_draw: false,
             td_targets: Vec::new(),
+            moves_left: Vec::new(),
         };
 
         let arrays = assemble_batch_arrays(&[sample], k);
@@ -1293,6 +1337,7 @@ mod tests {
             game_outcome: 0.0,
             is_draw: true,
             td_targets: Vec::new(),
+            moves_left: Vec::new(),
         };
 
         let draw_arrays = assemble_batch_arrays(&[draw_sample], k);
@@ -1332,6 +1377,7 @@ mod tests {
             game_outcome: 1.0,
             is_draw: false,
             td_targets: vec![Some(g0), Some(-0.17)],
+            moves_left: Vec::new(),
         };
 
         let arrays = assemble_batch_arrays(&[sample], k);
@@ -1372,6 +1418,7 @@ mod tests {
             game_outcome: 1.0,
             is_draw: false,
             td_targets: Vec::new(),
+            moves_left: Vec::new(),
         };
         let arrays_empty = assemble_batch_arrays(&[sample_empty], k);
 
@@ -1381,6 +1428,7 @@ mod tests {
             game_outcome: 1.0,
             is_draw: false,
             td_targets: vec![None, None],
+            moves_left: Vec::new(),
         };
         let arrays_none = assemble_batch_arrays(&[sample_none], k);
 
@@ -1508,6 +1556,7 @@ mod tests {
             game_outcome: -1.0, // white-absolute: Black wins
             is_draw: false,
             td_targets: Vec::new(),
+            moves_left: Vec::new(),
         };
 
         // With γ=0.0 and aug disabled, target_rewards[k] = flip_sign * step.reward.
@@ -1586,6 +1635,7 @@ mod tests {
                 game_outcome,
                 is_draw: false,
                 td_targets: Vec::new(),
+                moves_left: Vec::new(),
             };
             let arrays = assemble_batch_arrays(&[sample], k);
 
@@ -1771,12 +1821,14 @@ mod tests {
             game_outcome: 0.0, // draw so value targets cancel out
             is_draw: true,
             td_targets: Vec::new(),
+            moves_left: Vec::new(),
         };
         let black_sample = TrainingSample {
             steps: black_steps,
             game_outcome: 0.0,
             is_draw: true,
             td_targets: Vec::new(),
+            moves_left: Vec::new(),
         };
 
         // Run a single assembly (apply_flip=false guaranteed by env var).

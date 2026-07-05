@@ -41,7 +41,12 @@ def _diag_print(msg: str) -> None:
         except OSError:
             pass
 
-from hyzero.config import DEFAULT_CONFIG, value_head_mode
+from hyzero.config import (
+    DEFAULT_CONFIG,
+    moves_left_cap,
+    moves_left_head_enabled,
+    value_head_mode,
+)
 from hyzero.models.representation import RepresentationNetwork
 from hyzero.models.dynamics import DynamicsNetwork
 from hyzero.models.prediction import PredictionNetwork, hl_gauss_target
@@ -447,11 +452,26 @@ class Trainer:
         # HL-Gauss distributional). Read once from HYZERO_VALUE_HEAD so the
         # trainer and inference server (same process, same env) always agree.
         self.value_head_mode = value_head_mode()
+        # lc0-style moves-left head (MLH); default OFF (legacy). When enabled the
+        # prediction net grows a sigmoid head predicting normalized plies-remaining.
+        self.moves_left_head_enabled = moves_left_head_enabled()
+        self.moves_left_cap = moves_left_cap()
         self.f = PredictionNetwork(
             hidden_channels=cfg["hidden_channels"],
             num_actions=cfg["num_actions"],
             value_head=self.value_head_mode,
+            moves_left_head=self.moves_left_head_enabled,
         ).to(device).train()
+        if self.moves_left_head_enabled:
+            self.moves_left_loss_weight = _parse_loss_weight_env(
+                "HYZERO_MLH_LOSS_WEIGHT", default=0.1
+            )
+            print(
+                f"[trainer] moves-left head: ON (cap={self.moves_left_cap:.1f} plies,"
+                f" loss_weight={self.moves_left_loss_weight:.4f})"
+            )
+        else:
+            self.moves_left_loss_weight = 0.0
         # HL-Gauss smoothing sigma = 0.75 * bin_width (only used in categorical mode).
         if self.value_head_mode == "categorical":
             support = self.f.value_support
@@ -606,6 +626,22 @@ class Trainer:
         tgt_policies = torch.from_numpy(batch["target_policies"]).to(self.device)  # [B, K+1, 4672]
         tgt_values = torch.from_numpy(batch["target_values"]).to(self.device)  # [B, K+1]
         tgt_rewards = torch.from_numpy(batch["target_rewards"]).to(self.device)  # [B, K+1]
+        # Moves-left head targets (RAW plies-remaining) + validity mask, both
+        # [B, K+1]. Present only when the Rust batch assembler supplied them; the
+        # MLH loss is applied later only when the head is enabled AND these arrays
+        # exist. Popped so they never reach the numpy→tensor loops above/below.
+        moves_left_np = batch.pop("target_moves_left", None)
+        moves_left_mask_np = batch.pop("moves_left_mask", None)
+        tgt_moves_left = (
+            torch.from_numpy(moves_left_np).to(self.device)
+            if moves_left_np is not None
+            else None
+        )
+        moves_left_valid = (
+            torch.from_numpy(moves_left_mask_np).to(self.device)
+            if moves_left_mask_np is not None
+            else None
+        )
         # Legal mask (root step only): [B, 4672] bool, or None if not provided.
         legal_mask_np = batch.get("legal_masks")
         legal_mask = (
@@ -1008,12 +1044,39 @@ class Trainer:
             anti_v_flip = self.f.value_expectation(self.f(self.h(_flip_obs_planes(obs)))[1])  # [B]
             antisym_loss = ((anti_v + anti_v_flip) ** 2).mean()
 
+        # lc0-style moves-left head (MLH) loss (flag-gated, default OFF). Predicts
+        # normalized plies-remaining m ∈ [0, 1] at every unroll step from the same
+        # latents the value head uses. Target = clamp(raw_plies / cap, 0, 1); loss
+        # is masked MSE over valid rows only (moves_left_valid AND non-TB). When the
+        # head is disabled OR the batch lacks moves-left arrays, the branch is
+        # skipped and total_loss is byte-identical to the legacy path.
+        moves_left_loss = torch.tensor(0.0, device=self.device)
+        if (
+            self.moves_left_head_enabled
+            and self.moves_left_loss_weight > 0.0
+            and tgt_moves_left is not None
+            and moves_left_valid is not None
+        ):
+            n_steps_ml = k_steps + 1
+            for k in range(n_steps_ml):
+                pred_m = self.f.moves_left(hidden_states[k])  # [B] in [0, 1]
+                target_m = (tgt_moves_left[:, k] / self.moves_left_cap).clamp(0.0, 1.0)
+                valid = moves_left_valid[:, k].float()  # [B]
+                if is_tb_tensor is not None:
+                    # Tablebase rows carry no trajectory plies-remaining → exclude.
+                    valid = valid * (~is_tb_tensor).float()
+                denom = valid.sum().clamp(min=1.0)
+                per_sample_ml = (pred_m - target_m) ** 2  # [B]
+                moves_left_loss = moves_left_loss + (per_sample_ml * valid).sum() / denom
+            moves_left_loss = moves_left_loss / n_steps_ml
+
         total_loss = (
             self.policy_loss_weight * avg_policy_loss
             + self.value_loss_weight * avg_value_loss
             + self.reward_loss_weight * avg_reward_loss
             + consistency_weight * consistency_loss
             + antisym_weight * antisym_loss
+            + self.moves_left_loss_weight * moves_left_loss
         )
 
         total_loss.backward()
@@ -1029,6 +1092,7 @@ class Trainer:
             "value_loss": avg_value_loss.item(),
             "reward_loss": avg_reward_loss.item(),
             "consistency_loss": consistency_loss.item(),
+            "moves_left_loss": moves_left_loss.item(),
             "model_version": self.model_version,
             "lr": self.optimizer.param_groups[0]["lr"],
         }
@@ -1195,6 +1259,25 @@ class Trainer:
             merged[key] = np.concatenate(
                 [batch[key][:b - n_tb], tb_dict[key]], axis=0
             )
+        # Moves-left head arrays: optional (only present when MLH is enabled).
+        # TB rows have no trajectory plies-remaining, so their suffix rows are
+        # appended as zeros with an all-False validity mask (the MLH loss also
+        # excludes is_tablebase rows independently). Carried through here because
+        # `merged` is rebuilt from a fixed key set and would otherwise drop them.
+        replay_moves_left = batch.get("target_moves_left")
+        if replay_moves_left is not None:
+            kp1 = replay_moves_left.shape[1]
+            merged["target_moves_left"] = np.concatenate(
+                [replay_moves_left[:b - n_tb], np.zeros((n_tb, kp1), dtype=np.float32)],
+                axis=0,
+            )
+            replay_ml_mask = batch.get("moves_left_mask")
+            if replay_ml_mask is not None:
+                merged["moves_left_mask"] = np.concatenate(
+                    [replay_ml_mask[:b - n_tb], np.zeros((n_tb, kp1), dtype=bool)],
+                    axis=0,
+                )
+
         # legal_masks: optional in replay batch, always present in TB.
         replay_masks = batch.get("legal_masks")
         if replay_masks is not None:
@@ -1269,6 +1352,10 @@ class Trainer:
             # f value-head shape). Legacy checkpoints lack this key and default
             # to "scalar" on load.
             "value_head": self.value_head_mode,
+            # Record the moves-left-head flag so a checkpoint can never be silently
+            # loaded into a mismatched f (the MLH adds extra params to f's
+            # state_dict). Legacy checkpoints lack this key and default to False.
+            "moves_left_head": self.moves_left_head_enabled,
         }
         if self.lr_scheduler is not None:
             checkpoint["lr_scheduler"] = self.lr_scheduler.state_dict()
@@ -1295,6 +1382,17 @@ class Trainer:
                 f" value_head={ckpt_value_head!r} but this trainer is configured"
                 f" for value_head={self.value_head_mode!r}. Set HYZERO_VALUE_HEAD"
                 f"={ckpt_value_head!r} to load it, or start from scratch."
+            )
+        # Same guard for the moves-left head: the f state_dict shape differs when
+        # the MLH is present, so a mismatch would otherwise be an opaque key error.
+        ckpt_moves_left_head = checkpoint.get("moves_left_head", False)
+        if ckpt_moves_left_head != self.moves_left_head_enabled:
+            raise ValueError(
+                f"moves-left-head mismatch: checkpoint {path!r} was saved with"
+                f" moves_left_head={ckpt_moves_left_head!r} but this trainer is"
+                f" configured for moves_left_head={self.moves_left_head_enabled!r}."
+                f" Set HYZERO_MOVES_LEFT_HEAD={'1' if ckpt_moves_left_head else '0'}"
+                f" to load it, or start from scratch."
             )
         self.h.load_state_dict(checkpoint["h"])
         self.g.load_state_dict(checkpoint["g"])

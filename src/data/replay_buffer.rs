@@ -20,6 +20,13 @@ pub struct TrainingSample {
     /// (legacy β-blend value-target path). This struct is never bincode-serialized,
     /// so on-disk `ReplayBuffer.bin` / `.pt` artifacts are unaffected.
     pub td_targets: Vec<Option<f32>>,
+    /// Per-step RAW plies-remaining to the trajectory terminal, one entry per step
+    /// in the K+1 slice: `moves_left[k] = last - (start + k)` where `last` is the
+    /// trajectory's final step index. Consumed by the moves-left head (MLH); the
+    /// trainer normalizes by `HYZERO_MLH_CAP` and clamps to [0, 1]. Empty ⇒ the
+    /// batch assembler masks these rows out (weight 0), so legacy/non-MLH samples
+    /// and hand-built test samples are unaffected.
+    pub moves_left: Vec<f32>,
 }
 
 /// Whether n-step TD value targets are computed at sample time.
@@ -327,11 +334,23 @@ impl ReplayBuffer {
                 })
                 .collect();
 
+            // RAW plies-remaining per step for the moves-left head (MLH). The
+            // trajectory terminal is index `last`; the step at slice position k is
+            // absolute index `start + k`, so plies-remaining = last - (start + k).
+            // `max_start = len - unroll_k` guarantees `last - start >= unroll_k`,
+            // so every entry is non-negative. Always populated (real trajectories
+            // have a known length); the trainer decides whether to use it.
+            let last = traj.steps.len() - 1;
+            let moves_left: Vec<f32> = (0..unroll_k + 1)
+                .map(|k| (last - (start + k)) as f32)
+                .collect();
+
             samples.push(TrainingSample {
                 steps,
                 game_outcome: traj.game_outcome,
                 is_draw: traj.is_draw,
                 td_targets,
+                moves_left,
             });
         }
 
@@ -441,6 +460,25 @@ mod tests {
 
         let samples = buf.sample_batch(5, 5);
         assert!(samples.is_empty());
+    }
+
+    /// Moves-left targets are the RAW plies-remaining to the trajectory terminal.
+    /// A 10-step trajectory has terminal index 9; unroll_k=9 forces start=0, so the
+    /// slice index k equals the absolute step and moves_left[k] = 9 - k. In
+    /// particular position t=4 yields 5 plies remaining.
+    #[test]
+    fn moves_left_equals_plies_to_terminal() {
+        let mut buf = ReplayBuffer::new(2);
+        buf.add(make_trajectory(10));
+
+        let samples = buf.sample_batch(1, 9);
+        assert_eq!(samples.len(), 1);
+        let ml = &samples[0].moves_left;
+        assert_eq!(ml.len(), 10, "one entry per step in the K+1 slice");
+        for (k, &v) in ml.iter().enumerate() {
+            assert_eq!(v, (9 - k) as f32, "step {k} plies-remaining");
+        }
+        assert_eq!(ml[4], 5.0, "terminal at t=9, position t=4 → 5 plies");
     }
 
     #[test]
