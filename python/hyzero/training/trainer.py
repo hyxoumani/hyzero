@@ -1385,8 +1385,14 @@ class Trainer:
             )
         # Same guard for the moves-left head: the f state_dict shape differs when
         # the MLH is present, so a mismatch would otherwise be an opaque key error.
+        # The MLH is purely ADDITIVE, so we tolerate one direction: enabling the
+        # head on a legacy (head-less) checkpoint loads every matching weight and
+        # leaves the freshly-initialized MLH head as-is. The reverse (checkpoint
+        # has a trained MLH, running config disables it) stays a hard error —
+        # silently dropping a trained head is a footgun.
         ckpt_moves_left_head = checkpoint.get("moves_left_head", False)
-        if ckpt_moves_left_head != self.moves_left_head_enabled:
+        mlh_fresh_on_legacy = self.moves_left_head_enabled and not ckpt_moves_left_head
+        if ckpt_moves_left_head != self.moves_left_head_enabled and not mlh_fresh_on_legacy:
             raise ValueError(
                 f"moves-left-head mismatch: checkpoint {path!r} was saved with"
                 f" moves_left_head={ckpt_moves_left_head!r} but this trainer is"
@@ -1396,7 +1402,23 @@ class Trainer:
             )
         self.h.load_state_dict(checkpoint["h"])
         self.g.load_state_dict(checkpoint["g"])
-        self.f.load_state_dict(checkpoint["f"])
+        if mlh_fresh_on_legacy:
+            missing, unexpected = self.f.load_state_dict(checkpoint["f"], strict=False)
+            # The only tolerated gap is the additive MLH head; anything else
+            # (unexpected keys, or missing non-MLH weights) is a real mismatch.
+            if unexpected or any(
+                not k.startswith("moves_left_head") for k in missing
+            ):
+                raise ValueError(
+                    f"moves-left-head mismatch: checkpoint {path!r} f state_dict is"
+                    f" incompatible beyond the additive MLH head"
+                    f" (missing={missing}, unexpected={unexpected})."
+                )
+            print(
+                "[trainer] MLH head fresh-initialized on legacy ckpt", flush=True
+            )
+        else:
+            self.f.load_state_dict(checkpoint["f"])
         # Optimizer state is optional and may not match — e.g. pretrain_dynamics.pt
         # only optimized h+g (f was frozen), so its param-group count differs from the
         # main trainer's h+g+f+projector optimizer. Fall back to the freshly-constructed

@@ -168,3 +168,46 @@ def test_checkpoint_flag_match_roundtrips(monkeypatch) -> None:
     reloaded = Trainer(dict(DEFAULT_CONFIG), device="cpu")
     reloaded.load_checkpoint(path)  # must not raise
     assert reloaded.moves_left_head_enabled is True
+
+
+def test_mlh_enable_on_legacy_ckpt_loads_with_fresh_head(monkeypatch) -> None:
+    """Enabling the MLH on a head-less checkpoint loads without raising.
+
+    The shared (non-MLH) weights must be byte-identical to the legacy net and the
+    freshly-initialized MLH head must be present on the reloaded trainer.
+    """
+    # Save a legacy checkpoint with the head OFF.
+    monkeypatch.setenv("HYZERO_MOVES_LEFT_HEAD", "0")
+    legacy = Trainer(dict(DEFAULT_CONFIG), device="cpu")
+    with tempfile.NamedTemporaryFile(suffix=".pt", delete=False) as f:
+        path = f.name
+    legacy.save_checkpoint(path, {})
+
+    # Reload with the head ON: must not raise.
+    monkeypatch.setenv("HYZERO_MOVES_LEFT_HEAD", "1")
+    reloaded = Trainer(dict(DEFAULT_CONFIG), device="cpu")
+    reloaded.load_checkpoint(path)
+
+    # Non-MLH f weights are identical to the legacy checkpoint's.
+    legacy_f = legacy.f.state_dict()
+    reloaded_f = reloaded.f.state_dict()
+    for key, tensor in legacy_f.items():
+        assert torch.equal(reloaded_f[key], tensor), key
+
+    # The MLH head params are present on the reloaded net.
+    assert reloaded.moves_left_head_enabled is True
+    assert any(k.startswith("moves_left_head") for k in reloaded_f)
+
+
+def test_ckpt_with_mlh_loaded_without_still_raises(monkeypatch) -> None:
+    """A checkpoint with a trained MLH cannot load into a head-OFF trainer."""
+    monkeypatch.setenv("HYZERO_MOVES_LEFT_HEAD", "1")
+    on_trainer = Trainer(dict(DEFAULT_CONFIG), device="cpu")
+    with tempfile.NamedTemporaryFile(suffix=".pt", delete=False) as f:
+        path = f.name
+    on_trainer.save_checkpoint(path, {})
+
+    monkeypatch.setenv("HYZERO_MOVES_LEFT_HEAD", "0")
+    off_trainer = Trainer(dict(DEFAULT_CONFIG), device="cpu")
+    with pytest.raises(ValueError, match="moves-left-head mismatch"):
+        off_trainer.load_checkpoint(path)

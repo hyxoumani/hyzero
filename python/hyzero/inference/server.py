@@ -163,7 +163,28 @@ class InferenceServer:
 
         self.h.load_state_dict(checkpoint["h"])
         self.g.load_state_dict(checkpoint["g"])
-        self.f.load_state_dict(checkpoint["f"])
+        # The moves-left head is additive: tolerate loading legacy (head-less)
+        # weights into a server configured with the MLH by leaving the freshly
+        # initialized head as-is. The reverse (incoming weights carry a trained
+        # MLH the server lacks) surfaces as an unexpected-key error via strict
+        # loading, matching Trainer.load_checkpoint.
+        incoming_f = checkpoint["f"]
+        incoming_has_mlh = any(k.startswith("moves_left_head") for k in incoming_f)
+        if self.moves_left_head_enabled and not incoming_has_mlh:
+            missing, unexpected = self.f.load_state_dict(incoming_f, strict=False)
+            if unexpected or any(
+                not k.startswith("moves_left_head") for k in missing
+            ):
+                raise ValueError(
+                    "moves-left-head mismatch: f weights are incompatible beyond"
+                    f" the additive MLH head (missing={missing},"
+                    f" unexpected={unexpected})."
+                )
+            print(
+                "[inference] MLH head fresh-initialized on legacy ckpt", flush=True
+            )
+        else:
+            self.f.load_state_dict(incoming_f)
 
         # Ensure networks stay in eval mode after loading.
         self.h.eval()
