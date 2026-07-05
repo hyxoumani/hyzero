@@ -41,10 +41,10 @@ def _diag_print(msg: str) -> None:
         except OSError:
             pass
 
-from hyzero.config import DEFAULT_CONFIG
+from hyzero.config import DEFAULT_CONFIG, value_head_mode
 from hyzero.models.representation import RepresentationNetwork
 from hyzero.models.dynamics import DynamicsNetwork
-from hyzero.models.prediction import PredictionNetwork
+from hyzero.models.prediction import PredictionNetwork, hl_gauss_target
 
 
 def _flip_obs_planes(obs: torch.Tensor) -> torch.Tensor:
@@ -443,10 +443,27 @@ class Trainer:
             num_res_blocks=cfg["num_res_blocks"],
         ).to(device).train()
 
+        # Value head mode (scalar+tanh regression = legacy exact; categorical =
+        # HL-Gauss distributional). Read once from HYZERO_VALUE_HEAD so the
+        # trainer and inference server (same process, same env) always agree.
+        self.value_head_mode = value_head_mode()
         self.f = PredictionNetwork(
             hidden_channels=cfg["hidden_channels"],
             num_actions=cfg["num_actions"],
+            value_head=self.value_head_mode,
         ).to(device).train()
+        # HL-Gauss smoothing sigma = 0.75 * bin_width (only used in categorical mode).
+        if self.value_head_mode == "categorical":
+            support = self.f.value_support
+            bin_width = float((support[-1] - support[0]) / (support.shape[0] - 1))
+            self._value_sigma = 0.75 * bin_width
+            print(
+                f"[trainer] value head: categorical (N={self.f.value_support_size},"
+                f" sigma={self._value_sigma:.4f})"
+            )
+        else:
+            self._value_sigma = 0.0
+            print("[trainer] value head: scalar (tanh regression)")
 
         all_params = (
             list(self.h.parameters())
@@ -649,8 +666,10 @@ class Trainer:
         policy_logits, value = self.f(hidden)  # [B, 4672], [B, 1]
 
         predicted_values_per_k.append(value)
-        # No reward at step 0; use a placeholder zeros tensor so indices stay aligned.
-        predicted_rewards_per_k.append(torch.zeros_like(value))
+        # No reward at step 0; use a placeholder [B, 1] zeros tensor so indices
+        # stay aligned. Sliced to width 1 so the shape is [B, 1] regardless of the
+        # value-head mode (categorical value is [B, N]); rewards are always [B, 1].
+        predicted_rewards_per_k.append(torch.zeros_like(value[:, :1]))
         predicted_policy_logits_per_k.append(policy_logits)
 
         # Policy loss at step 0 — apply legal mask if provided.
@@ -662,7 +681,7 @@ class Trainer:
             policy_logits, tgt_policies[:, 0], legal_mask, row_weight=policy_row_weight
         )
         # Value loss at step 0 — all samples contribute.
-        total_value_loss = total_value_loss + F.mse_loss(value.squeeze(-1), tgt_values[:, 0])
+        total_value_loss = total_value_loss + self._value_loss(value, tgt_values[:, 0])
 
         # Steps 1..K: unroll dynamics.
         for k in range(1, k_steps + 1):
@@ -700,7 +719,7 @@ class Trainer:
                 )
 
                 # Value loss at k >= 1: mask TB rows.
-                per_sample_val = (value.squeeze(-1) - tgt_values[:, k]) ** 2  # [B]
+                per_sample_val = self._value_loss_per_sample(value, tgt_values[:, k])  # [B]
                 total_value_loss = total_value_loss + (per_sample_val * non_tb).sum() / non_tb_count
 
                 # Reward loss: step 1 has a real mating-action target for TB rows → all samples.
@@ -718,7 +737,7 @@ class Trainer:
                 total_policy_loss = total_policy_loss + self._policy_loss(
                     policy_logits, tgt_policies[:, k], row_weight=policy_row_weight
                 )
-                total_value_loss = total_value_loss + F.mse_loss(value.squeeze(-1), tgt_values[:, k])
+                total_value_loss = total_value_loss + self._value_loss(value, tgt_values[:, k])
                 total_reward_loss = total_reward_loss + F.mse_loss(reward.squeeze(-1), tgt_rewards[:, k])
 
         # -----------------------------------------------------------------------
@@ -744,7 +763,7 @@ class Trainer:
                 pol_parts: list[str] = []
                 for k in range(n_steps_diag):
                     tgt_v = tgt_values[:, k]
-                    pred_v = predicted_values_per_k[k].squeeze(-1)
+                    pred_v = self.f.value_expectation(predicted_values_per_k[k])
                     mse_v = F.mse_loss(pred_v, tgt_v).item()
                     val_parts.append(
                         f"k{k} tgt={tgt_v.mean().item():.4f}±{tgt_v.std().item():.4f}"
@@ -823,8 +842,8 @@ class Trainer:
                 n_anti = min(_antisym_probe_n(), obs.shape[0])
                 anti_obs = obs[0:n_anti]                              # [N, 102, 8, 8]
                 anti_flipped = _flip_obs_planes(anti_obs)             # [N, 102, 8, 8]
-                anti_vals = self.f(self.h(anti_obs))[1].squeeze(-1)         # [N]
-                anti_vals_flip = self.f(self.h(anti_flipped))[1].squeeze(-1)  # [N]
+                anti_vals = self.f.value_expectation(self.f(self.h(anti_obs))[1])         # [N]
+                anti_vals_flip = self.f.value_expectation(self.f(self.h(anti_flipped))[1])  # [N]
                 anti_neg_flip = -anti_vals_flip                              # [N]
                 if n_anti > 1:
                     av_mean = anti_vals.mean()
@@ -848,8 +867,8 @@ class Trainer:
                     flipped_one = _flip_obs_planes(obs_one)        # [1, 102, 8, 8]
 
                     # f(h(obs)) and f(h(flipped_obs)) — only extract value (index 1).
-                    v1 = self.f(self.h(obs_one))[1].item()        # scalar
-                    v2 = self.f(self.h(flipped_one))[1].item()    # scalar
+                    v1 = self.f.value_expectation(self.f(self.h(obs_one))[1]).item()        # scalar
+                    v2 = self.f.value_expectation(self.f(self.h(flipped_one))[1]).item()    # scalar
                     v_sum = v1 + v2
                     ratio = v_sum / (abs(v1) + 1e-9)
                     _diag_print(
@@ -863,8 +882,8 @@ class Trainer:
                     obs_batch = obs[0:n_batch]                         # [N, 102, 8, 8]
                     flipped_batch = _flip_obs_planes(obs_batch)        # [N, 102, 8, 8]
 
-                    vals_batch = self.f(self.h(obs_batch))[1].squeeze(-1)         # [N]
-                    vals_flipped = self.f(self.h(flipped_batch))[1].squeeze(-1)   # [N]
+                    vals_batch = self.f.value_expectation(self.f(self.h(obs_batch))[1])         # [N]
+                    vals_flipped = self.f.value_expectation(self.f(self.h(flipped_batch))[1])   # [N]
                     neg_vals_flipped = -vals_flipped                               # [N]
 
                     # Pearson correlation between v_batch and -v_flipped_batch.
@@ -906,15 +925,15 @@ class Trainer:
                     # 4. Canonical-position value probes.
                     # start_value: starting position (material-balanced).
                     start_obs = self._start_obs  # [1, 102, 8, 8]
-                    start_v = self.f(self.h(start_obs))[1].item()
+                    start_v = self.f.value_expectation(self.f(self.h(start_obs))[1]).item()
                     _diag_print(f"[start_value] step={self.model_version} v={start_v:.4f}")
 
                     # kqk_value: KQ-vs-K (white to move, white winning).
-                    kqk_v = self.f(self.h(self._kqk_obs))[1].item()
+                    kqk_v = self.f.value_expectation(self.f(self.h(self._kqk_obs))[1]).item()
                     _diag_print(f"[kqk_value] step={self.model_version} v={kqk_v:.4f}")
 
                     # kvk_queenless_value: K-vs-KQ (white to move, white down a queen).
-                    kvk_v = self.f(self.h(self._kvk_queenless_obs))[1].item()
+                    kvk_v = self.f.value_expectation(self.f(self.h(self._kvk_queenless_obs))[1]).item()
                     _diag_print(
                         f"[kvk_queenless_value] step={self.model_version} v={kvk_v:.4f}"
                     )
@@ -985,8 +1004,8 @@ class Trainer:
         antisym_weight = _parse_loss_weight_env("HYZERO_ANTISYM_LOSS_WEIGHT", default=0.0)
         antisym_loss = torch.tensor(0.0, device=self.device)
         if antisym_weight > 0:
-            anti_v = self.f(self.h(obs))[1].squeeze(-1)                  # [B]
-            anti_v_flip = self.f(self.h(_flip_obs_planes(obs)))[1].squeeze(-1)  # [B]
+            anti_v = self.f.value_expectation(self.f(self.h(obs))[1])                  # [B]
+            anti_v_flip = self.f.value_expectation(self.f(self.h(_flip_obs_planes(obs)))[1])  # [B]
             antisym_loss = ((anti_v + anti_v_flip) ** 2).mean()
 
         total_loss = (
@@ -1091,6 +1110,41 @@ class Trainer:
         log_probs = F.log_softmax(logits, dim=-1)
         log_probs = log_probs.nan_to_num(nan=0.0, neginf=0.0)
         return -torch.sum(targets * log_probs, dim=-1)  # [B]
+
+    def _value_loss(self, value_out: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        """Value loss reduced to a scalar (mean over batch).
+
+        Scalar mode: MSE between the tanh scalar and the target (byte-identical to
+        the legacy ``F.mse_loss(value.squeeze(-1), targets)``).
+        Categorical mode: cross-entropy between the value logits and the HL-Gauss
+        smoothed target distribution built from the same scalar target.
+
+        Args:
+            value_out: [B, 1] (scalar) or [B, N] (categorical) raw value-head output.
+            targets:   [B] scalar value targets.
+
+        Returns:
+            Scalar tensor.
+        """
+        if self.value_head_mode == "categorical":
+            return self._value_loss_per_sample(value_out, targets).mean()
+        return F.mse_loss(value_out.squeeze(-1), targets)
+
+    def _value_loss_per_sample(
+        self, value_out: torch.Tensor, targets: torch.Tensor
+    ) -> torch.Tensor:
+        """Per-sample value loss ([B]) — see :meth:`_value_loss` for the reduction.
+
+        Scalar mode: squared error (byte-identical to ``(value.squeeze(-1)-t)**2``).
+        Categorical mode: per-sample cross-entropy against the HL-Gauss target.
+        """
+        if self.value_head_mode == "categorical":
+            target_dist = hl_gauss_target(
+                targets, self.f.value_support, self._value_sigma
+            )  # [B, N]
+            log_probs = F.log_softmax(value_out, dim=-1)  # [B, N]
+            return -torch.sum(target_dist * log_probs, dim=-1)  # [B]
+        return (value_out.squeeze(-1) - targets) ** 2  # [B]
 
     def _maybe_mix_tb_samples(
         self, batch: dict
@@ -1210,6 +1264,11 @@ class Trainer:
             "optimizer": self.optimizer.state_dict(),
             "model_version": self.model_version,
             "eval_metrics": eval_metrics,
+            # Record the value-head mode so a checkpoint can never be silently
+            # loaded into a mismatched head (scalar vs categorical differ in the
+            # f value-head shape). Legacy checkpoints lack this key and default
+            # to "scalar" on load.
+            "value_head": self.value_head_mode,
         }
         if self.lr_scheduler is not None:
             checkpoint["lr_scheduler"] = self.lr_scheduler.state_dict()
@@ -1226,6 +1285,17 @@ class Trainer:
         """
         # weights_only=False: checkpoint contains eval_metrics dict alongside tensors
         checkpoint = torch.load(path, map_location=self.device, weights_only=False)
+        # Guard against a value-head mode mismatch BEFORE loading state dicts so
+        # the failure is a clear message rather than an opaque shape error.
+        # Legacy checkpoints omit the key → treated as "scalar".
+        ckpt_value_head = checkpoint.get("value_head", "scalar")
+        if ckpt_value_head != self.value_head_mode:
+            raise ValueError(
+                f"value-head mode mismatch: checkpoint {path!r} was saved with"
+                f" value_head={ckpt_value_head!r} but this trainer is configured"
+                f" for value_head={self.value_head_mode!r}. Set HYZERO_VALUE_HEAD"
+                f"={ckpt_value_head!r} to load it, or start from scratch."
+            )
         self.h.load_state_dict(checkpoint["h"])
         self.g.load_state_dict(checkpoint["g"])
         self.f.load_state_dict(checkpoint["f"])

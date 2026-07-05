@@ -6,7 +6,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from hyzero.config import DEFAULT_CONFIG
+from hyzero.config import DEFAULT_CONFIG, value_head_mode
 from hyzero.models.representation import RepresentationNetwork
 from hyzero.models.dynamics import DynamicsNetwork
 from hyzero.models.prediction import PredictionNetwork
@@ -46,6 +46,7 @@ class InferenceServer:
         self.f = PredictionNetwork(
             hidden_channels=cfg["hidden_channels"],
             num_actions=cfg["num_actions"],
+            value_head=value_head_mode(),
         ).to(device).eval()
 
     @torch.no_grad()
@@ -80,10 +81,14 @@ class InferenceServer:
 
         policies = F.softmax(policy_logits, dim=-1)  # [B, 4672]
 
+        # Contract: return a scalar value per position. In scalar mode this is
+        # value.squeeze(-1); in categorical mode it is the support expectation.
+        values = self.f.value_expectation(value)  # [B]
+
         return (
             hidden.cpu().numpy().astype(np.float32),
             policies.cpu().numpy().astype(np.float32),
-            value.squeeze(-1).cpu().numpy().astype(np.float32),  # [B]
+            values.cpu().numpy().astype(np.float32),  # [B]
         )
 
     @torch.no_grad()
@@ -117,11 +122,14 @@ class InferenceServer:
 
         policies = F.softmax(policy_logits, dim=-1)      # [B, 4096]
 
+        # Scalar value contract (see root_setup_batch): expectation in categorical mode.
+        values = self.f.value_expectation(value)  # [B]
+
         return (
             new_hidden.cpu().numpy().astype(np.float32),
             reward.squeeze(-1).cpu().numpy().astype(np.float32),    # [B]
             policies.cpu().numpy().astype(np.float32),
-            value.squeeze(-1).cpu().numpy().astype(np.float32),     # [B]
+            values.cpu().numpy().astype(np.float32),     # [B]
         )
 
     def load_weights(self, state_dict_bytes: bytes) -> None:
