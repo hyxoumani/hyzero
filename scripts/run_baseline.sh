@@ -33,6 +33,23 @@ RESUME_FROM=${HYZERO_RESUME_FROM:-checkpoints/mate_pretrained.pt}
 MATE_PUZZLES=${HYZERO_MATE_PUZZLES:-data/lichess_mates.pkl}
 MATE_PRETRAIN_STEPS=${HYZERO_MATE_PRETRAIN_STEPS:-4000}
 MATE_PRETRAIN_POSITIONS=${HYZERO_MATE_PRETRAIN_POSITIONS:-100000}
+
+# ── From-scratch training mode (HYZERO_FROM_SCRATCH, default 0) ─────
+# When enabled, this is a clean-slate run oriented at the new architecture:
+#   - random init (no resume_from; skips the mate-pretrained auto-build)
+#   - categorical (HL-Gauss) value head via HYZERO_VALUE_HEAD=categorical
+#   - the champion pool is NOT seeded with old-arch backups (they are
+#     value-head-incompatible); an empty pool takes the bootstrap path
+# NOTE: repetition planes (HYZERO_REPETITION_PLANES) are NOT wired here yet —
+# see the deferral note in the accompanying change summary. Default 0 keeps
+# today's behavior byte-for-byte.
+FROM_SCRATCH=${HYZERO_FROM_SCRATCH:-0}
+if [ "$FROM_SCRATCH" != "0" ]; then
+    echo "[from-scratch] random init + categorical value head; champion pool NOT seeded"
+    RESUME_FROM=""
+    export HYZERO_VALUE_HEAD=${HYZERO_VALUE_HEAD:-categorical}
+fi
+
 BASELINE_FILE="logs/baseline_score.json"
 LOG_DIR="logs"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
@@ -187,15 +204,20 @@ if [ -d checkpoints ]; then
     # min-width-3 zero-padding (champion.rs writes via format! "best_v{:03}.pt").
     # Versions 3806/3905 already exceed 3 digits, so no extra leading zeros — these
     # names match exactly what a real promotion would have produced.
-    if [ -f checkpoints/backup_champion_v3806_20260609.pt ]; then
-        cp checkpoints/backup_champion_v3806_20260609.pt checkpoints/best_v3806.pt
-    else
-        echo "  WARN: checkpoints/backup_champion_v3806_20260609.pt missing — pool not seeded with v3806"
-    fi
-    if [ -f checkpoints/backup_champion_v3905_20260609.pt ]; then
-        cp checkpoints/backup_champion_v3905_20260609.pt checkpoints/best_v3905.pt
-    else
-        echo "  WARN: checkpoints/backup_champion_v3905_20260609.pt missing — pool not seeded with v3905"
+    # Skipped in from-scratch mode: the archived champions use the legacy scalar
+    # value head and are incompatible with the categorical-head net, so the pool
+    # must start empty (bootstrap path).
+    if [ "$FROM_SCRATCH" = "0" ]; then
+        if [ -f checkpoints/backup_champion_v3806_20260609.pt ]; then
+            cp checkpoints/backup_champion_v3806_20260609.pt checkpoints/best_v3806.pt
+        else
+            echo "  WARN: checkpoints/backup_champion_v3806_20260609.pt missing — pool not seeded with v3806"
+        fi
+        if [ -f checkpoints/backup_champion_v3905_20260609.pt ]; then
+            cp checkpoints/backup_champion_v3905_20260609.pt checkpoints/best_v3905.pt
+        else
+            echo "  WARN: checkpoints/backup_champion_v3905_20260609.pt missing — pool not seeded with v3905"
+        fi
     fi
     echo "  Remaining checkpoints:"
     ls checkpoints/*.pt 2>/dev/null | sed 's/^/    /' || echo "    (none)"
