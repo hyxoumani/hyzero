@@ -214,9 +214,26 @@ export HYZERO_POLICY_ENTROPY_WEIGHT=${HYZERO_POLICY_ENTROPY_WEIGHT:-0.0}
 # (~48% of TB positions have >=2 optimal moves). At tb_frac 0.45 these flat
 # targets dominate the policy CE and flatten the shared policy head — the
 # 2026-06-09/10 "entropy divergence" (pred_entropy_legal 0.90->1.71, top1
-# 0.40->0.125). Weight 0.0 disables the TB policy gradient for the controlled
-# run; TB value/reward supervision is unaffected. Code default 1.0 = legacy.
-export HYZERO_TB_POLICY_WEIGHT=${HYZERO_TB_POLICY_WEIGHT:-0.0}
+# 0.40->0.125). Code default 1.0 = legacy.
+#
+# DELIBERATE REVERSAL of the docs/wiki/training-signal.md 0.0 decision (do NOT
+# edit the wiki): that decision protected the policy-CE *metric* from the
+# uniform-over-optimal target entropy. The campaign now optimizes probe
+# conversion, not the CE metric, and the measured policy prior actively selects
+# queen-hangs (0.45-0.74 mass on hanging moves), so distilling the shared head
+# toward the DTZ-optimal moves is exactly the point. Weight 0.5 turns TB-optimal
+# policy supervision back on at half strength; TB value/reward supervision is
+# unaffected.
+export HYZERO_TB_POLICY_WEIGHT=${HYZERO_TB_POLICY_WEIGHT:-0.5}
+# Grade the TB *supervision* labels (not just the Rust self-play rescore path):
+# at TablebaseCache load the trainer joins each position's normfen against the
+# WDL CSV ($TB_WDL_PATH) and replaces the flat ±1 target_value with the same
+# DTZ-graded value the rescore path emits, so both TB label sources agree. The
+# CSV is written above under HYZERO_TB_WDL_GRADED; grade the cache only when that
+# graded export is active. Code default is 0 (flat ±1); this run opts in.
+if [ "$TB_RESCORE" != "0" ] && [ "$TB_WDL_GRADED" != "0" ]; then
+    export HYZERO_TB_SUPERVISION_GRADED=${HYZERO_TB_SUPERVISION_GRADED:-1}
+fi
 export HYZERO_ANTISYM_LOSS_WEIGHT=0.01
 # Material shaping is OFF (SOTA alignment): rule-draws (repetition, fifty-move,
 # move-cap) return their true 0.0 terminal value instead of a tanh(Δmaterial)
