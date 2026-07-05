@@ -13,6 +13,13 @@ pub struct MCTSNode {
     pub priors: Vec<f32>,
     pub children: Vec<Option<Box<MCTSNode>>>,
     pub legal_actions: Vec<ActionIndex>,
+    /// Network estimate of normalized plies-remaining (lc0-style moves-left head)
+    /// in [0, 1] for this node's position. Defaults to 0.5 (neutral) and is only
+    /// consulted by the env-gated MLH search bonus. NOTE: the pipeline that
+    /// populates this from the inference server's `m` output is not yet wired
+    /// through the async reply channels — until then every node keeps 0.5, so the
+    /// bonus is a no-op even if HYZERO_MLH_SEARCH_BONUS is set.
+    pub m: f32,
 }
 
 impl MCTSNode {
@@ -49,6 +56,8 @@ impl MCTSNode {
             priors,
             children: vec![None; num_children],
             legal_actions,
+            // Neutral until the inference `m` output is plumbed into the tree.
+            m: 0.5,
         }
     }
 
@@ -155,5 +164,17 @@ mod tests {
         assert!(single.is_degenerate());
         assert!((single.normalize(0.5) - 0.5).abs() < 1e-6);
         assert!((single.normalize(-0.2) - (-0.2)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn new_node_moves_left_defaults_to_neutral() {
+        // Until the inference `m` output is plumbed in, a freshly created node
+        // carries the neutral moves-left estimate 0.5.
+        let policy = vec![0.0f32; 8];
+        let node = MCTSNode::new(HiddenState::new(64), &policy, vec![0, 1, 2], 0.0);
+        assert!(
+            (node.m - 0.5).abs() < 1e-9,
+            "new node m must default to 0.5"
+        );
     }
 }

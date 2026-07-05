@@ -1,7 +1,7 @@
 use crate::data::{ActionIndex, HiddenState, Policy};
 use crate::mcts::evaluator::Evaluator;
 use crate::mcts::node::{MCTSNode, MinMaxStats};
-use crate::mcts::puct::{select_child, select_child_normalized};
+use crate::mcts::puct::{select_child, select_child_normalized, MlhBonus};
 
 // ---------------------------------------------------------------------------
 // MCTS trace — enabled by HYZERO_MCTS_TRACE=1 (or any non-empty, non-"0" value).
@@ -491,6 +491,8 @@ impl MCTSTree {
                         self.config.exploration_constant,
                         &self.min_max,
                         fpu_reduction(),
+                        // Env-resolved; off by default (factor 0.0) → no-op selection.
+                        MlhBonus::from_env(),
                     )
                 } else {
                     select_child(node, self.config.exploration_constant)
@@ -715,6 +717,8 @@ impl MCTSTree {
                     self.config.exploration_constant,
                     &self.min_max,
                     fpu_reduction(),
+                    // Env-resolved; off by default (factor 0.0) → no-op selection.
+                    MlhBonus::from_env(),
                 )
             } else {
                 select_child(node, self.config.exploration_constant)
