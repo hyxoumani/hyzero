@@ -6,7 +6,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from hyzero.config import DEFAULT_CONFIG, value_head_mode
+from hyzero.config import DEFAULT_CONFIG, moves_left_head_enabled, value_head_mode
 from hyzero.models.representation import RepresentationNetwork
 from hyzero.models.dynamics import DynamicsNetwork
 from hyzero.models.prediction import PredictionNetwork
@@ -43,10 +43,15 @@ class InferenceServer:
             num_res_blocks=cfg["num_res_blocks"],
         ).to(device).eval()
 
+        # Moves-left head (MLH) must match the trainer's config (same process, same
+        # env) so a synced state_dict loads cleanly and, when enabled, root/leaf
+        # inference can return the extra normalized plies-remaining estimate.
+        self.moves_left_head_enabled = moves_left_head_enabled()
         self.f = PredictionNetwork(
             hidden_channels=cfg["hidden_channels"],
             num_actions=cfg["num_actions"],
             value_head=value_head_mode(),
+            moves_left_head=self.moves_left_head_enabled,
         ).to(device).eval()
 
     @torch.no_grad()
@@ -85,11 +90,19 @@ class InferenceServer:
         # value.squeeze(-1); in categorical mode it is the support expectation.
         values = self.f.value_expectation(value)  # [B]
 
-        return (
+        out = (
             hidden.cpu().numpy().astype(np.float32),
             policies.cpu().numpy().astype(np.float32),
             values.cpu().numpy().astype(np.float32),  # [B]
         )
+        # Backward-compatible extension: only when the moves-left head is enabled,
+        # append the normalized plies-remaining estimate m ∈ [0, 1] as a trailing
+        # tuple element. The Rust side reads it conditionally on the same env flag;
+        # legacy consumers read indices 0..2 and ignore any extra element.
+        if self.moves_left_head_enabled:
+            moves_left = self.f.moves_left(hidden)  # [B]
+            out = out + (moves_left.cpu().numpy().astype(np.float32),)
+        return out
 
     @torch.no_grad()
     def expand_leaf_batch(
@@ -125,12 +138,18 @@ class InferenceServer:
         # Scalar value contract (see root_setup_batch): expectation in categorical mode.
         values = self.f.value_expectation(value)  # [B]
 
-        return (
+        out = (
             new_hidden.cpu().numpy().astype(np.float32),
             reward.squeeze(-1).cpu().numpy().astype(np.float32),    # [B]
             policies.cpu().numpy().astype(np.float32),
             values.cpu().numpy().astype(np.float32),     # [B]
         )
+        # Backward-compatible extension (see root_setup_batch): append m ∈ [0, 1]
+        # only when the moves-left head is enabled.
+        if self.moves_left_head_enabled:
+            moves_left = self.f.moves_left(new_hidden)  # [B]
+            out = out + (moves_left.cpu().numpy().astype(np.float32),)
+        return out
 
     def load_weights(self, state_dict_bytes: bytes) -> None:
         """Load network weights serialized by Trainer.get_weights().
