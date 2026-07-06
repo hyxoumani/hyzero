@@ -285,30 +285,35 @@ def test_reinit_value_head_bias_offset(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
-def test_reinit_value_head_no_bias_offset(monkeypatch: pytest.MonkeyPatch) -> None:
-    """HYZERO_REINIT_VALUE_BIAS unset (default 0.0) keeps zero-bias initialisation.
+def test_reinit_value_head_zeroes_bias(monkeypatch: pytest.MonkeyPatch) -> None:
+    """HYZERO_REINIT_VALUE_BIAS unset (default 0.0) zeroes the final value-head bias.
 
-    After reinit without a bias offset, the mean output over many random inputs
-    should be close to zero (Kaiming normal weights → zero-mean distribution).
-    We allow a generous tolerance of ±0.3 to account for random-seed variance.
+    The concrete guarantee the reinit provides (trainer.py:411) is that, absent a
+    bias offset, the final value-head Linear ``bias`` is reset to exactly zeros.
+    We assert that directly rather than bounding the mean forward output, which is
+    statistically unsound: a seed sweep shows the mean ranging roughly -0.56..+0.06
+    regardless of plane count, so any tolerance on it would be arbitrary.
+
+    A local ``torch.Generator`` seeds the trainer's weight init so the test is
+    decoupled from the global RNG stream position.
     """
     monkeypatch.delenv("HYZERO_REINIT_VALUE_BIAS", raising=False)
 
-    torch.manual_seed(1)
+    gen = torch.Generator().manual_seed(1)
+    torch.manual_seed(int(torch.randint(0, 2**31 - 1, (1,), generator=gen).item()))
     trainer = Trainer(device="cpu")
 
     _reinit_value_head(trainer.f)
 
-    hidden_channels = trainer.config["hidden_channels"]
-    dummy_hidden = torch.randn(64, hidden_channels, 8, 8)
-    with torch.no_grad():
-        _, value = trainer.f(dummy_hidden)  # [64, 1]
-
-    mean_output = value.mean().item()
-    # With zero bias and symmetric kaiming init the distribution is approximately
-    # zero-centred; tanh squashes further toward zero.  Allow ±0.3 tolerance.
-    assert abs(mean_output) < 0.3, (
-        f"Expected mean value output near 0 without bias offset, got {mean_output:.4f}"
+    linear_layers = [
+        m for m in trainer.f.value_head.modules() if isinstance(m, torch.nn.Linear)
+    ]
+    assert linear_layers, "value_head must contain at least one Linear layer"
+    final_bias = linear_layers[-1].bias
+    assert final_bias is not None, "final value-head Linear must have a bias"
+    assert torch.all(final_bias == 0.0), (
+        f"Expected final value-head bias to be exactly zeros after reinit, "
+        f"got {final_bias.detach().cpu().tolist()}"
     )
 
 
