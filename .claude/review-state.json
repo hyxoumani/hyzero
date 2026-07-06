@@ -1,0 +1,9 @@
+{
+  "last_reviewed_sha": "bde4f9be00d1c59b648a4f3c8e59d63c9121d99c",
+  "last_reviewed_branch": "claude/modest-rubin-c76rty",
+  "last_reviewed_range": "7b53e5d..bde4f9b",
+  "last_reviewed_scope": "elo-promotion feature",
+  "last_reviewed_date": "2026-07-06",
+  "bugs_found": 1,
+  "notes": "Doc/code drift: docs/wiki/elo-ladder-eval.md claims Elo gate activates after first promotion, but src/selfplay/pool.rs:32-35 excludes current champion so Elo gate needs 2 promotions to actually fire. Notified user."
+}
