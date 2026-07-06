@@ -576,6 +576,24 @@ class Trainer:
             int(_tb_abs) if _tb_abs.strip().isdigit() and int(_tb_abs) > 0 else None
         )
 
+        # PGN external-corpus warm-start supervision — optional, mirrors the TB
+        # mixing knobs. Enabled by HYZERO_PGN_CACHE_PATH pointing at a pickled
+        # list[PGNTrajectory] built by scripts/ingest_pgn.py. Its rows ride the
+        # SAME merge/injection point as TB rows (see _maybe_mix_pgn_samples).
+        pgn_cache_path = os.environ.get("HYZERO_PGN_CACHE_PATH")
+        self._pgn_cache: object | None = None
+        if pgn_cache_path is not None:
+            from hyzero.data.pgn_ingest import PGNCache
+            if os.path.exists(pgn_cache_path):
+                self._pgn_cache = PGNCache(pgn_cache_path)
+                print(f"[trainer] pgn cache loaded: {len(self._pgn_cache)} trajectories")
+            else:
+                print(
+                    f"[trainer] WARN: HYZERO_PGN_CACHE_PATH set but cache not found at"
+                    f" {pgn_cache_path!r}; PGN warm-start disabled"
+                )
+        self._pgn_frac = float(os.environ.get("HYZERO_PGN_FRAC", "0.0"))
+
     def notify_trajectory(self, game_outcome: float, is_draw: bool) -> None:
         """Record a completed game trajectory for checkmate counting.
 
@@ -613,6 +631,8 @@ class Trainer:
         """
         # Mix in tablebase supervision rows before tensor conversion.
         batch, tb_indices = self._maybe_mix_tb_samples(batch)
+        # Mix in PGN external-corpus warm-start rows through the same merge path.
+        batch, pgn_indices = self._maybe_mix_pgn_samples(batch)
 
         # Pop is_tablebase before tensor conversion (Python-only field).
         is_tb_mask = batch.pop("is_tablebase", None)
@@ -1255,67 +1275,132 @@ class Trainer:
         else:
             tb_dict = build_tb_batch(tb_items, k_steps=k_steps)
 
-        # Replace last n_tb rows of the replay batch with TB rows.
-        tb_indices = set(range(b - n_tb, b))
+        # Replace last n_tb rows of the replay batch with TB rows via the shared
+        # merge path (also used by the PGN warm-start mixer).
+        return self._merge_supervision_rows(batch, tb_dict, n_tb)
+
+    def _merge_supervision_rows(
+        self, batch: dict, sup_dict: dict, n: int
+    ) -> tuple[dict, set[int]]:
+        """Replace the last n rows of `batch` with supervision rows from `sup_dict`.
+
+        Shared by the tablebase and PGN mixers. `sup_dict` must carry the
+        canonical batch keys (observations/actions/target_policies/target_values/
+        target_rewards/legal_masks) plus per-row `is_tablebase` and, optionally,
+        `tb_policy_mask`. Any per-row `is_tablebase` / `tb_policy_mask` already on
+        the incoming `batch` (e.g. from a prior TB mix when chaining mixers) is
+        preserved for the kept prefix rows so a second mix does not clobber the
+        first mixer's flags.
+
+        Args:
+            batch:    Replay (or already-mixed) batch dict of numpy arrays.
+            sup_dict: Supervision-row dict of numpy arrays (length n suffix).
+            n:        Number of trailing rows to replace.
+
+        Returns:
+            Tuple of (merged batch dict, set of replaced row indices).
+        """
+        b = batch["observations"].shape[0]
+        n = min(n, b)
+        indices = set(range(b - n, b))
         merged: dict = {}
         for key in ("observations", "actions", "target_policies",
                     "target_values", "target_rewards"):
             merged[key] = np.concatenate(
-                [batch[key][:b - n_tb], tb_dict[key]], axis=0
+                [batch[key][:b - n], sup_dict[key]], axis=0
             )
         # Moves-left head arrays: optional (only present when MLH is enabled).
-        # TB rows have no trajectory plies-remaining, so their suffix rows are
-        # appended as zeros with an all-False validity mask (the MLH loss also
-        # excludes is_tablebase rows independently). Carried through here because
-        # `merged` is rebuilt from a fixed key set and would otherwise drop them.
+        # Supervision rows have no trajectory plies-remaining, so their suffix
+        # rows are appended as zeros with an all-False validity mask (the MLH loss
+        # also excludes is_tablebase rows independently). Carried through here
+        # because `merged` is rebuilt from a fixed key set and would otherwise
+        # drop them.
         replay_moves_left = batch.get("target_moves_left")
         if replay_moves_left is not None:
             kp1 = replay_moves_left.shape[1]
             merged["target_moves_left"] = np.concatenate(
-                [replay_moves_left[:b - n_tb], np.zeros((n_tb, kp1), dtype=np.float32)],
+                [replay_moves_left[:b - n], np.zeros((n, kp1), dtype=np.float32)],
                 axis=0,
             )
             replay_ml_mask = batch.get("moves_left_mask")
             if replay_ml_mask is not None:
                 merged["moves_left_mask"] = np.concatenate(
-                    [replay_ml_mask[:b - n_tb], np.zeros((n_tb, kp1), dtype=bool)],
+                    [replay_ml_mask[:b - n], np.zeros((n, kp1), dtype=bool)],
                     axis=0,
                 )
 
-        # legal_masks: optional in replay batch, always present in TB.
+        # legal_masks: optional in replay batch, always present in supervision rows.
         replay_masks = batch.get("legal_masks")
         if replay_masks is not None:
             merged["legal_masks"] = np.concatenate(
-                [replay_masks[:b - n_tb], tb_dict["legal_masks"]], axis=0
+                [replay_masks[:b - n], sup_dict["legal_masks"]], axis=0
             )
         else:
-            # Only TB rows have masks; replay rows get all-True masks as placeholder.
-            # This avoids a None legal_mask downstream when TB is active.
-            placeholder = np.ones((b - n_tb, tb_dict["legal_masks"].shape[1]), dtype=bool)
+            # Only supervision rows have masks; replay rows get all-True masks as
+            # placeholder. This avoids a None legal_mask downstream.
+            placeholder = np.ones((b - n, sup_dict["legal_masks"].shape[1]), dtype=bool)
             merged["legal_masks"] = np.concatenate(
-                [placeholder, tb_dict["legal_masks"]], axis=0
+                [placeholder, sup_dict["legal_masks"]], axis=0
             )
-        # ``is_tablebase`` controls whether the trainer applies the
-        # step-1..K masking. Snapshot batches set it True (legacy behavior);
-        # trajectory batches set it False so the K-step loss + consistency
-        # loss apply in full. Trust what the TB builder emitted rather than
-        # mechanically marking the suffix rows.
+        # ``is_tablebase`` controls whether the trainer applies the step-1..K
+        # masking. Snapshot batches set it True (legacy behavior); trajectory /
+        # PGN batches set it False so the K-step loss + consistency loss apply in
+        # full. Preserve any prefix flags (chained mixers) and trust the suffix
+        # builder's flag rather than mechanically marking the suffix rows.
         merged["is_tablebase"] = np.zeros(b, dtype=bool)
-        tb_flag = tb_dict.get("is_tablebase")
-        if tb_flag is not None:
-            merged["is_tablebase"][b - n_tb:] = tb_flag
+        prev_is_tb = batch.get("is_tablebase")
+        if prev_is_tb is not None:
+            merged["is_tablebase"][:b - n] = prev_is_tb[:b - n]
+        sup_is_tb = sup_dict.get("is_tablebase")
+        if sup_is_tb is not None:
+            merged["is_tablebase"][b - n:] = sup_is_tb
         else:
-            merged["is_tablebase"][b - n_tb:] = True
+            merged["is_tablebase"][b - n:] = True
         # ``tb_policy_mask`` gates the per-row policy-CE weight
         # (HYZERO_TB_POLICY_WEIGHT). Replay rows → False (full-weight policy).
-        # Suffix rows take the TB builder's flag: trajectory batches set it True
-        # (uniform-over-optimal targets → weighted), snapshot batches omit it and
-        # default to False (snapshot rows are already excluded via is_tablebase).
+        # Suffix rows take the builder's flag: TB trajectory batches set it True
+        # (uniform-over-optimal targets → weighted); PGN and snapshot batches set
+        # it False. Prefix flags (chained mixers) are preserved.
         merged["tb_policy_mask"] = np.zeros(b, dtype=bool)
-        tb_policy_flag = tb_dict.get("tb_policy_mask")
-        if tb_policy_flag is not None:
-            merged["tb_policy_mask"][b - n_tb:] = tb_policy_flag
-        return merged, tb_indices
+        prev_pol = batch.get("tb_policy_mask")
+        if prev_pol is not None:
+            merged["tb_policy_mask"][:b - n] = prev_pol[:b - n]
+        sup_policy_flag = sup_dict.get("tb_policy_mask")
+        if sup_policy_flag is not None:
+            merged["tb_policy_mask"][b - n:] = sup_policy_flag
+        return merged, indices
+
+    def _maybe_mix_pgn_samples(
+        self, batch: dict
+    ) -> tuple[dict, set[int]]:
+        """Replace pgn_frac fraction of batch with PGN warm-start rows.
+
+        Mirrors ``_maybe_mix_tb_samples`` but sources rows from the PGN cache
+        (HYZERO_PGN_CACHE_PATH / HYZERO_PGN_FRAC). PGN rows carry one-hot
+        played-move policy targets and result-from-STM value targets; they set
+        ``is_tablebase = False`` and ``tb_policy_mask = False`` so the trainer
+        applies the full replay-style K-step loss at full policy weight. Runs
+        AFTER the TB mixer, so at high combined fracs PGN rows can displace the
+        TB suffix rows.
+
+        Args:
+            batch: Replay (or TB-mixed) batch dict of numpy arrays.
+
+        Returns:
+            Tuple of (updated batch dict, set of replaced row indices).
+        """
+        if self._pgn_cache is None or self._pgn_frac <= 0.0:
+            return batch, set()
+
+        b = batch["observations"].shape[0]
+        k_steps = batch["actions"].shape[1]
+        n_pgn = max(1, int(b * self._pgn_frac))
+        n_pgn = min(n_pgn, b)
+
+        from hyzero.data.pgn_ingest import build_pgn_batch
+        pgn_items = self._pgn_cache.sample(n_pgn)
+        pgn_dict = build_pgn_batch(pgn_items, k_steps=k_steps)
+        return self._merge_supervision_rows(batch, pgn_dict, n_pgn)
 
     def get_weights(self) -> bytes:
         """Serialize network weights to bytes for inference server transfer.
