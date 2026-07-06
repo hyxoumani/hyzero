@@ -1,10 +1,13 @@
-use super::types::{ActionIndex, BoardObservation, BoardSnapshot, NUM_ACTIONS, NUM_BASE_ACTIONS};
+use super::types::{
+    ActionIndex, BoardObservation, BoardSnapshot, NUM_ACTIONS, NUM_BASE_ACTIONS, NUM_OBS_PLANES,
+};
 use crate::game::{GameBoard, Move};
 use crate::{BitIterator, CastleOption, Color, Piece, PieceType, Square};
 
 /// Encode a GameBoard into a BoardObservation for the representation network.
 ///
-/// Produces 102 planes: 8 positions × 12 piece planes + 6 game-state planes.
+/// Produces 110 planes: 8 positions × 12 piece planes + 6 game-state planes + 8
+/// lc0-style repetition planes (one per history position).
 /// Side-to-move is NOT encoded; the observation is fully color-invariant (Phase 3b).
 ///
 /// # Arguments
@@ -116,14 +119,39 @@ pub fn encode_board(
         obs.planes[plane_offset + sq] = clock_val;
     }
 
+    // Planes 102-109: lc0-style repetition flags, one per history position
+    // (constant-fill, invariant under color flip). Plane 102 is the current
+    // position; planes 103-109 mirror the history slots 1-7 filled above.
+    // A plane is all-ones when that position had occurred at least once earlier
+    // in the game (zobrist repeat count >= 2), else all-zeros.
+    if board.position_repeat_count() >= 2 {
+        let plane_offset = 102 * 64;
+        for sq in 0..64 {
+            obs.planes[plane_offset + sq] = 1.0;
+        }
+    }
+    for (i, snap) in history.iter().enumerate() {
+        if snap.repeated {
+            let plane_offset = (103 + i) * 64;
+            for sq in 0..64 {
+                obs.planes[plane_offset + sq] = 1.0;
+            }
+        }
+    }
+
     obs
 }
 
 /// Snapshot the current board into a lightweight `BoardSnapshot` for the history buffer.
+///
+/// The `repeated` flag records whether this position had already occurred earlier
+/// in the game (zobrist repeat count >= 2) at snapshot time, so the lc0-style
+/// repetition planes stay correct once the position ages into the history window.
 pub fn board_to_snapshot(board: &GameBoard) -> BoardSnapshot {
     BoardSnapshot {
         white_pieces_bb: board.player1.pieces_bb,
         black_pieces_bb: board.player2.pieces_bb,
+        repeated: board.position_repeat_count() >= 2,
     }
 }
 
@@ -369,24 +397,25 @@ fn rank_mirror_plane(src: &[f32], dst: &mut [f32]) {
     }
 }
 
-/// Flip all 102 observation planes for color augmentation.
+/// Flip all 110 observation planes for color augmentation.
 ///
-/// Produces a new 6528-element Vec representing the board from the opponent's
-/// perspective:
+/// Produces a new `NUM_OBS_PLANES * 64`-element Vec representing the board from the
+/// opponent's perspective:
 /// - For each of the 8 history groups (12 planes each): swap my-pieces (0-5) ↔ opp-pieces
 ///   (6-11) within the group, then rank-mirror every 64-element plane.
 /// - Castling planes: 96↔98 and 97↔99 (constant-fill, no rank mirror needed).
 /// - En-passant plane 100: rank-mirrored.
 /// - Halfmove clock plane 101: unchanged.
+/// - Repetition planes 102-109: constant-fill, invariant under flip (unchanged).
 ///
 /// Side-to-move is NOT a plane (removed in Phase 3b); caller flips `white_to_move` field.
 pub(crate) fn flip_obs_planes(obs: &[f32]) -> Vec<f32> {
     debug_assert_eq!(
         obs.len(),
-        102 * 64,
-        "flip_obs_planes: expected 102*64 elements"
+        NUM_OBS_PLANES * 64,
+        "flip_obs_planes: expected NUM_OBS_PLANES*64 elements"
     );
-    let mut out = vec![0.0f32; 102 * 64];
+    let mut out = vec![0.0f32; NUM_OBS_PLANES * 64];
 
     // 8 history groups × 12 planes each (current + 7 past)
     for group in 0..8usize {
@@ -424,6 +453,9 @@ pub(crate) fn flip_obs_planes(obs: &[f32]) -> Vec<f32> {
 
     // Plane 101: halfmove clock — unchanged
     out[101 * 64..102 * 64].copy_from_slice(&obs[101 * 64..102 * 64]);
+
+    // Planes 102-109: repetition flags — constant-fill, invariant under flip.
+    out[102 * 64..NUM_OBS_PLANES * 64].copy_from_slice(&obs[102 * 64..NUM_OBS_PLANES * 64]);
 
     out
 }
@@ -756,6 +788,55 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_encode_board_sets_repetition_plane_for_repeated_position() {
+        let mut board = make_board();
+        // Simulate the current position having occurred once before (count >= 2).
+        board.position_history.insert(board.zobrist_hash, 2);
+        let obs = encode_board(&board, Color::White, &[]);
+        // Plane 102 (current-position repetition) must be all-ones.
+        for sq in 0..64 {
+            assert_eq!(
+                obs.planes[102 * 64 + sq],
+                1.0,
+                "repetition plane 102 sq {sq} should be 1.0 for a repeated position"
+            );
+        }
+    }
+
+    #[test]
+    fn test_encode_board_no_repetition_plane_for_fresh_position() {
+        // A fresh position (count == 1) must leave the repetition plane all-zeros.
+        let board = make_board();
+        let obs = encode_board(&board, Color::White, &[]);
+        for sq in 0..64 {
+            assert_eq!(
+                obs.planes[102 * 64 + sq],
+                0.0,
+                "repetition plane 102 sq {sq} should be 0.0 for a fresh position"
+            );
+        }
+    }
+
+    #[test]
+    fn test_encode_board_history_snapshot_repetition_sets_slot_plane() {
+        // A history snapshot flagged `repeated` fills its slot's repetition plane.
+        // history[0] occupies slot 1 (piece planes 12-23) → repetition plane 103.
+        let board = make_board();
+        let snap = BoardSnapshot {
+            repeated: true,
+            ..board_to_snapshot(&board)
+        };
+        let obs = encode_board(&board, Color::White, std::slice::from_ref(&snap));
+        for sq in 0..64 {
+            assert_eq!(
+                obs.planes[103 * 64 + sq],
+                1.0,
+                "history-slot repetition plane 103 sq {sq} should be 1.0"
+            );
+        }
+    }
+
     // ── Color-augmentation helper tests ──────────────────────────────────────
 
     #[test]
@@ -813,13 +894,13 @@ mod tests {
     #[test]
     fn test_flip_obs_planes_round_trip() {
         // Build a non-trivial observation: put a pawn bit at A2 (plane 0, sq 8).
-        let mut obs = vec![0.0f32; 102 * 64];
+        let mut obs = vec![0.0f32; NUM_OBS_PLANES * 64];
         obs[0 * 64 + 8] = 1.0; // Current player's pawn at A2
 
         let flipped = flip_obs_planes(&obs);
         let round_trip = flip_obs_planes(&flipped);
 
-        for i in 0..102 * 64 {
+        for i in 0..NUM_OBS_PLANES * 64 {
             assert!(
                 (round_trip[i] - obs[i]).abs() < 1e-6,
                 "round-trip mismatch at index {i}: expected {}, got {}",
@@ -835,7 +916,7 @@ mod tests {
         // After color flip:
         //   - The piece becomes the opponent's pawn in plane 6
         //   - A2 rank-mirrors to A7: sq = (7-1)*8+0 = 48
-        let mut obs = vec![0.0f32; 102 * 64];
+        let mut obs = vec![0.0f32; NUM_OBS_PLANES * 64];
         obs[0 * 64 + 8] = 1.0; // Current player's pawn at A2 (plane 0, sq 8)
 
         let flipped = flip_obs_planes(&obs);
@@ -884,7 +965,7 @@ mod tests {
         let board = make_board();
         let obs_white = encode_board(&board, Color::White, &[]);
         let obs_black = encode_board(&board, Color::Black, &[]);
-        let diffs: Vec<(usize, f32, f32)> = (0..102 * 64)
+        let diffs: Vec<(usize, f32, f32)> = (0..NUM_OBS_PLANES * 64)
             .filter(|&i| (obs_white.planes[i] - obs_black.planes[i]).abs() > 1e-6)
             .map(|i| (i, obs_white.planes[i], obs_black.planes[i]))
             .collect();
@@ -978,7 +1059,7 @@ mod tests {
     #[test]
     fn test_flip_obs_planes_castling_swap() {
         // Set my kingside (plane 96) and opp queenside (plane 99)
-        let mut obs = vec![0.0f32; 102 * 64];
+        let mut obs = vec![0.0f32; NUM_OBS_PLANES * 64];
         for sq in 0..64 {
             obs[96 * 64 + sq] = 1.0; // my kingside
             obs[99 * 64 + sq] = 1.0; // opp queenside
@@ -1002,6 +1083,28 @@ mod tests {
                 (flipped[97 * 64 + sq] - 1.0).abs() < 1e-6,
                 "my queenside should be set after flip (sq {sq})"
             );
+        }
+    }
+
+    #[test]
+    fn test_flip_obs_planes_repetition_planes_invariant() {
+        // Repetition planes (102-109) are constant-fill and must survive a color
+        // flip unchanged (like the halfmove clock), unlike piece/castling/EP planes.
+        let mut obs = vec![0.0f32; NUM_OBS_PLANES * 64];
+        for plane in 102..NUM_OBS_PLANES {
+            for sq in 0..64 {
+                obs[plane * 64 + sq] = 1.0;
+            }
+        }
+        let flipped = flip_obs_planes(&obs);
+        for plane in 102..NUM_OBS_PLANES {
+            for sq in 0..64 {
+                assert_eq!(
+                    flipped[plane * 64 + sq],
+                    1.0,
+                    "repetition plane {plane} sq {sq} must be unchanged by flip"
+                );
+            }
         }
     }
 }

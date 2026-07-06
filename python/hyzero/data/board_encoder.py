@@ -3,7 +3,7 @@
 Piece-type plane index order matches pieces_bb in src/game/playerobj.rs:
   0=Pawn, 1=Knight, 2=Bishop, 3=Rook, 4=Queen, 5=King
 
-Plane layout (102 planes, [102, 8, 8] float32):
+Plane layout (110 planes, [110, 8, 8] float32):
   Groups 0-7 (12 planes each, 96 planes total): position history slots.
     Within each group:
       planes 0-5:  current player's pieces (Pawn, Knight, Bishop, Rook, Queen, King)
@@ -13,6 +13,9 @@ Plane layout (102 planes, [102, 8, 8] float32):
     Each is a constant 1.0 fill if the right exists, 0.0 otherwise.
   Plane 100: en passant target square (one-hot in rank-mirrored coords for Black).
   Plane 101: halfmove clock / 100.0 (fills entire 8x8 plane).
+  Planes 102-109: lc0-style repetition flags, one per history position (constant
+    1.0 fill if that position had occurred before in the game, else 0.0). Standalone
+    encodes (e.g. TB samples) have no game history, so these stay all zeros.
 
 All squares are encoded with current-player perspective (AlphaZero convention):
   - White to move: square indices are unchanged (rank 0 = rank 1 in chess notation).
@@ -26,7 +29,7 @@ import chess
 
 
 # Number of observation planes and actions — must match Rust constants.
-NUM_OBS_PLANES = 102
+NUM_OBS_PLANES = 110
 NUM_BASE_ACTIONS = 4096      # from_sq * 64 + to_sq
 NUM_UNDERPROMO_ACTIONS = 576 # 3 pieces * 8 from_files * 24 slots
 NUM_ACTIONS = NUM_BASE_ACTIONS + NUM_UNDERPROMO_ACTIONS  # 4672
@@ -68,19 +71,20 @@ _PIECE_PLANE: dict[chess.PieceType, int] = {
 # ─── Board encoder ────────────────────────────────────────────────────────────
 
 def encode_board_python(board: chess.Board) -> np.ndarray:
-    """Encode a chess.Board into a [102, 8, 8] float32 observation.
+    """Encode a chess.Board into a [110, 8, 8] float32 observation.
 
     Mirrors src/data/encoding.rs::encode_board with side-to-move perspective
     (AlphaZero convention). History slots (groups 1-7) are all zeros — TB samples
-    have no history.
+    have no history. Repetition planes 102-109 likewise stay zero for standalone
+    encodes (no game history to detect a repeat).
 
     Args:
         board: python-chess Board to encode.
 
     Returns:
-        np.ndarray of shape [102, 8, 8] and dtype float32.
+        np.ndarray of shape [110, 8, 8] and dtype float32.
     """
-    obs = np.zeros((102, 8, 8), dtype=np.float32)
+    obs = np.zeros((NUM_OBS_PLANES, 8, 8), dtype=np.float32)
     is_black = (board.turn == chess.BLACK)
 
     my_color = board.turn

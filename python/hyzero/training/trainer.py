@@ -61,12 +61,13 @@ def _flip_obs_planes(obs: torch.Tensor) -> torch.Tensor:
       - Castling planes (constant-fill, no rank mirror): 96↔98, 97↔99.
       - Plane 100 (en passant): rank-mirrored.
       - Plane 101 (halfmove clock): unchanged.
+      - Planes 102-109 (lc0-style repetition flags): constant-fill, unchanged.
 
     Args:
-        obs: [N, 102, 8, 8] float32 tensor (on any device).
+        obs: [N, 110, 8, 8] float32 tensor (on any device).
 
     Returns:
-        [N, 102, 8, 8] float32 tensor with the same device/dtype.
+        [N, 110, 8, 8] float32 tensor with the same device/dtype.
     """
     N = obs.shape[0]
     out = torch.zeros_like(obs)
@@ -105,11 +106,14 @@ def _flip_obs_planes(obs: torch.Tensor) -> torch.Tensor:
     # Plane 101: halfmove clock — unchanged
     out[:, 101] = obs[:, 101]
 
+    # Planes 102-109: repetition flags — constant-fill, unchanged (invariant under flip)
+    out[:, 102:] = obs[:, 102:]
+
     return out
 
 
 def _build_kqk_white_winning_obs(device: str) -> torch.Tensor:
-    """Build the KQ-vs-K position observation [1, 102, 8, 8] (white to move, white winning).
+    """Build the KQ-vs-K position observation [1, 110, 8, 8] (white to move, white winning).
 
     White: King on e1 (sq 4), Queen on a2 (sq 8).
     Black: King on e8 (sq 60).
@@ -127,9 +131,9 @@ def _build_kqk_white_winning_obs(device: str) -> torch.Tensor:
         device: Torch device string.
 
     Returns:
-        [1, 102, 8, 8] float32 tensor.
+        [1, 110, 8, 8] float32 tensor.
     """
-    obs = torch.zeros(1, 102, 8, 8, dtype=torch.float32, device=device)
+    obs = torch.zeros(1, 110, 8, 8, dtype=torch.float32, device=device)
     # Plane 4: my queen at a2 (rank=1, file=0); sq 8 = rank*8+file = 1*8+0
     obs[0, 4, 1, 0] = 1.0
     # Plane 5: my king at e1 (rank=0, file=4); sq 4 = 0*8+4
@@ -143,7 +147,7 @@ def _build_kqk_white_winning_obs(device: str) -> torch.Tensor:
 
 
 def _build_k_vs_kq_white_losing_obs(device: str) -> torch.Tensor:
-    """Build the K-vs-KQ position observation [1, 102, 8, 8] (white to move, white losing).
+    """Build the K-vs-KQ position observation [1, 110, 8, 8] (white to move, white losing).
 
     White: King on e1 (sq 4).
     Black: King on e8 (sq 60), Queen on a7 (sq 48).
@@ -161,9 +165,9 @@ def _build_k_vs_kq_white_losing_obs(device: str) -> torch.Tensor:
         device: Torch device string.
 
     Returns:
-        [1, 102, 8, 8] float32 tensor.
+        [1, 110, 8, 8] float32 tensor.
     """
-    obs = torch.zeros(1, 102, 8, 8, dtype=torch.float32, device=device)
+    obs = torch.zeros(1, 110, 8, 8, dtype=torch.float32, device=device)
     # Plane 5: my king at e1 (rank=0, file=4); sq 4 = 0*8+4
     obs[0, 5, 0, 4] = 1.0
     # Plane 10: opp queen at a7 (rank=6, file=0); sq 48 = 6*8+0
@@ -177,7 +181,7 @@ def _build_k_vs_kq_white_losing_obs(device: str) -> torch.Tensor:
 
 
 def _build_start_obs(device: str) -> torch.Tensor:
-    """Build the standard chess starting position observation [1, 102, 8, 8].
+    """Build the standard chess starting position observation [1, 110, 8, 8].
 
     Piece-type plane index order matches pieces_bb in src/game/playerobj.rs:
       0=Pawn, 1=Knight, 2=Bishop, 3=Rook, 4=Queen, 5=King
@@ -206,9 +210,9 @@ def _build_start_obs(device: str) -> torch.Tensor:
         device: Torch device string.
 
     Returns:
-        [1, 102, 8, 8] float32 tensor.
+        [1, 110, 8, 8] float32 tensor.
     """
-    obs = torch.zeros(1, 102, 8, 8, dtype=torch.float32, device=device)
+    obs = torch.zeros(1, 110, 8, 8, dtype=torch.float32, device=device)
 
     # --- my pieces (White, group 0, planes 0-5) ---
     # Plane 0: my pawns at rank 1, all files
@@ -513,7 +517,7 @@ class Trainer:
         self.model_version: int = 0
 
         # Pre-built canonical-position observations for periodic value probes.
-        # All shapes [1, 102, 8, 8]. Built once at init; device is fixed at construction.
+        # All shapes [1, 110, 8, 8]. Built once at init; device is fixed at construction.
         self._start_obs: torch.Tensor = _build_start_obs(device)
         self._kqk_obs: torch.Tensor = _build_kqk_white_winning_obs(device)
         self._kvk_queenless_obs: torch.Tensor = _build_k_vs_kq_white_losing_obs(device)
@@ -594,7 +598,7 @@ class Trainer:
 
         Args:
             batch: Dictionary of numpy arrays:
-                "observations":    [B, K+1, 102, 8, 8]  — all K+1 steps for consistency loss
+                "observations":    [B, K+1, 110, 8, 8]  — all K+1 steps for consistency loss
                 "actions":         [B, K, 3, 8, 8]
                 "target_policies": [B, K+1, 4672]
                 "target_values":   [B, K+1]
@@ -619,9 +623,9 @@ class Trainer:
         tb_policy_mask = batch.pop("tb_policy_mask", None)
 
         # Convert numpy arrays to tensors on the target device.
-        # observations: [B, K+1, 102, 8, 8] — step 0 is root, steps 1..K for consistency
-        obs_all = torch.from_numpy(batch["observations"]).to(self.device)      # [B, K+1, 102, 8, 8]
-        obs = obs_all[:, 0]                                                     # [B, 102, 8, 8]
+        # observations: [B, K+1, 110, 8, 8] — step 0 is root, steps 1..K for consistency
+        obs_all = torch.from_numpy(batch["observations"]).to(self.device)      # [B, K+1, 110, 8, 8]
+        obs = obs_all[:, 0]                                                     # [B, 110, 8, 8]
         actions = torch.from_numpy(batch["actions"]).to(self.device)           # [B, K, 3, 8, 8]
         tgt_policies = torch.from_numpy(batch["target_policies"]).to(self.device)  # [B, K+1, 4672]
         tgt_values = torch.from_numpy(batch["target_values"]).to(self.device)  # [B, K+1]
@@ -876,8 +880,8 @@ class Trainer:
                 # HYZERO_ANTISYM_PROBE_N (default 8) samples to bound the extra h/f cost.
                 # The stable [antisym] anchor line lets run_baseline.sh extract progress.
                 n_anti = min(_antisym_probe_n(), obs.shape[0])
-                anti_obs = obs[0:n_anti]                              # [N, 102, 8, 8]
-                anti_flipped = _flip_obs_planes(anti_obs)             # [N, 102, 8, 8]
+                anti_obs = obs[0:n_anti]                              # [N, 110, 8, 8]
+                anti_flipped = _flip_obs_planes(anti_obs)             # [N, 110, 8, 8]
                 anti_vals = self.f.value_expectation(self.f(self.h(anti_obs))[1])         # [N]
                 anti_vals_flip = self.f.value_expectation(self.f(self.h(anti_flipped))[1])  # [N]
                 anti_neg_flip = -anti_vals_flip                              # [N]
@@ -899,8 +903,8 @@ class Trainer:
                 # Periodic probes every 50 calls.
                 if self.model_version % 50 == 0:
                     # 2. Color-symmetry probe on real obs from the current batch.
-                    obs_one = obs[0:1]                             # [1, 102, 8, 8]
-                    flipped_one = _flip_obs_planes(obs_one)        # [1, 102, 8, 8]
+                    obs_one = obs[0:1]                             # [1, 110, 8, 8]
+                    flipped_one = _flip_obs_planes(obs_one)        # [1, 110, 8, 8]
 
                     # f(h(obs)) and f(h(flipped_obs)) — only extract value (index 1).
                     v1 = self.f.value_expectation(self.f(self.h(obs_one))[1]).item()        # scalar
@@ -915,8 +919,8 @@ class Trainer:
 
                     # Batch symmetry probe (up to 10 samples).
                     n_batch = min(10, obs.shape[0])
-                    obs_batch = obs[0:n_batch]                         # [N, 102, 8, 8]
-                    flipped_batch = _flip_obs_planes(obs_batch)        # [N, 102, 8, 8]
+                    obs_batch = obs[0:n_batch]                         # [N, 110, 8, 8]
+                    flipped_batch = _flip_obs_planes(obs_batch)        # [N, 110, 8, 8]
 
                     vals_batch = self.f.value_expectation(self.f(self.h(obs_batch))[1])         # [N]
                     vals_flipped = self.f.value_expectation(self.f(self.h(flipped_batch))[1])   # [N]
@@ -960,7 +964,7 @@ class Trainer:
 
                     # 4. Canonical-position value probes.
                     # start_value: starting position (material-balanced).
-                    start_obs = self._start_obs  # [1, 102, 8, 8]
+                    start_obs = self._start_obs  # [1, 110, 8, 8]
                     start_v = self.f.value_expectation(self.f(self.h(start_obs))[1]).item()
                     _diag_print(f"[start_value] step={self.model_version} v={start_v:.4f}")
 
@@ -1018,7 +1022,7 @@ class Trainer:
                 dyn_latent_k = hidden_states[k_idx]  # [B, C, 8, 8]
                 p1 = self.h.predict(self.h.project(dyn_latent_k))  # [B, proj_dim]
                 # Target branch: h(obs_k) projected with stop-gradient (no gradient flows here)
-                obs_k = obs_all[:, k_idx]  # [B, 102, 8, 8]
+                obs_k = obs_all[:, k_idx]  # [B, 110, 8, 8]
                 target_latent = self.h(obs_k)  # [B, C, 8, 8]
                 p2 = self.h.project(target_latent).detach()  # [B, proj_dim], stop-grad
                 # Cosine similarity loss: 1 - cos_sim (maximize similarity → minimize loss)

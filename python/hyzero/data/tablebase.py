@@ -14,7 +14,7 @@ Two formats supported:
    mate-in-1 positions of the snapshot cache.
 
 Shape contract for both builders (K = k_steps):
-    observations:    [N, K+1, 102, 8, 8]  float32
+    observations:    [N, K+1, 110, 8, 8]  float32
     actions:         [N, K,   3,  8, 8]   float32
     target_policies: [N, K+1, 4672]        float32
     target_values:   [N, K+1]              float32
@@ -306,7 +306,7 @@ def build_tb_batch(
     The policy target at step 0 is a uniform distribution over optimal_actions.
 
     Shape contract:
-        observations:    [N, K+1, 102, 8, 8]  float32
+        observations:    [N, K+1, 110, 8, 8]  float32
         actions:         [N, K,   3,  8, 8]   float32
         target_policies: [N, K+1, 4672]        float32
         target_values:   [N, K+1]              float32
@@ -326,7 +326,7 @@ def build_tb_batch(
     if n == 0:
         raise ValueError("build_tb_batch: samples list is empty")
 
-    observations    = np.zeros((n, k_steps + 1, 102, 8, 8), dtype=np.float32)
+    observations    = np.zeros((n, k_steps + 1, 110, 8, 8), dtype=np.float32)
     actions         = np.zeros((n, k_steps,    3,  8, 8),   dtype=np.float32)
     target_policies = np.zeros((n, k_steps + 1, num_actions),  dtype=np.float32)
     target_values   = np.zeros((n, k_steps + 1),                dtype=np.float32)
@@ -339,7 +339,7 @@ def build_tb_batch(
         white_to_move = (board.turn == chess.WHITE)
 
         # Encode root observation.
-        root_obs = encode_board_python(board)  # [102, 8, 8]
+        root_obs = encode_board_python(board)  # [110, 8, 8]
 
         # observations: step 0 = real encode; steps 1..K = zeros.
         observations[i, 0] = root_obs
@@ -418,7 +418,7 @@ def build_tb_batch_trajectories(
     clean value/reward supervision at full strength.
 
     Shape contract (same as build_tb_batch):
-        observations:    [N, K+1, 102, 8, 8]  float32
+        observations:    [N, K+1, 110, 8, 8]  float32
         actions:         [N, K,   3,  8, 8]   float32
         target_policies: [N, K+1, 4672]        float32
         target_values:   [N, K+1]              float32
@@ -440,7 +440,7 @@ def build_tb_batch_trajectories(
     if n == 0:
         raise ValueError("build_tb_batch_trajectories: trajectories list is empty")
 
-    observations    = np.zeros((n, k_steps + 1, 102, 8, 8), dtype=np.float32)
+    observations    = np.zeros((n, k_steps + 1, 110, 8, 8), dtype=np.float32)
     actions         = np.zeros((n, k_steps,    3,  8, 8),   dtype=np.float32)
     target_policies = np.zeros((n, k_steps + 1, num_actions),  dtype=np.float32)
     target_values   = np.zeros((n, k_steps + 1),                dtype=np.float32)

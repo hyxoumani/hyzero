@@ -17,14 +17,14 @@ from hyzero.training.trainer import (
     _reinit_value_head,
 )
 
-INPUT_PLANES = DEFAULT_CONFIG["input_planes"]   # 102
+INPUT_PLANES = DEFAULT_CONFIG["input_planes"]   # 110
 NUM_ACTIONS = DEFAULT_CONFIG["num_actions"]     # 4672
 
 
 def make_random_batch(batch_size: int = 4, k_steps: int = 3) -> dict:
     """Create a random batch compatible with Trainer.train_batch.
 
-    observations shape: [B, K+1, 102, 8, 8] — all K+1 steps for consistency loss.
+    observations shape: [B, K+1, 110, 8, 8] — all K+1 steps for consistency loss.
     """
     return {
         "observations": np.random.randn(batch_size, k_steps + 1, INPUT_PLANES, 8, 8).astype(np.float32),

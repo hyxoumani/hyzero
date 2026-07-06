@@ -241,6 +241,18 @@ impl GameBoard {
         }
     }
 
+    /// Number of times the current position (keyed by zobrist hash) has occurred
+    /// in this game, including the current occurrence. Drawn from
+    /// `position_history`; returns 0 if the current position is not yet recorded.
+    /// Used by the encoder for lc0-style repetition planes: a count >= 2 means the
+    /// position has been seen before.
+    pub fn position_repeat_count(&self) -> u8 {
+        self.position_history
+            .get(&self.zobrist_hash)
+            .copied()
+            .unwrap_or(0)
+    }
+
     pub fn update_castling(&mut self, piece_moved: Move) {
         let from_idx: u8 = piece_moved.from.into();
         let to_idx: u8 = piece_moved.to.into();

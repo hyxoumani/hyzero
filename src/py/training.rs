@@ -15,7 +15,7 @@ use crate::data::{
 /// Flat arrays assembled from a batch of `TrainingSample` for Python training.
 ///
 /// Array shapes:
-///   observations:    [B, K+1, 102, 8, 8]  stored flat as B * (K+1) * NUM_OBS_PLANES * 64 (f32)
+///   observations:    [B, K+1, 110, 8, 8]  stored flat as B * (K+1) * NUM_OBS_PLANES * 64 (f32)
 ///                    All K+1 steps are included for EfficientZero consistency loss.
 ///   actions:         [B, K, 3, 8, 8] stored flat as B * K * 192 (f32)
 ///   target_policies: [B, K+1, 4672]  stored flat as B * (K+1) * NUM_ACTIONS (f32)
@@ -112,7 +112,7 @@ pub fn assemble_batch_arrays(samples: &[TrainingSample], unroll_k: usize) -> Bat
     let b = samples.len();
     let kp1 = unroll_k + 1; // K+1
 
-    let obs_stride = NUM_OBS_PLANES * 64; // 102 * 64 = 6528
+    let obs_stride = NUM_OBS_PLANES * 64; // 110 * 64 = 7040
     let act_stride = 3 * 64;             // 192
     let pol_stride = NUM_ACTIONS;         // 4672
 
@@ -314,7 +314,7 @@ pub struct TrainResult {
 /// Call `trainer.train_batch(batch_dict)` through the GIL and return all loss components.
 ///
 /// Converts flat Rust `Vec<f32>` arrays into shaped numpy arrays:
-///   observations: `[B, K+1, 102, 8, 8]` — all K+1 steps for EfficientZero consistency loss
+///   observations: `[B, K+1, 110, 8, 8]` — all K+1 steps for EfficientZero consistency loss
 ///   policies: `[B, K+1, 4672]`
 /// Builds the Python dict, calls `train_batch`, and extracts all five loss values.
 pub fn train_batch_python(

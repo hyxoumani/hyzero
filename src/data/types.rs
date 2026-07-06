@@ -21,13 +21,16 @@ pub const NUM_UNDERPROMO_ACTIONS: usize = 576;
 pub const NUM_HISTORY_POSITIONS: usize = 8;
 
 /// Number of observation planes for the representation network.
-/// Layout: 8 positions * 12 piece planes each = 96, plus 6 game-state planes.
+/// Layout: 8 positions * 12 piece planes each = 96, plus 6 game-state planes, plus
+/// 8 lc0-style repetition planes (one per history position).
 /// Current position: planes 0-11 (pieces), planes 96-101 (castling x4, EP, halfmove).
 /// Past positions 1-7: planes 12-95 (12 piece planes each, no castling/EP for history).
+/// Repetition: planes 102-109 (one per history position; constant-fill 1.0 if that
+/// position had occurred before in the game, 0.0 otherwise).
 /// Side-to-move is NOT encoded (removed in Phase 3b for color-invariant observations).
-pub const NUM_OBS_PLANES: usize = 102;
+pub const NUM_OBS_PLANES: usize = 110;
 
-/// Board observation encoded as 102 float planes (8x8 each).
+/// Board observation encoded as 110 float planes (8x8 each).
 ///
 /// Plane layout:
 ///   0-11:   Current position pieces (my pawn..king, opp pawn..king)
@@ -38,6 +41,9 @@ pub const NUM_OBS_PLANES: usize = 102;
 ///   96-99:  Castling rights (my KS, my QS, opp KS, opp QS) — current position only
 ///   100:    En passant target square (one-hot, rank-mirrored for Black)
 ///   101:    Halfmove clock (all squares = clock / 100.0)
+///   102:    Current position repetition flag (all 1.0 if the position had occurred
+///           before in the game, else 0.0)
+///   103-109: Past positions 1-7 repetition flags (captured at snapshot time)
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct BoardObservation {
     pub planes: Vec<f32>,
@@ -59,6 +65,11 @@ pub struct BoardSnapshot {
     pub white_pieces_bb: [u64; 6],
     /// Piece bitboards indexed by piece type (0-5: Pawn..King) for black.
     pub black_pieces_bb: [u64; 6],
+    /// True if this position had already occurred at least once earlier in the
+    /// game at the time it was the current position (zobrist repeat count >= 2).
+    /// Captured at snapshot time and fed into the lc0-style repetition planes.
+    #[serde(default)]
+    pub repeated: bool,
 }
 
 /// Latent state produced by the representation or dynamics network.

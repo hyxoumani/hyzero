@@ -9,7 +9,7 @@ from hyzero.models.common import ResidualBlock
 class RepresentationNetwork(nn.Module):
     """Encodes a raw board observation into a latent hidden state.
 
-    Input:  [B, input_planes, 8, 8]  (default input_planes=102)
+    Input:  [B, input_planes, 8, 8]  (default input_planes=110)
     Output: [B, hidden_channels, 8, 8]  (default hidden_channels=128)
 
     Also exposes projector and predictor heads for EfficientZero-style
@@ -19,7 +19,7 @@ class RepresentationNetwork(nn.Module):
 
     def __init__(
         self,
-        input_planes: int = 102,
+        input_planes: int = 110,
         hidden_channels: int = 128,
         num_res_blocks: int = 4,
         proj_dim: int = 256,

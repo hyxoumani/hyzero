@@ -30,8 +30,8 @@ def test_tablebase_encoding_roundtrip():
     from hyzero.training.trainer import _build_kqk_white_winning_obs
 
     # Build expected tensor from trainer reference.
-    expected_tensor = _build_kqk_white_winning_obs("cpu")  # [1, 102, 8, 8]
-    expected = expected_tensor.squeeze(0).numpy()           # [102, 8, 8]
+    expected_tensor = _build_kqk_white_winning_obs("cpu")  # [1, 110, 8, 8]
+    expected = expected_tensor.squeeze(0).numpy()           # [110, 8, 8]
 
     # Build the board manually to match trainer's documented layout.
     # White King e1 (sq4), Queen a2 (sq8), Black King e8 (sq60), White to move.
@@ -42,10 +42,10 @@ def test_tablebase_encoding_roundtrip():
     board.turn = chess.WHITE
     board.castling_rights = 0
 
-    result = encode_board_python(board)  # [102, 8, 8]
+    result = encode_board_python(board)  # [110, 8, 8]
 
-    assert result.shape == (102, 8, 8), (
-        f"Expected shape (102, 8, 8), got {result.shape}"
+    assert result.shape == (110, 8, 8), (
+        f"Expected shape (110, 8, 8), got {result.shape}"
     )
     assert result.dtype == np.float32, (
         f"Expected float32 dtype, got {result.dtype}"
@@ -188,7 +188,7 @@ def test_mixed_batch_shapes():
     # Build a dummy replay batch: B=8, k_steps=5.
     b, k, num_actions = 8, 5, 4672
     batch = {
-        "observations":    np.zeros((b, k + 1, 102, 8, 8), dtype=np.float32),
+        "observations":    np.zeros((b, k + 1, 110, 8, 8), dtype=np.float32),
         "actions":         np.zeros((b, k, 3, 8, 8),       dtype=np.float32),
         "target_policies": np.zeros((b, k + 1, num_actions), dtype=np.float32),
         "target_values":   np.zeros((b, k + 1),              dtype=np.float32),
@@ -198,8 +198,8 @@ def test_mixed_batch_shapes():
     merged, tb_indices = trainer._maybe_mix_tb_samples(batch)
 
     # Shape checks.
-    assert merged["observations"].shape == (8, 6, 102, 8, 8), (
-        f"Expected observations shape (8, 6, 102, 8, 8), got {merged['observations'].shape}"
+    assert merged["observations"].shape == (8, 6, 110, 8, 8), (
+        f"Expected observations shape (8, 6, 110, 8, 8), got {merged['observations'].shape}"
     )
     assert merged["is_tablebase"].shape == (8,), (
         f"Expected is_tablebase shape (8,), got {merged['is_tablebase'].shape}"
@@ -263,7 +263,7 @@ def test_tb_masked_value_loss_step0_only():
 
     def _make_replay_batch():
         return {
-            "observations": np.zeros((B, K + 1, 102, 8, 8), dtype=np.float32),
+            "observations": np.zeros((B, K + 1, 110, 8, 8), dtype=np.float32),
             "actions":      np.zeros((B, K, 3, 8, 8),       dtype=np.float32),
             "target_policies": np.full((B, K + 1, num_actions), 1.0 / num_actions, dtype=np.float32),
             "target_values":   np.zeros((B, K + 1), dtype=np.float32),
@@ -331,7 +331,7 @@ def test_tb_masked_reward_step1_unmasked():
         return t
 
     batch_zeros = {
-        "observations": np.zeros((B, K + 1, 102, 8, 8), dtype=np.float32),
+        "observations": np.zeros((B, K + 1, 110, 8, 8), dtype=np.float32),
         "actions":      np.zeros((B, K, 3, 8, 8),       dtype=np.float32),
         "target_policies": np.full((B, K + 1, num_actions), 1.0 / num_actions, dtype=np.float32),
         "target_values":   np.zeros((B, K + 1), dtype=np.float32),
@@ -394,7 +394,7 @@ def test_trajectory_batch_shapes_and_mate_signal():
     batch = build_tb_batch_trajectories([traj], k_steps=k_steps)
 
     # Shape contract.
-    assert batch["observations"].shape == (1, k_steps + 1, 102, 8, 8)
+    assert batch["observations"].shape == (1, k_steps + 1, 110, 8, 8)
     assert batch["actions"].shape == (1, k_steps, 3, 8, 8)
     assert batch["target_policies"].shape == (1, k_steps + 1, 4672)
     assert batch["target_values"].shape == (1, k_steps + 1)
