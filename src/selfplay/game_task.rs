@@ -718,7 +718,15 @@ pub async fn play_game(
     // material lead >= `adjudication_margin` ends the game decisively for the
     // leading side; `adjudicated_side` records the WINNER (converted to a
     // White-absolute outcome after the loop, exactly like a real checkmate).
-    let adjudicate_selfplay = selfplay_adjudicate_enabled();
+    // Curriculum/probe starts (non-standard `starting_fen`) must play to a real
+    // terminal, so material adjudication is skipped for them unless
+    // HYZERO_ADJ_CURRICULUM=1 restores the old behavior. Startpos games (no
+    // `starting_fen`) keep adjudication exactly as gated by HYZERO_SELFPLAY_ADJUDICATE.
+    let adjudicate_selfplay = should_adjudicate_selfplay(
+        selfplay_adjudicate_enabled(),
+        starting_fen.is_some(),
+        adj_curriculum_enabled(),
+    );
     let adjudication_margin = selfplay_adjudication_margin();
     let mut adjudicated_side: Option<Color> = None;
 
@@ -1488,6 +1496,44 @@ fn selfplay_adjudicate_enabled() -> bool {
     *ENABLED.get_or_init(|| {
         parse_selfplay_adjudicate(std::env::var("HYZERO_SELFPLAY_ADJUDICATE").ok().as_deref())
     })
+}
+
+/// Pure parse helper for `HYZERO_ADJ_CURRICULUM`. Enabled only when the (trimmed,
+/// lowercased) value is `"1"` or `"true"`; anything else (including `"0"`,
+/// `"false"`, empty, and unset/`None`) is OFF. Extracted so env-parse tests can
+/// exercise it without tripping the `OnceLock`.
+fn parse_adj_curriculum(value: Option<&str>) -> bool {
+    match value {
+        Some(v) => {
+            let s = v.trim().to_ascii_lowercase();
+            s == "1" || s == "true"
+        }
+        None => false,
+    }
+}
+
+/// Cached env-gate: true when `HYZERO_ADJ_CURRICULUM` is `"1"`/`"true"`. Read once
+/// per process via `OnceLock`. DEFAULT OFF — curriculum/probe starts (non-standard
+/// `starting_fen`) skip material adjudication so they play to a real terminal.
+fn adj_curriculum_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED
+        .get_or_init(|| parse_adj_curriculum(std::env::var("HYZERO_ADJ_CURRICULUM").ok().as_deref()))
+}
+
+/// Whether self-play material adjudication should be consulted for a game.
+///
+/// `enabled` is the process-wide `HYZERO_SELFPLAY_ADJUDICATE` gate. Curriculum/probe
+/// starts (`from_curriculum` = game began from a non-standard `starting_fen`) skip
+/// adjudication so they play to a real terminal, unless `curriculum_override`
+/// (`HYZERO_ADJ_CURRICULUM=1`) restores the old behavior. Startpos games
+/// (`from_curriculum == false`) are unaffected — the gate is just `enabled`.
+fn should_adjudicate_selfplay(
+    enabled: bool,
+    from_curriculum: bool,
+    curriculum_override: bool,
+) -> bool {
+    enabled && (!from_curriculum || curriculum_override)
 }
 
 /// Pure parse helper for `HYZERO_SELFPLAY_ADJ_MARGIN`: the white-absolute material
@@ -2605,6 +2651,59 @@ mod tests {
             None,
             "adjudication OFF must never terminate a self-play game on material",
         );
+    }
+
+    /// Curriculum gate: a curriculum/probe start (non-standard `starting_fen`) must
+    /// SKIP material adjudication so it plays to a real terminal, while a startpos
+    /// game with the same overwhelming lead still adjudicates. FAILS without the
+    /// `should_adjudicate_selfplay` gate (pre-fix the loop adjudicated every start).
+    #[test]
+    fn adjudication_skipped_for_curriculum_start_but_fires_for_startpos() {
+        let precomputed = Arc::new(PrecomputedItems::begin_precomputing());
+        // White up a rook + queen (delta +14 ≥ margin 12), no checkmate present.
+        let (board, _, _) = board_from_fen("4k3/8/8/8/8/8/8/R2QK3 w - - 0 1", precomputed)
+            .expect("invalid FEN");
+
+        // Startpos game (from_curriculum == false): adjudication is consulted and fires.
+        let startpos_gate = should_adjudicate_selfplay(true, false, false);
+        assert!(startpos_gate, "startpos gate should be ON when enabled");
+        assert_eq!(
+            selfplay_adjudicated_winner(&board, startpos_gate, 12),
+            Some(Color::White),
+            "startpos game with +14 lead must adjudicate a white win",
+        );
+
+        // Curriculum start (from_curriculum == true, no override): adjudication skipped.
+        let curriculum_gate = should_adjudicate_selfplay(true, true, false);
+        assert!(
+            !curriculum_gate,
+            "curriculum start must skip adjudication without the override"
+        );
+        assert_eq!(
+            selfplay_adjudicated_winner(&board, curriculum_gate, 12),
+            None,
+            "curriculum start must play on despite a +14 material lead",
+        );
+
+        // Override restores adjudication for curriculum starts.
+        let override_gate = should_adjudicate_selfplay(true, true, true);
+        assert!(
+            override_gate,
+            "HYZERO_ADJ_CURRICULUM override must restore curriculum adjudication"
+        );
+    }
+
+    /// Env-parse (pure helper): `HYZERO_ADJ_CURRICULUM` is OFF by default and turns
+    /// ON only for "1"/"true" (space/case-insensitive). Any other value — including
+    /// "0", "false", empty, and unset — stays OFF.
+    #[test]
+    fn adj_curriculum_env_parse_default_off_truthy_on() {
+        assert!(!parse_adj_curriculum(None));
+        assert!(!parse_adj_curriculum(Some("")));
+        assert!(!parse_adj_curriculum(Some("0")));
+        assert!(!parse_adj_curriculum(Some("false")));
+        assert!(parse_adj_curriculum(Some("1")));
+        assert!(parse_adj_curriculum(Some(" TRUE ")));
     }
 
     /// Env-parse (pure helper): `HYZERO_SELFPLAY_ADJUDICATE` is OFF by default and
