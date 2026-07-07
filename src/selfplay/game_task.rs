@@ -210,6 +210,33 @@ fn selfplay_temperature(turn_count: usize, temperature_moves: u32) -> f32 {
     1.0 + frac * (0.01 - 1.0)
 }
 
+/// Exploration-window length for CURRICULUM self-play games — those seeded from a
+/// non-standard `starting_fen` (the same `starting_fen.is_some()` discriminator the
+/// self-play adjudication gate uses). `HYZERO_CURRICULUM_TEMPERATURE_MOVES`,
+/// default 2, clamped to [0, 200]. Curriculum starts are short tactical/endgame
+/// seeds where a long random-sampling window squanders the seeded position; a tiny
+/// window anneals to exploitation almost immediately. Read per-call
+/// (TestEnvGuard-compatible).
+fn curriculum_temperature_moves() -> u32 {
+    std::env::var("HYZERO_CURRICULUM_TEMPERATURE_MOVES")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .map(|n| n.clamp(0, 200))
+        .unwrap_or(2)
+}
+
+/// Resolve the effective exploration-window length for a game. Curriculum games
+/// (`is_curriculum` = seeded from a non-standard `starting_fen`) use the short
+/// `curriculum_temperature_moves()` window; startpos games keep `config_moves`
+/// unchanged, so their temperature schedule is bit-identical to before this knob.
+fn effective_temperature_moves(is_curriculum: bool, config_moves: u32) -> u32 {
+    if is_curriculum {
+        curriculum_temperature_moves()
+    } else {
+        config_moves
+    }
+}
+
 // --- MCTS summary log (HYZERO_MCTS_TRACE gate) ---
 
 /// Cached env-gate: true if HYZERO_MCTS_TRACE is set and non-zero.
@@ -819,7 +846,13 @@ pub async fn play_game(
 
         // Select action based on temperature (annealed past the exploration
         // window when HYZERO_TEMP_ANNEAL is on; hard step to 0.01 when off).
-        let temperature = selfplay_temperature(turn_count, config.temperature_moves);
+        // Curriculum games (seeded from a `starting_fen`) use the short
+        // `HYZERO_CURRICULUM_TEMPERATURE_MOVES` window so they stop random-walking
+        // off the seed almost immediately; startpos games keep the global window.
+        let temperature = selfplay_temperature(
+            turn_count,
+            effective_temperature_moves(starting_fen.is_some(), config.temperature_moves),
+        );
         // selected_action is in current-player (flipped) coordinate space for Black.
         let mut selected_action = tree.select_action(temperature);
 
@@ -2541,6 +2574,32 @@ mod tests {
         // Full temperature inside the shortened window, exploitation just past it.
         assert!((selfplay_temperature(11, config.temperature_moves) - 1.0).abs() < 1e-6);
         assert!((selfplay_temperature(12, config.temperature_moves) - 0.01).abs() < 1e-6);
+    }
+
+    /// Curriculum games (seeded from a `starting_fen`) must use the short
+    /// `HYZERO_CURRICULUM_TEMPERATURE_MOVES` window (default 2) so an early ply is
+    /// already eval-greedy, while startpos games keep the global window and stay
+    /// exploratory at the same ply. FAILS without the curriculum branch (both
+    /// sides would share `config.temperature_moves` and be exploratory at turn 5).
+    #[test]
+    fn curriculum_temperature_window_is_short_for_seeded_games() {
+        let _env = TestEnvGuard::new(&[
+            "HYZERO_CURRICULUM_TEMPERATURE_MOVES",
+            "HYZERO_TEMP_ANNEAL",
+        ]);
+        // SAFETY: env mutation serialized by TestEnvGuard for this test's duration.
+        unsafe {
+            std::env::remove_var("HYZERO_CURRICULUM_TEMPERATURE_MOVES"); // default 2
+            std::env::set_var("HYZERO_TEMP_ANNEAL", "0"); // hard step for a crisp edge
+        }
+        // Startpos game at turn 5 with the legacy window (30) is still exploratory.
+        let startpos_window = effective_temperature_moves(false, 30);
+        assert_eq!(startpos_window, 30, "startpos keeps the global window");
+        assert!((selfplay_temperature(5, startpos_window) - 1.0).abs() < 1e-6);
+        // Curriculum game at turn 5 is already past the default-2 window → greedy.
+        let curriculum_window = effective_temperature_moves(true, 30);
+        assert_eq!(curriculum_window, 2, "curriculum uses the short default window");
+        assert!((selfplay_temperature(5, curriculum_window) - 0.01).abs() < 1e-6);
     }
 
     /// Unset HYZERO_TEMPERATURE_MOVES leaves the self-play window at the legacy
