@@ -328,6 +328,14 @@ pub struct MCTSTree {
     /// Running min/max of node Q-values for PUCT normalization. Reset at the
     /// start of each `run_simulations` and updated during `backpropagate`.
     min_max: MinMaxStats,
+    /// Optional ground-truth terminal values for the root's DIRECT children,
+    /// parallel to `root.legal_actions`. Entry `i` is `Some(v)` when applying
+    /// action `i` to the REAL board yields a rules-terminal position, where `v` is
+    /// the true value from the resulting position's side-to-move POV (mate = -1.0,
+    /// draws = 0.0). Populated by the self-play / eval driver via
+    /// `set_root_terminals` (the only place the real board is in scope). Empty (the
+    /// default) means no grounding — search is bit-identical to before this field.
+    root_terminals: Vec<Option<f32>>,
 }
 
 impl MCTSTree {
@@ -362,7 +370,25 @@ impl MCTSTree {
             root,
             config,
             min_max: MinMaxStats::new(),
+            root_terminals: Vec::new(),
         }
+    }
+
+    /// Install ground-truth terminal values for the root's direct children.
+    /// `terminals` must be parallel to the `legal_actions` passed to `new`: entry
+    /// `i` is `Some(v)` when action `i` leads to a rules-terminal real position
+    /// (mate = -1.0 / draw = 0.0, resulting-position side-to-move POV), else `None`.
+    /// The self-play / eval driver is the only caller — it alone holds the real
+    /// board needed to compute legality/terminality (deeper tree nodes are latent).
+    pub fn set_root_terminals(&mut self, terminals: Vec<Option<f32>>) {
+        self.root_terminals = terminals;
+    }
+
+    /// Ground-truth terminal value for root child `idx`, if that child is a known
+    /// rules-terminal (from the resulting position's side-to-move POV). `None` when
+    /// unset or out of range — the common no-grounding case.
+    fn root_terminal_value(&self, idx: usize) -> Option<f32> {
+        self.root_terminals.get(idx).copied().flatten()
     }
 
     /// Run all simulations. Dispatches to either PUCT (default) or Gumbel-Top-k +
@@ -517,30 +543,30 @@ impl MCTSTree {
             } else {
                 // Navigate to the parent of the leaf to expand
                 let leaf_action_idx = *path.last().unwrap();
+                // Read the depth-1 grounding oracle BEFORE taking the mutable parent
+                // borrow (avoids aliasing `self`). Only depth-1 children can be
+                // grounded — deeper nodes are latent and have no real board.
+                let grounded = if path.len() == 1 {
+                    self.root_terminal_value(leaf_action_idx)
+                } else {
+                    None
+                };
                 let parent = self.navigate_to_parent_mut(&path);
 
-                if parent.children[leaf_action_idx].is_some() {
-                    // We selected an existing child (terminal node with no legal actions)
-                    let child = parent.children[leaf_action_idx].as_ref().unwrap();
-                    child.q_value()
+                if let Some(child) = parent.children[leaf_action_idx].as_ref() {
+                    // Existing terminal/leaf child re-selected. Grounded terminals
+                    // back up their TRUE value (own-POV) verbatim on every visit;
+                    // ordinary terminal (empty-legal) nodes fall back to their Q.
+                    child.terminal_value.unwrap_or_else(|| child.q_value())
+                } else if let Some(tv) = grounded {
+                    // Depth-1 leaf whose move ends the real game: mark it a terminal
+                    // node with the TRUE value, never the network estimate, and never
+                    // expand below it. `tv` is the resulting position's side-to-move
+                    // (leaf) POV; backprop flips it up to the root mover's POV.
+                    parent.children[leaf_action_idx] = Some(Box::new(MCTSNode::new_terminal(tv)));
+                    tv
                 } else {
-                    // Expand: call evaluator
-                    let action = parent.legal_actions[leaf_action_idx];
-                    let (new_hidden, reward, policy, value, moves_left) =
-                        evaluator.expand_leaf(&parent.hidden_state, action).await;
-
-                    // MuZero internal nodes: top-K=64 action candidates by prior policy.
-                    // (Real legality isn't computable from the hidden state alone.)
-                    let child_actions = top_k_actions(&policy, 64);
-                    let mut child = MCTSNode::new(new_hidden, &policy, child_actions, reward);
-                    // Lift the network's moves-left estimate into the node when the
-                    // backend produced one (MLH on); otherwise keep the neutral 0.5.
-                    if let Some(m) = moves_left {
-                        child.m = m;
-                    }
-                    parent.children[leaf_action_idx] = Some(Box::new(child));
-
-                    value
+                    Self::expand_child(evaluator, parent, leaf_action_idx).await
                 }
             };
 
@@ -691,16 +717,16 @@ impl MCTSTree {
         // expand-and-backprop right here.
         let root_child_was_some = self.root.children[root_action_idx].is_some();
         if !root_child_was_some {
-            // Expand the root child via evaluator. This is the leaf for this sim.
-            let action = self.root.legal_actions[root_action_idx];
-            let (new_hidden, reward, policy, value, moves_left) =
-                evaluator.expand_leaf(&self.root.hidden_state, action).await;
-            let child_actions = top_k_actions(&policy, 64);
-            let mut child = MCTSNode::new(new_hidden, &policy, child_actions, reward);
-            if let Some(m) = moves_left {
-                child.m = m;
-            }
-            self.root.children[root_action_idx] = Some(Box::new(child));
+            // Grounding oracle: if this forced root move ends the real game, mark a
+            // terminal node with the TRUE value (never the network estimate) and
+            // never expand below it. `tv` is the resulting position's side-to-move
+            // (leaf) POV; backprop flips it up to the root mover's POV.
+            let value = if let Some(tv) = self.root_terminal_value(root_action_idx) {
+                self.root.children[root_action_idx] = Some(Box::new(MCTSNode::new_terminal(tv)));
+                tv
+            } else {
+                Self::expand_child(evaluator, &mut self.root, root_action_idx).await
+            };
             self.backpropagate(&path, value);
             return;
         }
@@ -715,8 +741,9 @@ impl MCTSTree {
         let leaf_value: f32 = loop {
             let node = unsafe { &*current };
             if node.legal_actions.is_empty() {
-                // Terminal node — backprop with current value
-                break node.q_value();
+                // Terminal node — grounded terminals back up their TRUE value
+                // (own-POV) verbatim; ordinary terminals fall back to their Q.
+                break node.terminal_value.unwrap_or_else(|| node.q_value());
             }
 
             let child_idx = if qnorm_enabled() {
@@ -738,24 +765,41 @@ impl MCTSTree {
                     current = child.as_ref() as *const MCTSNode;
                 }
                 None => {
-                    // Expand and break out
+                    // Expand and break out. Grounding applies only at depth 1
+                    // (handled above for the forced root child); nodes reached here
+                    // are depth ≥ 2 (latent) so no real-board check is possible.
                     let leaf_action_idx = child_idx;
                     let parent = self.navigate_to_parent_mut(&path);
-                    let action = parent.legal_actions[leaf_action_idx];
-                    let (new_hidden, reward, policy, value, moves_left) =
-                        evaluator.expand_leaf(&parent.hidden_state, action).await;
-                    let child_actions = top_k_actions(&policy, 64);
-                    let mut child = MCTSNode::new(new_hidden, &policy, child_actions, reward);
-                    if let Some(m) = moves_left {
-                        child.m = m;
-                    }
-                    parent.children[leaf_action_idx] = Some(Box::new(child));
+                    let value = Self::expand_child(evaluator, parent, leaf_action_idx).await;
                     break value;
                 }
             }
         };
 
         self.backpropagate(&path, leaf_value);
+    }
+
+    /// Expand `parent`'s child at `child_idx` via the evaluator (MuZero latent
+    /// expansion) and return the leaf value. Internal MuZero nodes take the top-K=64
+    /// action candidates by prior policy — real legality isn't computable from the
+    /// hidden state alone. Shared by the PUCT and Gumbel expansion sites.
+    async fn expand_child(
+        evaluator: &dyn Evaluator,
+        parent: &mut MCTSNode,
+        child_idx: usize,
+    ) -> f32 {
+        let action = parent.legal_actions[child_idx];
+        let (new_hidden, reward, policy, value, moves_left) =
+            evaluator.expand_leaf(&parent.hidden_state, action).await;
+        let child_actions = top_k_actions(&policy, 64);
+        let mut child = MCTSNode::new(new_hidden, &policy, child_actions, reward);
+        // Lift the network's moves-left estimate into the node when the backend
+        // produced one (MLH on); otherwise keep the neutral 0.5.
+        if let Some(m) = moves_left {
+            child.m = m;
+        }
+        parent.children[child_idx] = Some(Box::new(child));
+        value
     }
 
     /// Navigate to the parent node of the last element in the path.
@@ -1588,6 +1632,113 @@ mod tests {
     fn dirichlet_alpha_falls_back_when_non_positive() {
         assert!(
             (parse_noise_alpha(Some("0.0".to_string())) - DEFAULT_NOISE_ALPHA).abs() < f32::EPSILON
+        );
+    }
+
+    /// Root-child grounding: a mating root move (grounded leaf-POV -1.0) is scored
+    /// exactly +1.0 from the root mover's POV and captures the vast majority of
+    /// visits at 50 sims — even though the (uniform) evaluator values every other
+    /// child at 0.5 (parent-POV -0.5). FAILS without grounding: the mate child
+    /// would just get the network's 0.5 and not stand out. Uses PUCT (no noise) for
+    /// determinism.
+    #[tokio::test]
+    async fn grounded_mate_root_child_is_preferred_at_50_sims() {
+        let policy = vec![1.0 / NUM_ACTIONS as f32; NUM_ACTIONS];
+        let legal_actions: Vec<ActionIndex> = (0..5).collect();
+        let config = MCTSConfig {
+            num_simulations: 50,
+            exploration_constant: 1.5,
+            add_root_noise: false,
+            gumbel_top_k: None,
+        };
+        let mut tree = MCTSTree::new(
+            HiddenState::new(64),
+            &policy,
+            0.5,
+            legal_actions.clone(),
+            config,
+        );
+        // Child 0 is a mate (resulting side-to-move is checkmated → leaf-POV -1.0).
+        let mut terminals = vec![None; legal_actions.len()];
+        terminals[0] = Some(-1.0);
+        tree.set_root_terminals(terminals);
+
+        tree.run_simulations(&MockEvaluator).await;
+
+        // The mate child's Q, from the root mover's POV, is exactly +1.0 on every
+        // visit (never the network's estimate).
+        let mate = tree.root.children[0].as_ref().expect("mate child expanded");
+        assert!(
+            (mate.q_value() - 1.0).abs() < 1e-6,
+            "grounded mate must score +1.0 from the mover's POV, got {}",
+            mate.q_value()
+        );
+        // It is never expanded below (terminal leaf).
+        assert!(
+            mate.legal_actions.is_empty(),
+            "grounded terminal must not expand"
+        );
+        // Search prefers it: it takes more visits than all other children combined.
+        let mate_visits = mate.visit_count;
+        let other_visits: u32 = tree.root.children[1..]
+            .iter()
+            .map(|c| c.as_ref().map_or(0, |n| n.visit_count))
+            .sum();
+        assert!(
+            mate_visits > other_visits,
+            "mate child ({mate_visits}) must out-visit all others ({other_visits})"
+        );
+        assert_eq!(
+            tree.select_action(0.0),
+            0,
+            "greedy selection picks the mate"
+        );
+    }
+
+    /// Root-child grounding: a move into an immediate draw (grounded leaf-POV 0.0,
+    /// e.g. stalemate or KvK insufficient material) is scored exactly 0.0 and is
+    /// preferred over siblings the (uniform) evaluator scores at parent-POV -0.5.
+    /// This is the DEFENDER-exploitation case: a side that is worse-than-drawn per
+    /// the net still steers into the KNOWN draw. FAILS without grounding.
+    #[tokio::test]
+    async fn grounded_draw_root_child_scores_zero_and_is_preferred() {
+        let policy = vec![1.0 / NUM_ACTIONS as f32; NUM_ACTIONS];
+        let legal_actions: Vec<ActionIndex> = (0..5).collect();
+        let config = MCTSConfig {
+            num_simulations: 50,
+            exploration_constant: 1.5,
+            add_root_noise: false,
+            gumbel_top_k: None,
+        };
+        // Root value negative: the mover is losing per the net, so any expanded
+        // sibling backs up parent-POV -0.5 (< the grounded draw's 0.0).
+        let mut tree = MCTSTree::new(
+            HiddenState::new(64),
+            &policy,
+            -0.5,
+            legal_actions.clone(),
+            config,
+        );
+        let mut terminals = vec![None; legal_actions.len()];
+        terminals[0] = Some(0.0); // draw into bare kings / stalemate
+        tree.set_root_terminals(terminals);
+
+        tree.run_simulations(&MockEvaluator).await;
+
+        let draw = tree.root.children[0].as_ref().expect("draw child expanded");
+        assert!(
+            draw.q_value().abs() < 1e-6,
+            "grounded draw must score exactly 0.0, got {}",
+            draw.q_value()
+        );
+        assert!(
+            draw.legal_actions.is_empty(),
+            "grounded terminal must not expand"
+        );
+        assert_eq!(
+            tree.select_action(0.0),
+            0,
+            "the defender steers into the known draw over a net-negative alternative"
         );
     }
 }

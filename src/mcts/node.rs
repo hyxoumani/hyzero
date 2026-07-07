@@ -20,6 +20,15 @@ pub struct MCTSNode {
     /// (HYZERO_MOVES_LEFT_HEAD=1); when MLH is off the reply carries no `m` and the
     /// node keeps 0.5, so the bonus stays a no-op.
     pub m: f32,
+    /// When `Some(v)`, this node is a GROUND-TRUTH terminal: the real position it
+    /// represents is rules-terminal (checkmate / stalemate / insufficient material /
+    /// threefold), and `v` is the true game value from THIS node's own player POV
+    /// (the side to move in the resulting position) — mate = -1.0 (that side is
+    /// checkmated), every draw = 0.0. Search never expands below such a node and
+    /// always backs up `v` verbatim, never a network estimate. `None` for ordinary
+    /// nodes. Only ever set for the root's DIRECT children (depth 1), where the real
+    /// board is in scope; deeper nodes live in latent space and cannot be grounded.
+    pub terminal_value: Option<f32>,
 }
 
 impl MCTSNode {
@@ -59,6 +68,26 @@ impl MCTSNode {
             // Neutral default; expansion sites overwrite this with the network's
             // moves-left estimate when the backend supplies one (MLH on).
             m: 0.5,
+            // Ordinary (non-grounded) node.
+            terminal_value: None,
+        }
+    }
+
+    /// Create a GROUND-TRUTH terminal leaf. `value` is the true game value from
+    /// this node's own player (side-to-move) POV: mate = -1.0 (side to move is
+    /// checkmated), every draw = 0.0. The node has no legal actions (search never
+    /// expands below it) and carries a placeholder hidden state that is never read.
+    pub fn new_terminal(value: f32) -> Self {
+        Self {
+            hidden_state: HiddenState::new(0),
+            visit_count: 0,
+            total_value: 0.0,
+            reward: 0.0,
+            priors: Vec::new(),
+            children: Vec::new(),
+            legal_actions: Vec::new(),
+            m: 0.5,
+            terminal_value: Some(value),
         }
     }
 

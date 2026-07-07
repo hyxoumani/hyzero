@@ -598,6 +598,15 @@ pub async fn play_game_dual_from(
             legal_actions.clone(),
             mcts_config.clone(),
         );
+        // Root-child terminal grounding: give the tree the TRUE value of every
+        // depth-1 move that ends the real game, so mates/draws are scored exactly
+        // instead of by the (terminal-blind) network estimate.
+        tree.set_root_terminals(root_child_terminals(
+            &board,
+            &legal_actions,
+            side_to_move,
+            turn_count,
+        ));
         tree.run_simulations(evaluator.as_ref()).await;
 
         // Use near-greedy temperature for eval games (no exploration needed).
@@ -825,6 +834,15 @@ pub async fn play_game(
             legal_actions.clone(),
             mcts_config.clone(),
         );
+        // Root-child terminal grounding: give the tree the TRUE value of every
+        // depth-1 move that ends the real game, so mates/draws are scored exactly
+        // instead of by the (terminal-blind) network estimate.
+        tree.set_root_terminals(root_child_terminals(
+            &board,
+            &legal_actions,
+            side_to_move,
+            turn_count,
+        ));
         tree.run_simulations(evaluator.as_ref()).await;
 
         // Extract results
@@ -1151,6 +1169,51 @@ pub async fn play_game(
 /// destination rank alone appended a spurious "q" to non-pawn moves that land on
 /// rank 1/8 (back-rank rook/queen/king moves), which python-chess rejects as an
 /// illegal promotion and corrupts the logged game.
+/// Compute ground-truth terminal values for each root-direct move, parallel to
+/// `legal_actions` (POV-sorted — the exact vector handed to `MCTSTree::new`).
+///
+/// Entry `i` is `Some(v)` when applying `legal_actions[i]` to `board` produces a
+/// rules-terminal position (checkmate / stalemate / insufficient material /
+/// threefold / 50-move), where `v` is the true game value from the RESULTING
+/// position's side-to-move POV: mate = -1.0 (that side is checkmated), every draw =
+/// 0.0. Entry `i` is `None` when the position stays Ongoing (or the move fails to
+/// apply). Threefold and 50-move are detected via the cloned board's
+/// `position_history` / halfmove clock, so a move that repeats a 2×-seen position
+/// grounds as a draw.
+///
+/// This is the ONLY place root-child grounding is possible: the real board is in
+/// scope exactly here, at depth 1. Deeper tree nodes live in latent (hidden-state)
+/// space and cannot be legality-checked. Each candidate is applied to a fresh clone
+/// so `board` itself is never mutated.
+fn root_child_terminals(
+    board: &GameBoard,
+    legal_actions: &[ActionIndex],
+    side_to_move: Color,
+    turn_count: usize,
+) -> Vec<Option<f32>> {
+    legal_actions
+        .iter()
+        .map(|&pov_action| {
+            // legal_actions are POV-flipped for Black; map back to absolute coords
+            // before applying to the real board (mirrors the move-selection path).
+            let absolute_action = if side_to_move == Color::Black {
+                flip_action(pov_action as usize) as ActionIndex
+            } else {
+                pov_action
+            };
+            let move_str = action_to_notation(absolute_action, side_to_move, board);
+            let mut probe = board.clone();
+            match probe.process_move(&move_str, side_to_move, turn_count) {
+                // Mate: the side to move in the resulting position is checkmated →
+                // -1.0 from that (leaf) POV. Every rule-draw is 0.0.
+                Ok((_, GameResult::Checkmate(_))) => Some(-1.0),
+                Ok((_, GameResult::Ongoing)) | Err(_) => None,
+                Ok((_, _)) => Some(0.0),
+            }
+        })
+        .collect()
+}
+
 fn action_to_notation(action: ActionIndex, color: Color, board: &GameBoard) -> String {
     if action as usize >= NUM_BASE_ACTIONS {
         // Decode underpromotion: piece_idx encodes suffix, from_file and to_file
@@ -3131,5 +3194,93 @@ mod tests {
                 "rate 0.0 must sample no game (draw {draw})",
             );
         }
+    }
+
+    /// Build the POV-flipped, sorted `legal_actions` for `side_to_move` exactly as
+    /// the self-play / eval loops do, so oracle tests see the same vector the tree
+    /// (and `root_child_terminals`) receives.
+    fn pov_legal_actions(board: &GameBoard, side_to_move: Color) -> Vec<ActionIndex> {
+        let raw = get_legal_moves(board, side_to_move);
+        let mut acts: Vec<ActionIndex> = if side_to_move == Color::Black {
+            raw.iter()
+                .map(|&a| flip_action(a as usize) as ActionIndex)
+                .collect()
+        } else {
+            raw
+        };
+        acts.sort_unstable();
+        acts
+    }
+
+    /// A root move that delivers checkmate is grounded with the TRUE value from the
+    /// resulting position's side-to-move POV: -1.0 (that side is checkmated). Uses
+    /// a back-rank mate — Rh1-h8# — where the mate is the unique terminal move.
+    /// FAILS without grounding (the vector would be all `None`).
+    #[test]
+    fn root_child_terminals_marks_mating_move() {
+        let precomputed = Arc::new(PrecomputedItems::begin_precomputing());
+        // Black Ka8, White Kb6, White Rh1: Rh1-h8 is mate (Kb6 covers a7/b7/b8).
+        let (board, stm, _) = board_from_fen("k7/8/1K6/8/8/8/8/7R w - - 0 1", precomputed).unwrap();
+        let legal = pov_legal_actions(&board, stm);
+        let terminals = root_child_terminals(&board, &legal, stm, 0);
+
+        let mates = terminals.iter().filter(|t| **t == Some(-1.0)).count();
+        assert_eq!(
+            mates, 1,
+            "exactly one root move (Rh8#) must ground as mate=-1.0"
+        );
+        // No losing/ongoing move should be mis-scored as a draw here.
+        assert!(
+            terminals.iter().all(|t| *t != Some(1.0)),
+            "grounding is always leaf-POV: mate is -1.0, never +1.0"
+        );
+    }
+
+    /// A root move that captures into an insufficient-material draw is grounded as
+    /// 0.0, while non-capturing moves (which keep enough material) stay ungrounded.
+    /// This is the DEFENDER's exploitation case from the diagnosis. Position: K+2N
+    /// vs K (Ongoing); Black to move can play Kxb3, removing one knight → K+N vs K,
+    /// an immediate insufficient-material draw. The other legal king moves keep both
+    /// knights (Ongoing). FAILS without grounding (all `None`).
+    #[test]
+    fn root_child_terminals_marks_capture_into_insufficient_material_as_draw() {
+        let precomputed = Arc::new(PrecomputedItems::begin_precomputing());
+        // Black Ka2 to move; White Nb3 (capturable), Ne5 (far), Kg8. Kxb3 → K+N vs K.
+        let (board, stm, _) =
+            board_from_fen("6K1/8/8/4N3/8/1N6/k7/8 b - - 0 1", precomputed).unwrap();
+        let legal = pov_legal_actions(&board, stm);
+        let terminals = root_child_terminals(&board, &legal, stm, 0);
+
+        let draws = terminals.iter().filter(|t| **t == Some(0.0)).count();
+        assert_eq!(
+            draws, 1,
+            "exactly the Kxb3 capture into K+N vs K must ground as a draw (0.0)"
+        );
+        // Grounding is selective: the non-capturing king moves stay Ongoing.
+        assert!(
+            terminals.iter().any(|t| t.is_none()),
+            "non-capturing moves keep both knights → must stay ungrounded (None)"
+        );
+        assert!(
+            terminals.iter().all(|t| *t != Some(-1.0)),
+            "no move in this position is a mate"
+        );
+    }
+
+    /// An Ongoing (non-terminal) startpos has no grounded root children: every
+    /// entry is `None`, so grounding is a strict no-op there (search unchanged).
+    #[test]
+    fn root_child_terminals_all_none_for_ongoing_startpos() {
+        let precomputed = Arc::new(PrecomputedItems::begin_precomputing());
+        let p1 = Player::init_player(true);
+        let p2 = Player::init_player(false);
+        let board = GameBoard::init_game_board(precomputed, p1, p2);
+        let legal = pov_legal_actions(&board, Color::White);
+        let terminals = root_child_terminals(&board, &legal, Color::White, 0);
+        assert_eq!(terminals.len(), legal.len(), "one entry per legal move");
+        assert!(
+            terminals.iter().all(|t| t.is_none()),
+            "no startpos move ends the game — grounding must be inert"
+        );
     }
 }

@@ -329,6 +329,7 @@ mod tests {
         // Create a node with two children: one visited, one not
         let node = MCTSNode {
             hidden_state: crate::data::HiddenState::new(64),
+            terminal_value: None,
             m: 0.5,
             visit_count: 10,
             total_value: 5.0,
@@ -337,6 +338,7 @@ mod tests {
             children: vec![
                 Some(Box::new(MCTSNode {
                     hidden_state: crate::data::HiddenState::new(64),
+                    terminal_value: None,
                     m: 0.5,
                     visit_count: 8,
                     total_value: 4.0,
@@ -362,6 +364,7 @@ mod tests {
         let priors = vec![0.05; 20];
         let node = MCTSNode {
             hidden_state: crate::data::HiddenState::new(64),
+            terminal_value: None,
             m: 0.5,
             visit_count: 1,
             total_value: 0.0,
@@ -388,6 +391,7 @@ mod tests {
     fn visited_child(q: f32) -> Option<Box<MCTSNode>> {
         Some(Box::new(MCTSNode {
             hidden_state: crate::data::HiddenState::new(64),
+            terminal_value: None,
             m: 0.5,
             visit_count: 1,
             total_value: q,
@@ -416,6 +420,7 @@ mod tests {
 
         let node = MCTSNode {
             hidden_state: crate::data::HiddenState::new(64),
+            terminal_value: None,
             m: 0.5,
             visit_count: 16,
             total_value: -12.8, // mean Q = -0.8 → normalize → 0.1
@@ -427,6 +432,7 @@ mod tests {
                     // with enough visits that its exploration term is tiny.
                     Some(Box::new(MCTSNode {
                         hidden_state: crate::data::HiddenState::new(64),
+                        terminal_value: None,
                         m: 0.5,
                         visit_count: 20,
                         total_value: -12.0, // mean Q = -0.6
@@ -459,6 +465,7 @@ mod tests {
 
         let node = MCTSNode {
             hidden_state: crate::data::HiddenState::new(64),
+            terminal_value: None,
             m: 0.5,
             visit_count: 100,
             total_value: 50.0, // parent mean Q = 0.5; pass-through under degenerate
@@ -501,6 +508,7 @@ mod tests {
 
         let node = MCTSNode {
             hidden_state: crate::data::HiddenState::new(64),
+            terminal_value: None,
             m: 0.5,
             visit_count: 200,
             total_value: 0.0,
@@ -524,6 +532,7 @@ mod tests {
     fn child_qm(q: f32, m: f32) -> Option<Box<MCTSNode>> {
         Some(Box::new(MCTSNode {
             hidden_state: crate::data::HiddenState::new(64),
+            terminal_value: None,
             m,
             visit_count: 20,
             total_value: q * 20.0,
@@ -623,6 +632,7 @@ mod tests {
         stats.update(1.0);
         let make = |m0: f32, m1: f32| MCTSNode {
             hidden_state: crate::data::HiddenState::new(64),
+            terminal_value: None,
             m: 0.5,
             visit_count: 40,
             total_value: 20.0, // parent Q = 0.5
@@ -646,6 +656,7 @@ mod tests {
         stats.update(1.0);
         let node = MCTSNode {
             hidden_state: crate::data::HiddenState::new(64),
+            terminal_value: None,
             m: 0.5,
             visit_count: 40,
             total_value: 36.0, // parent Q = 0.9 > threshold 0.8
