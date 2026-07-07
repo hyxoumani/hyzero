@@ -1,19 +1,26 @@
 #!/usr/bin/env bash
 #
-# Guarded relaunch of the MLH_CAP=30 endgame-conversion experiment — a redo of
-# the silently-dead iter-43 from campaign auto-20260702-151405 (its selfplay
-# child died ~step 2416 while run_baseline.sh sat in its 12h `sleep $DURATION`
-# with a dead child, so the run wedged and the conversion probe never ran).
+# Guarded per-iteration training launcher — wraps scripts/run_baseline.sh with a
+# heartbeat watchdog and an automatic post-training conversion probe. Born as a
+# redo of the silently-dead iter-43 from campaign auto-20260702-151405 (its
+# selfplay child died ~step 2416 while run_baseline.sh sat in its timed
+# `sleep $DURATION` with a dead child, so the run wedged and the probe never
+# ran). All per-iteration config now comes from env/args (see below); no
+# iteration-specific values are hardcoded.
 #
 # Wraps scripts/run_baseline.sh with:
 #   (a) a heartbeat WATCHDOG — if the detailed training log stops growing for
 #       $STALL_LIMIT seconds, the whole run's process group is killed, the line
 #       "WATCHDOG: training stalled at step X" is printed, and the script exits
 #       non-zero (3).
-#   (b) on clean training completion, the 240-game conversion probe is run on
-#       the final candidate checkpoint and a machine-readable line is printed:
-#           CONVERSION_RESULT: <mates>/240 = <pct>%
-#   (c) tee-free logging: run_baseline's output is redirected straight into
+#   (b) if run_baseline itself exits non-zero, the line
+#       "TRAINING_FAILED rc=X at step Y" is printed and the script exits with
+#       that code WITHOUT running the probe (a probe on a half-trained
+#       from-scratch checkpoint would pollute the verdict).
+#   (c) on clean training completion, the conversion probe is run on the final
+#       candidate checkpoint and a machine-readable line is printed:
+#           CONVERSION_RESULT: <mates>/<games> = <pct>%
+#   (d) tee-free logging: run_baseline's output is redirected straight into
 #       $RUN_LOG (no `tee`, so no pipe can mask an exit code); control-plane
 #       lines are appended with a plain echo/append helper.
 #
@@ -23,17 +30,48 @@
 #   flat                                              => MLH exhausted
 #
 # Usage:
+#   scripts/run_iter_guarded.sh [--dry-run] [--help]
+#
+# Per-iteration config (env; defaults below are the iter-2 config):
+#   DURATION      training window in seconds          (default 86400 = 24h)
+#   RESUME_CKPT   checkpoint to resume from; EMPTY ""  (default "" = from-scratch)
+#                 means train from scratch (do NOT export HYZERO_RESUME_FROM)
+#   HYZERO_MLH_CAP        moves-left-head normalization cap in plies (default 30)
+#   RUN_LOG       output log path            (default runs/.../iter-2_mlhcap30.log)
+#   HYZERO_PROBE_GAMES    conversion probe game count            (default 240)
+#   HYZERO_PROBE_STARTS   probe start positions   (default data/probe_won_starts_120.txt)
+#   EXTRA_ENV     space-separated KEY=VALUE assignments exported before launch
+#   Other tunables: STALL_LIMIT, POLL, HYZERO_DEVICE, and any HYZERO_* the child
+#   reads (all inherited by run_baseline). MLH search bonus is intentionally
+#   left UNSET (under forensic investigation).
+#
+# ── iter-2 documented example invocation (from-scratch, 110-plane, 24h) ──────
+#   HYZERO_SELFPLAY_ADJUDICATE=1 HYZERO_SELFPLAY_ADJ_MARGIN=12 \
+#   HYZERO_VALUE_HEAD=categorical HYZERO_MOVES_LEFT_HEAD=1 HYZERO_MLH_CAP=30 \
+#   DURATION=86400 RESUME_CKPT= \
+#   RUN_LOG=runs/auto-20260706-100435/iter-2_mlhcap30.log \
 #   scripts/run_iter_guarded.sh
-# Env overrides: DURATION, RESUME_CKPT, RUN_LOG, STALL_LIMIT, POLL, HYZERO_DEVICE
 set -uo pipefail
+
+# ── Arg parsing (env is the primary config surface; flags are auxiliary) ────
+DRY_RUN=0
+for arg in "$@"; do
+    case "$arg" in
+        --dry-run) DRY_RUN=1 ;;
+        -h|--help)
+            sed -n '2,55p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+            exit 0 ;;
+        *) echo "unknown argument: $arg (see --help)" >&2; exit 64 ;;
+    esac
+done
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-# ── Configuration (iter-43 config reproduced; overridable via env) ─────────
-DURATION=${DURATION:-43200}                                   # 12h timed window
-RESUME_CKPT=${RESUME_CKPT:-checkpoints/backup_mlh_v68325.pt}  # iter-43 resume pt
-RUN_LOG=${RUN_LOG:-runs/auto-20260706-100435/iter-1_mlhcap30.log}
+# ── Configuration (per-iter; defaults = iter-2, all overridable via env) ────
+DURATION=${DURATION:-86400}                                   # 24h timed window
+RESUME_CKPT=${RESUME_CKPT-}          # empty => from-scratch (no resume export)
+RUN_LOG=${RUN_LOG:-runs/auto-20260706-100435/iter-2_mlhcap30.log}
 STALL_LIMIT=${STALL_LIMIT:-900}   # 15 min with no detailed-log growth => stalled
 POLL=${POLL:-60}                  # heartbeat poll interval (s)
 DEVICE=${HYZERO_DEVICE:-cuda}
@@ -45,24 +83,33 @@ mkdir -p "$(dirname "$RUN_LOG")"
 # tee-free logger: emit to stdout AND append to $RUN_LOG (no `tee` process).
 log() { local m="[guard] $*"; echo "$m"; echo "$m" >> "$RUN_LOG"; }
 
-# ── Preflight ──────────────────────────────────────────────────────────────
-if [ ! -f "$RESUME_CKPT" ]; then
-    log "ERROR: resume checkpoint missing: $RESUME_CKPT"
-    exit 2
+# ── Preflight: resume vs from-scratch ───────────────────────────────────────
+# Empty RESUME_CKPT => train from scratch (do NOT export HYZERO_RESUME_FROM;
+# force HYZERO_FROM_SCRATCH=1). 110-plane nets cannot load 102-plane ckpts, so
+# iter-2 runs from scratch by default.
+if [ -n "$RESUME_CKPT" ]; then
+    if [ ! -f "$RESUME_CKPT" ]; then
+        log "ERROR: resume checkpoint missing: $RESUME_CKPT"
+        exit 2
+    fi
+    export HYZERO_RESUME_FROM="$RESUME_CKPT"
+    export HYZERO_FROM_SCRATCH=${HYZERO_FROM_SCRATCH:-0}
+    RESUME_DISPLAY="$RESUME_CKPT"
+else
+    export HYZERO_FROM_SCRATCH=1
+    RESUME_DISPLAY="from-scratch"
 fi
 
-# ── Training env (exact iter-43 MLH_CAP=30 config; each var overridable) ────
+# ── Training env (MLH_CAP experiment config; each var overridable) ───────────
 export HYZERO_ANTISYM_LOSS_WEIGHT=${HYZERO_ANTISYM_LOSS_WEIGHT:-0.01}
 export HYZERO_DIRICHLET_ALPHA=${HYZERO_DIRICHLET_ALPHA:-0.3}
 export HYZERO_DIRICHLET_EPS=${HYZERO_DIRICHLET_EPS:-0.10}
 export HYZERO_EVAL_MIRRORED_STARTS=${HYZERO_EVAL_MIRRORED_STARTS:-1}
-export HYZERO_FROM_SCRATCH=${HYZERO_FROM_SCRATCH:-1}
 export HYZERO_LR_COSINE_ETA_MIN=${HYZERO_LR_COSINE_ETA_MIN:-1e-5}
 export HYZERO_LR_SCHEDULE=${HYZERO_LR_SCHEDULE:-cosine}
 export HYZERO_MLH_CAP=${HYZERO_MLH_CAP:-30}
 export HYZERO_MOVES_LEFT_HEAD=${HYZERO_MOVES_LEFT_HEAD:-1}
 export HYZERO_POLICY_ENTROPY_WEIGHT=${HYZERO_POLICY_ENTROPY_WEIGHT:-0.0}
-export HYZERO_RESUME_FROM="$RESUME_CKPT"
 export HYZERO_SELFPLAY_ADJ_MARGIN=${HYZERO_SELFPLAY_ADJ_MARGIN:-12}
 export HYZERO_SELFPLAY_ADJUDICATE=${HYZERO_SELFPLAY_ADJUDICATE:-1}
 export HYZERO_TB_POLICY_WEIGHT=${HYZERO_TB_POLICY_WEIGHT:-0.5}
@@ -70,16 +117,35 @@ export HYZERO_TB_SUPERVISION_GRADED=${HYZERO_TB_SUPERVISION_GRADED:-1}
 export HYZERO_TEMPERATURE_MOVES=${HYZERO_TEMPERATURE_MOVES:-12}
 export HYZERO_VALUE_HEAD=${HYZERO_VALUE_HEAD:-categorical}
 export HYZERO_VALUE_TARGET_MODE=${HYZERO_VALUE_TARGET_MODE:-outcome}
-# run_baseline recomputes T_MAX = DURATION/60*45 (=32400 at 43200s, as iter-43).
+# run_baseline recomputes T_MAX = DURATION/60*45 (=64800 at 86400s).
 export HYZERO_LR_COSINE_T_MAX=${HYZERO_LR_COSINE_T_MAX:-$(( DURATION / 60 * 45 ))}
 export HYZERO_DEVICE="$DEVICE"
 # The wrapper runs its OWN probe with the machine-readable line below; disable
 # run_baseline's internal [4c/5] probe to avoid a redundant 5-8 min pass.
 export HYZERO_CONVERSION_PROBE=0
 
+# Extra per-iter env passthrough: space-separated KEY=VALUE assignments.
+if [ -n "${EXTRA_ENV:-}" ]; then
+    for kv in $EXTRA_ENV; do
+        export "$kv"
+        log "extra env: $kv"
+    done
+fi
+
+# ── Dry run: print resolved config + command, then exit without launching ───
+if [ "$DRY_RUN" -eq 1 ]; then
+    log "DRY RUN — resolved config (no training launched):"
+    log "  DURATION=${DURATION}s  RUN_LOG=$RUN_LOG  DEVICE=$DEVICE"
+    log "  resume=${RESUME_DISPLAY}  HYZERO_FROM_SCRATCH=${HYZERO_FROM_SCRATCH}"
+    log "  probe: ${PROBE_GAMES} games on ${PROBE_STARTS}"
+    log "  command: setsid bash scripts/run_baseline.sh ${DURATION}"
+    env | grep -E '^HYZERO_' | sort | while IFS= read -r line; do log "  env $line"; done
+    exit 0
+fi
+
 # ── Launch training in its own process group ───────────────────────────────
 START_TS=$(date +%s)
-log "launching run_baseline.sh ${DURATION}s (MLH_CAP=${HYZERO_MLH_CAP}, resume=${RESUME_CKPT}, device=${DEVICE})"
+log "launching run_baseline.sh ${DURATION}s (MLH_CAP=${HYZERO_MLH_CAP}, resume=${RESUME_DISPLAY}, device=${DEVICE})"
 setsid bash scripts/run_baseline.sh "$DURATION" >> "$RUN_LOG" 2>&1 &
 RB_PID=$!   # setsid makes RB_PID the process-group leader (PGID == RB_PID)
 log "run_baseline pid/pgid=$RB_PID; heartbeat watchdog armed (stall limit ${STALL_LIMIT}s)"
@@ -136,6 +202,20 @@ done
 wait "$RB_PID"
 RB_RC=$?
 log "run_baseline exited rc=$RB_RC after $(( $(date +%s) - START_TS ))s"
+
+# ── Propagate a training failure WITHOUT probing ────────────────────────────
+# A non-zero run_baseline exit means training did not complete cleanly. Running
+# the conversion probe on a half-trained (possibly from-scratch) checkpoint
+# would pollute the verdict, so emit the failure line and exit with rc.
+if [ "$RB_RC" -ne 0 ]; then
+    step=$(grep -oE '\[py_training\] step [0-9]+' "$DETAIL_LOG" 2>/dev/null | tail -1 | grep -oE '[0-9]+$')
+    [ -z "$step" ] && step=$(grep -oE 'step [0-9]+' "$DETAIL_LOG" 2>/dev/null | tail -1 | grep -oE '[0-9]+$')
+    [ -z "$step" ] && step="unknown"
+    log "training failed (rc=$RB_RC) — skipping conversion probe"
+    echo "TRAINING_FAILED rc=$RB_RC at step $step"
+    echo "TRAINING_FAILED rc=$RB_RC at step $step" >> "$RUN_LOG"
+    exit "$RB_RC"
+fi
 
 # ── Conversion probe on the final candidate checkpoint ─────────────────────
 PROBE_CKPT=$(find checkpoints -maxdepth 1 \( -name 'model_v*.pt' -o -name 'best_v*.pt' \) \
