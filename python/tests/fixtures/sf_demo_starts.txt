@@ -1,0 +1,7 @@
+# Won-endgame starts for Stockfish demo-generator tests (White to move, winning).
+# KQvK
+8/8/8/4k3/8/8/3Q4/4K3 w - - 0 1
+# KRvK
+8/8/8/4k3/8/8/3R4/4K3 w - - 0 1
+# KQvK (queen on the b-file)
+8/8/4k3/8/8/8/1Q6/4K3 w - - 0 1
