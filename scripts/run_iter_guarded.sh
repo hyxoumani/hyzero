@@ -87,14 +87,29 @@ log() { local m="[guard] $*"; echo "$m"; echo "$m" >> "$RUN_LOG"; }
 # Empty RESUME_CKPT => train from scratch (do NOT export HYZERO_RESUME_FROM;
 # force HYZERO_FROM_SCRATCH=1). 110-plane nets cannot load 102-plane ckpts, so
 # iter-2 runs from scratch by default.
+RESUME_SNAPSHOT=""
 if [ -n "$RESUME_CKPT" ]; then
     if [ ! -f "$RESUME_CKPT" ]; then
         log "ERROR: resume checkpoint missing: $RESUME_CKPT"
         exit 2
     fi
-    export HYZERO_RESUME_FROM="$RESUME_CKPT"
+    # Snapshot the resume checkpoint under a name that does NOT match
+    # run_baseline.sh's startup wipe (`find checkpoints -name 'model_v*.pt'
+    # -delete`, run_baseline.sh:214), then resume from the snapshot. The child
+    # rotates/prunes the model_v*.pt pool freely; the snapshot survives because
+    # its basename is prefixed. This closes the iter-3 data-loss class: the
+    # resume ckpt (a model_v*.pt) passed the -f check, then the child deleted it
+    # before the trainer loaded it, silently falling back to RandomEvaluator.
+    RESUME_SNAPSHOT="checkpoints/resume_snapshot_$(basename "$RESUME_CKPT")"
+    mkdir -p checkpoints
+    if ! cp -f "$RESUME_CKPT" "$RESUME_SNAPSHOT"; then
+        log "ERROR: failed to snapshot resume checkpoint to $RESUME_SNAPSHOT"
+        exit 2
+    fi
+    export HYZERO_RESUME_FROM="$RESUME_SNAPSHOT"
     export HYZERO_FROM_SCRATCH=${HYZERO_FROM_SCRATCH:-0}
-    RESUME_DISPLAY="$RESUME_CKPT"
+    RESUME_DISPLAY="$RESUME_SNAPSHOT (snapshot of $RESUME_CKPT)"
+    log "snapshotted resume ckpt: $RESUME_CKPT -> $RESUME_SNAPSHOT"
 else
     export HYZERO_FROM_SCRATCH=1
     RESUME_DISPLAY="from-scratch"
@@ -149,6 +164,39 @@ log "launching run_baseline.sh ${DURATION}s (MLH_CAP=${HYZERO_MLH_CAP}, resume=$
 setsid bash scripts/run_baseline.sh "$DURATION" >> "$RUN_LOG" 2>&1 &
 RB_PID=$!   # setsid makes RB_PID the process-group leader (PGID == RB_PID)
 log "run_baseline pid/pgid=$RB_PID; heartbeat watchdog armed (stall limit ${STALL_LIMIT}s)"
+
+# ── Resume-fallback guard ───────────────────────────────────────────────────
+# When resuming, the child MUST load the snapshot. If it instead prints
+# "No existing resume checkpoint" it silently fell back to RandomEvaluator —
+# the exact iter-3 failure. Poll up to 120s for the detail log to appear and
+# scan it: on the fallback line, kill the run loudly and exit non-zero (6).
+if [ -n "$RESUME_SNAPSHOT" ]; then
+    guard_deadline=$(( START_TS + 120 ))
+    guard_log=""
+    while [ "$(date +%s)" -lt "$guard_deadline" ] && kill -0 "$RB_PID" 2>/dev/null; do
+        sleep 5
+        if [ -z "$guard_log" ] || [ ! -f "$guard_log" ]; then
+            guard_log=$(grep -m1 '^Log: ' "$RUN_LOG" 2>/dev/null | awk '{print $2}')
+            if [ -z "$guard_log" ] || [ ! -f "$guard_log" ]; then
+                guard_log=$(find logs -maxdepth 1 -name 'baseline_*.log' \
+                    -newermt "@$((START_TS - 5))" -printf '%T@ %p\n' 2>/dev/null \
+                    | sort -rn | head -1 | cut -d' ' -f2-)
+            fi
+        fi
+        for scan in "$RUN_LOG" "$guard_log"; do
+            [ -n "$scan" ] && [ -f "$scan" ] || continue
+            if grep -q 'No existing resume checkpoint' "$scan" 2>/dev/null; then
+                log "resume guard: child fell back to RandomEvaluator despite RESUME_CKPT — killing pgid $RB_PID"
+                kill -TERM -"$RB_PID" 2>/dev/null || true
+                sleep 5
+                kill -KILL -"$RB_PID" 2>/dev/null || true
+                echo "RESUME_FAILED: expected resume from $RESUME_CKPT but child started from RandomEvaluator"
+                echo "RESUME_FAILED: expected resume from $RESUME_CKPT but child started from RandomEvaluator" >> "$RUN_LOG"
+                exit 6
+            fi
+        done
+    done
+fi
 
 # ── Heartbeat watchdog ─────────────────────────────────────────────────────
 DETAIL_LOG=""
@@ -221,6 +269,21 @@ fi
 PROBE_CKPT=$(find checkpoints -maxdepth 1 \( -name 'model_v*.pt' -o -name 'best_v*.pt' \) \
     -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)
 [ -z "$PROBE_CKPT" ] && PROBE_CKPT="$RESUME_CKPT"
+
+# ── Preserve the final checkpoint BEFORE probing ────────────────────────────
+# Failure mode being hardened: a 24h run completes but the final ckpt then gets
+# rotated/pruned out of the model_v*.pt pool, leaving nothing. Snapshot it under
+# a wipe-proof, run-tagged name so a completed run always leaves an artifact.
+if [ -n "$PROBE_CKPT" ] && [ -f "$PROBE_CKPT" ]; then
+    _run_tag=$(basename "$RUN_LOG" .log)
+    FINAL_BACKUP="checkpoints/backup_iter_${_run_tag}_final.pt"
+    if cp -f "$PROBE_CKPT" "$FINAL_BACKUP"; then
+        log "preserved final checkpoint: $PROBE_CKPT -> $FINAL_BACKUP"
+    else
+        log "WARN: failed to preserve final checkpoint to $FINAL_BACKUP"
+    fi
+fi
+
 if [ ! -f "$PROBE_CKPT" ]; then
     log "ERROR: no checkpoint available for conversion probe"
     echo "CONVERSION_RESULT: FAILED (no checkpoint)"
