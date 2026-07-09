@@ -224,7 +224,14 @@ if [ -d checkpoints ]; then
     # Skipped in from-scratch mode: the archived champions use the legacy scalar
     # value head and are incompatible with the categorical-head net, so the pool
     # must start empty (bootstrap path).
-    if [ "$FROM_SCRATCH" = "0" ]; then
+    # Legacy pool seed (v3806/v3905) is OFF by default: those champions use the
+    # legacy scalar value head and are incompatible with the 110-plane
+    # categorical-head net, so seeding them makes the pool loop fail to load every
+    # member (POOL_DEAD) and starves the ladder. With this SKIPPED the pool starts
+    # empty and the first 110-plane candidate founds it via the win-rate bootstrap
+    # (evaluation.rs:472, HYZERO_PROMOTION_THRESHOLD). Set HYZERO_LEGACY_POOL_SEED=1
+    # only to reproduce the pre-110 ladder behavior.
+    if [ "$FROM_SCRATCH" = "0" ] && [ "${HYZERO_LEGACY_POOL_SEED:-0}" = "1" ]; then
         if [ -f checkpoints/backup_champion_v3806_20260609.pt ]; then
             cp checkpoints/backup_champion_v3806_20260609.pt checkpoints/best_v3806.pt
         else
@@ -235,6 +242,8 @@ if [ -d checkpoints ]; then
         else
             echo "  WARN: checkpoints/backup_champion_v3905_20260609.pt missing — pool not seeded with v3905"
         fi
+    elif [ "$FROM_SCRATCH" = "0" ]; then
+        echo "  Legacy pool seed (v3806/v3905) SKIPPED — set HYZERO_LEGACY_POOL_SEED=1 to re-enable; pool starts empty for 110-plane bootstrap"
     fi
     echo "  Remaining checkpoints:"
     ls checkpoints/*.pt 2>/dev/null | sed 's/^/    /' || echo "    (none)"
