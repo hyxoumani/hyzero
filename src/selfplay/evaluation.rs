@@ -84,6 +84,14 @@ fn eval_mirrored_starts_enabled() -> bool {
     })
 }
 
+/// A ladder cycle is "pool-dead" when the pool had at least one member but not a
+/// single one produced a scored game — every member failed to read or load, so
+/// the pool loop scored nothing. This is distinct from the empty-pool bootstrap
+/// path (`pool_len == 0`), which legitimately scores against the live champion.
+fn pool_dead(pool_len: usize, scored_len: usize) -> bool {
+    pool_len > 0 && scored_len == 0
+}
+
 /// Sample ONE curriculum start for a mirrored eval pair, reusing the self-play
 /// `pick_starting_position` + `board_from_fen` path. Mirrors
 /// `init_self_play_board`: an already-terminal or unparseable sampled FEN falls
@@ -853,6 +861,18 @@ impl EvaluationTask {
                 }
             }
 
+            // Loud visibility for a dead pool: the pool had members but every one
+            // failed to read/load (each hit `continue 'pool_loop'` above), so no
+            // game was scored. Promotion logic is unchanged — with 0 scored games
+            // `win_rate` is 0.0 and the gate cannot promote — but the operator must
+            // see that this ladder cycle produced no signal at all.
+            if pool_dead(pool.len(), scored_games.len()) {
+                eprintln!(
+                    "[eval] ERROR: POOL_DEAD — {n} pool member(s), 0 loadable; ladder cycle void",
+                    n = pool.len(),
+                );
+            }
+
             let total_games = if pool.is_empty() {
                 2 * gps
             } else {
@@ -1005,6 +1025,17 @@ mod tests {
         std::env::remove_var("HYZERO_EVAL_ADJ_MARGIN");
         assert!(eval_adjudicate_enabled());
         assert_eq!(eval_adjudication_margin(), 5);
+    }
+
+    /// A non-empty pool with zero scored games is pool-dead (every member failed
+    /// to load); an empty pool never is (it takes the champion-bootstrap path),
+    /// and a pool that scored at least one game is alive. FAILS without the
+    /// `pool_dead` guard that gates the loud `POOL_DEAD` error line.
+    #[test]
+    fn pool_dead_only_when_members_present_and_none_scored() {
+        assert!(pool_dead(2, 0));
+        assert!(!pool_dead(0, 0));
+        assert!(!pool_dead(2, 1));
     }
 
     /// Env-parse (pure helper): `HYZERO_EVAL_MIRRORED_STARTS` is OFF by default
