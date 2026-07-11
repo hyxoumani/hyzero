@@ -51,6 +51,14 @@ impl MlhBonus {
             q_threshold: parse("HYZERO_MLH_Q_THRESHOLD", 0.8),
         }
     }
+
+    /// Env-resolved knobs, parsed once and cached (mirroring `qnorm_enabled` /
+    /// `fpu_reduction`). The hot MCTS selection path must use this rather than
+    /// [`MlhBonus::from_env`] to avoid re-reading four env vars per node.
+    pub fn from_env_cached() -> Self {
+        static CACHED: std::sync::OnceLock<MlhBonus> = std::sync::OnceLock::new();
+        *CACHED.get_or_init(MlhBonus::from_env)
+    }
 }
 
 /// Signed moves-left adjustment to ADD to a child's selection score.
