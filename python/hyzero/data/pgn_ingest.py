@@ -362,10 +362,17 @@ class PGNCache:
 
     Args:
         path: Path to a pickled ``list[PGNTrajectory]`` (built by pgn_ingest).
+        seed: Optional seed for the sampling RNG. ``None`` (default) seeds from
+            system entropy — the original non-reproducible behavior; passing an
+            int makes ``sample`` reproducible.
     """
 
-    def __init__(self, path: str) -> None:
+    def __init__(self, path: str, seed: int | None = None) -> None:
         import types
+
+        # Dedicated RNG so sampling is reproducible when seeded and never
+        # perturbs (or is perturbed by) the global ``random`` state.
+        self._rng = random.Random(seed)
 
         _shim = types.ModuleType("__main__")
         _shim.PGNTrajectory = PGNTrajectory  # type: ignore[attr-defined]
@@ -400,8 +407,8 @@ class PGNCache:
         """Return n randomly sampled trajectories (with replacement if n > len)."""
         pool = self._trajectories
         if n >= len(pool):
-            return random.choices(pool, k=n)
-        return random.sample(pool, n)
+            return self._rng.choices(pool, k=n)
+        return self._rng.sample(pool, n)
 
     def __len__(self) -> int:
         return len(self._trajectories)
