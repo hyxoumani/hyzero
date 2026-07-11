@@ -806,9 +806,12 @@ class Trainer:
         # not abort the training step. Uses _diag_print (os.write to fd 1) to
         # bypass any PyO3 sys.stdout redirection.
         # -----------------------------------------------------------------------
-        # Probe: write to a temp file to bypass all stdout redirection.
+        # Probe: write to a file to bypass all stdout redirection. Routed under
+        # HYZERO_DIAG_DIR (default "runs/") instead of a world-shared /tmp path.
         try:
-            with open("/tmp/hyzero_diag_probe.txt", "a") as _pf:
+            _diag_dir = os.environ.get("HYZERO_DIAG_DIR", "runs")
+            os.makedirs(_diag_dir, exist_ok=True)
+            with open(os.path.join(_diag_dir, "hyzero_diag_probe.txt"), "a") as _pf:
                 _pf.write(f"[diag_reached] step={self.model_version}\n")
                 _pf.flush()
         except Exception:
