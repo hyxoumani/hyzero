@@ -17,8 +17,11 @@ pub enum Square {
 
 impl From<u8> for Square {
     fn from(s: u8) -> Self {
-        debug_assert!(s < 64);
-        unsafe { std::mem::transmute(s) }
+        // Assert in ALL builds: a value >= 64 is not a valid `Square`
+        // discriminant, so transmuting it would be undefined behavior. The
+        // check guarantees `s` is in range before the transmute is reached.
+        assert!(s < 64, "Square index out of range: {s} (must be < 64)");
+        unsafe { std::mem::transmute::<u8, Square>(s) }
     }
 }
 
