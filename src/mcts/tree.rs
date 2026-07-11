@@ -518,7 +518,7 @@ impl MCTSTree {
                         &self.min_max,
                         fpu_reduction(),
                         // Env-resolved; off by default (factor 0.0) → no-op selection.
-                        MlhBonus::from_env(),
+                        MlhBonus::from_env_cached(),
                     )
                 } else {
                     select_child(node, self.config.exploration_constant)
