@@ -448,7 +448,9 @@ mod tests {
     #[ignore = "requires hyzero Python package"]
     fn test_root_setup_batch() {
         let server = make_server().expect("failed to create InferenceServer");
-        let mut backend = PyO3Backend::new(server, 64);
+        // DEFAULT_CONFIG hidden_channels == 128 (see python/hyzero/config.py);
+        // the backend must be built with the same width the server emits.
+        let mut backend = PyO3Backend::new(server, 128);
 
         let (tx, mut rx) = oneshot::channel();
         let obs = BoardObservation::default();
@@ -484,10 +486,12 @@ mod tests {
     #[ignore = "requires hyzero Python package"]
     fn test_expand_leaf_batch() {
         let server = make_server().expect("failed to create InferenceServer");
-        let mut backend = PyO3Backend::new(server, 64);
+        // DEFAULT_CONFIG hidden_channels == 128 (see python/hyzero/config.py);
+        // the backend must be built with the same width the server emits.
+        let mut backend = PyO3Backend::new(server, 128);
 
         let (tx, mut rx) = oneshot::channel();
-        let hs_in = HiddenState::new(64);
+        let hs_in = HiddenState::new(128);
         let req = InferenceRequest::ExpandLeaf {
             hidden_state: hs_in,
             action: 42,
