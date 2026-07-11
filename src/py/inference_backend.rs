@@ -1,9 +1,58 @@
 use numpy::{IntoPyArray, PyArray1, PyArrayMethods, PyReadonlyArray1};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::OnceLock;
 
 use crate::data::{BoardObservation, HiddenState, Policy, NUM_ACTIONS, NUM_OBS_PLANES};
 use crate::selfplay::inference::{InferenceBackend, InferenceRequest};
+
+/// Cumulative count of inference fallbacks (uniform policy + value `0.0`)
+/// emitted across every batch since process start. Fallbacks silently poison
+/// the replay buffer with garbage targets, so we track them and abort once the
+/// cumulative total exceeds `HYZERO_INFERENCE_FALLBACK_LIMIT`.
+static FALLBACK_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+/// Cumulative-fallback abort limit from `HYZERO_INFERENCE_FALLBACK_LIMIT`
+/// (cached; default 100). Once the running total exceeds this the process
+/// panics rather than keep feeding silent uniform-policy/value-0 data.
+fn fallback_limit() -> usize {
+    static CACHED: OnceLock<usize> = OnceLock::new();
+    *CACHED.get_or_init(|| {
+        std::env::var("HYZERO_INFERENCE_FALLBACK_LIMIT")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(100)
+    })
+}
+
+/// True when a cumulative fallback count exceeds the configured limit and the
+/// run should abort. Factored out for cheap unit testing of the threshold.
+fn should_abort_fallbacks(cumulative: usize, limit: usize) -> bool {
+    cumulative > limit
+}
+
+/// Record `n` newly emitted fallbacks for `context`, log the running total,
+/// and panic once the cumulative count exceeds the configured limit. A dead
+/// run is preferable to silently training on uniform-policy/value-0 targets.
+fn record_fallbacks(n: usize, context: &str) {
+    if n == 0 {
+        return;
+    }
+    let cumulative = FALLBACK_COUNT.fetch_add(n, Ordering::Relaxed) + n;
+    let limit = fallback_limit();
+    eprintln!(
+        "[PyO3Backend] {context}: emitted {n} inference fallback(s) \
+         (cumulative {cumulative}, limit {limit})"
+    );
+    if should_abort_fallbacks(cumulative, limit) {
+        panic!(
+            "[PyO3Backend] cumulative inference fallbacks ({cumulative}) exceeded \
+             HYZERO_INFERENCE_FALLBACK_LIMIT ({limit}); aborting to avoid poisoning \
+             the replay buffer with uniform-policy/value-0 targets"
+        );
+    }
+}
 
 /// Reply sender for a batched `RootSetup`: (hidden, policy, value, moves-left `m`).
 /// The trailing `Option<f32>` is `Some` only under HYZERO_MOVES_LEFT_HEAD=1.
@@ -213,6 +262,7 @@ impl InferenceBackend for PyO3Backend {
                 if let Err(e) = result {
                     eprintln!("[PyO3Backend] root_setup_batch error: {e}");
                     // Send fallbacks for any replies not yet consumed
+                    let n = root_replies.len();
                     for reply in root_replies.drain(..) {
                         let _ = reply.send((
                             self.fallback_hidden(),
@@ -221,6 +271,7 @@ impl InferenceBackend for PyO3Backend {
                             None,
                         ));
                     }
+                    record_fallbacks(n, "root_setup_batch");
                 }
             }
 
@@ -348,6 +399,7 @@ impl InferenceBackend for PyO3Backend {
 
                 if let Err(e) = result {
                     eprintln!("[PyO3Backend] expand_leaf_batch error: {e}");
+                    let n = leaf_replies.len();
                     for reply in leaf_replies.drain(..) {
                         let _ = reply.send((
                             self.fallback_hidden(),
@@ -357,6 +409,7 @@ impl InferenceBackend for PyO3Backend {
                             None,
                         ));
                     }
+                    record_fallbacks(n, "expand_leaf_batch");
                 }
             }
         });
@@ -367,6 +420,16 @@ impl InferenceBackend for PyO3Backend {
 mod tests {
     use super::*;
     use tokio::sync::oneshot;
+
+    #[test]
+    fn fallback_abort_triggers_only_above_limit() {
+        // At or below the limit the run continues; strictly above it aborts.
+        assert!(!should_abort_fallbacks(0, 100));
+        assert!(!should_abort_fallbacks(100, 100));
+        assert!(should_abort_fallbacks(101, 100));
+        // A zero limit aborts on the first fallback.
+        assert!(should_abort_fallbacks(1, 0));
+    }
 
     fn make_server() -> PyResult<Py<PyAny>> {
         Python::attach(|py| {
