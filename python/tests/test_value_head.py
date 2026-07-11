@@ -139,6 +139,52 @@ def test_categorical_train_batch_end_to_end() -> None:
     assert result["value_loss"] > 0.0
 
 
+def _categorical_trainer(label_smooth: str | None = None) -> Trainer:
+    os.environ["HYZERO_VALUE_HEAD"] = "categorical"
+    if label_smooth is not None:
+        os.environ["HYZERO_VALUE_LABEL_SMOOTH"] = label_smooth
+    try:
+        return Trainer(device="cpu")
+    finally:
+        del os.environ["HYZERO_VALUE_HEAD"]
+        os.environ.pop("HYZERO_VALUE_LABEL_SMOOTH", None)
+
+
+def _entropy(dist: torch.Tensor) -> torch.Tensor:
+    return -torch.sum(dist * dist.clamp(min=1e-12).log(), dim=-1)
+
+
+def test_label_smooth_zero_leaves_value_target_bit_identical() -> None:
+    """s=0.0 (default) reproduces the raw HL-Gauss target byte-for-byte."""
+    trainer = _categorical_trainer()  # default HYZERO_VALUE_LABEL_SMOOTH=0.0
+    assert trainer._value_label_smooth == 0.0
+    targets = torch.tensor([-1.0, -0.4, 0.0, 0.37, 1.0])
+    got = trainer._categorical_value_target(targets)
+    expected = hl_gauss_target(targets, trainer.f.value_support, trainer._value_sigma)
+    assert torch.equal(got, expected), (got, expected)
+
+
+def test_label_smooth_raises_value_target_entropy_monotonically() -> None:
+    """Larger label-smoothing yields strictly higher per-row target entropy."""
+    targets = torch.tensor([-1.0, -0.4, 0.0, 0.37, 1.0])
+    dists = [
+        _categorical_trainer(s)._categorical_value_target(targets)
+        for s in ("0.0", "0.1", "0.3")
+    ]
+    entropies = [_entropy(d) for d in dists]
+    for lo, hi in zip(entropies, entropies[1:]):
+        assert torch.all(hi > lo), (lo, hi)
+
+
+def test_label_smooth_value_target_still_sums_to_one() -> None:
+    """Label-smoothed value targets remain normalized probability distributions."""
+    trainer = _categorical_trainer("0.1")
+    targets = torch.tensor([-1.0, -0.4, 0.0, 0.37, 1.0])
+    dist = trainer._categorical_value_target(targets)
+    sums = dist.sum(dim=-1)
+    assert torch.allclose(sums, torch.ones_like(sums), atol=1e-5), sums
+
+
 def test_checkpoint_mode_mismatch_raises() -> None:
     """Loading a scalar checkpoint into a categorical trainer errors clearly."""
     scalar_trainer = Trainer(device="cpu")  # scalar

@@ -488,6 +488,11 @@ class Trainer:
         else:
             self._value_sigma = 0.0
             print("[trainer] value head: scalar (tanh regression)")
+        # Off-manifold calibration: mix HL-Gauss target with uniform (default 0.0 =
+        # exactly current behavior). Applies to all categorical value targets.
+        self._value_label_smooth = float(
+            os.environ.get("HYZERO_VALUE_LABEL_SMOOTH", "0.0")
+        )
 
         all_params = (
             list(self.h.parameters())
@@ -1221,6 +1226,30 @@ class Trainer:
             return self._value_loss_per_sample(value_out, targets).mean()
         return F.mse_loss(value_out.squeeze(-1), targets)
 
+    def _categorical_value_target(self, targets: torch.Tensor) -> torch.Tensor:
+        """Build the categorical value target: HL-Gauss mixed with uniform.
+
+        The HL-Gauss projection of the scalar target onto the value support is
+        optionally blended with the uniform distribution by
+        ``HYZERO_VALUE_LABEL_SMOOTH`` (``s``): ``(1 - s) * hlgauss + s * uniform``.
+        With ``s == 0.0`` (default) the result is exactly the HL-Gauss target.
+        Applied uniformly to every categorical value target (selfplay + supervised).
+
+        Args:
+            targets: [B] scalar value targets.
+
+        Returns:
+            [B, N] target distribution (each row sums to 1).
+        """
+        target_dist = hl_gauss_target(
+            targets, self.f.value_support, self._value_sigma
+        )  # [B, N]
+        s = self._value_label_smooth
+        if s > 0.0:
+            n = target_dist.shape[-1]
+            target_dist = (1.0 - s) * target_dist + s * (1.0 / n)
+        return target_dist
+
     def _value_loss_per_sample(
         self, value_out: torch.Tensor, targets: torch.Tensor
     ) -> torch.Tensor:
@@ -1230,9 +1259,7 @@ class Trainer:
         Categorical mode: per-sample cross-entropy against the HL-Gauss target.
         """
         if self.value_head_mode == "categorical":
-            target_dist = hl_gauss_target(
-                targets, self.f.value_support, self._value_sigma
-            )  # [B, N]
+            target_dist = self._categorical_value_target(targets)  # [B, N]
             log_probs = F.log_softmax(value_out, dim=-1)  # [B, N]
             return -torch.sum(target_dist * log_probs, dim=-1)  # [B]
         return (value_out.squeeze(-1) - targets) ** 2  # [B]
