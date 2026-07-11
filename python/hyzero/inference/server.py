@@ -157,9 +157,10 @@ class InferenceServer:
         Args:
             state_dict_bytes: Bytes produced by Trainer.get_weights().
         """
-        # weights_only=False: payload is a dict of state_dicts (no arbitrary code)
+        # weights_only=True: payload is a dict of state_dicts / plain values;
+        # verified to load cleanly, and rejects arbitrary-code deserialization.
         buf = io.BytesIO(state_dict_bytes)
-        checkpoint = torch.load(buf, map_location=self.device, weights_only=False)
+        checkpoint = torch.load(buf, map_location=self.device, weights_only=True)
 
         self.h.load_state_dict(checkpoint["h"])
         self.g.load_state_dict(checkpoint["g"])

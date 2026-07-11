@@ -1462,8 +1462,9 @@ class Trainer:
         Returns:
             eval_metrics dict that was stored in the checkpoint (may be None).
         """
-        # weights_only=False: checkpoint contains eval_metrics dict alongside tensors
-        checkpoint = torch.load(path, map_location=self.device, weights_only=False)
+        # weights_only=True: checkpoint holds tensors + a plain eval_metrics
+        # dict; verified to load cleanly and rejects arbitrary-code payloads.
+        checkpoint = torch.load(path, map_location=self.device, weights_only=True)
         # Guard against a value-head mode mismatch BEFORE loading state dicts so
         # the failure is a clear message rather than an opaque shape error.
         # Legacy checkpoints omit the key → treated as "scalar".
