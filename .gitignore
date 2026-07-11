@@ -5,6 +5,10 @@ run.log
 evals/results/
 *.log
 
+# Generated per-iteration training artifacts — not versioned
+logs/*.pgn
+logs/*.log
+
 # Build artifacts
 rust_out
 
