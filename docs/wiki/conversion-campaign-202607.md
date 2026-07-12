@@ -153,3 +153,51 @@ but a categorical/MLH ckpt under mismatched envs will not read correctly).
 - [Baseline Scoring](baseline-scoring.md) — score formula, `baseline_score.json`
 - [Run History](run-history.md), [MCTS](mcts.md), [Neural Networks](neural-networks.md)
 - Run artifacts: `runs/auto-20260702-151405/{STATE.md,PROTOCOL.md,CONSOLIDATION.md,results.tsv,iter-*.md}`
+
+## 2026-07-06 — SOTA audit, adjudication post-mortem, campaign 2 launch
+
+The `MLH_CAP=30` verdict is **unproduced, not negative**: iter-43 crashed silently
+~1h in (~step 2416, no traceback, probe never ran; `runs/auto-20260702-151405/iter-43_mlhcap30.log`,
+`.../STATE.md`). The MLH wide-contrast lever is **untested** — relaunched under a
+watchdog as campaign-2 iter-1. This closes campaign 1 and opens
+`runs/auto-20260706-100435` (baseline **14.2% conversion** at campaign-1 tip
+`7522646`, budget 10 iters / 72h; `.../results.tsv`).
+
+**Chess-quality audit.** Openings/middlegames are *partially* real (tactics,
+promotions land); won endgames are emphatically degenerate. Mate rate is 6%
+self-play / 3% eval; KQvK/KRvK self-play converts **0/20**; every won position
+oscillation-shuffles (e.g. KBBvK `10.Bh6 Kh5 11.Be3 Kh4 12.Bh6 Kh5`). The failure
+profile is unchanged post-MLH (~72% shuffle/stalemate, 19% hangs) — consistent
+with root cause #4 (repetition blindness), not the value head.
+
+**Adjudication history (resolved).** Training-side adjudication **never existed**
+in the June signal-starvation campaign — that *was* the no-adjudication datapoint,
+i.e. signal starvation itself. Iter-8 introduced `margin=12` (best_ref 6.795 →
+8.610); margins **10 and 14 both lost** the bracket (already noted in the knobs
+table). Never tested: a min-ply delay before adjudicating, and a curriculum-start
+exemption.
+
+**SOTA research (AlphaZero / lc0 / KataGo).** No SOTA engine labels an unconverted
+game as a **win**. AlphaZero scores move-capped games as **draw** and carries
+repetition (2×8) + rule-50 planes. Lc0 rescores labels via Syzygy and runs an MLH
+**search bonus gated on Q ≳ 0.9, active in self-play data generation** ("2 years of
+trolling over", lc0 PR #961). KataGo plays to a true terminal using cheap,
+downweighted searches plus a dynamic score gradient. Our margin-12-into-`+1`-labels
+is the **anti-pattern**: it *pays the engine to shuffle* to the cap. Core missing
+pieces: truthful labels for unfinished games, repetition planes, and an MLH bonus
+in self-play generation.
+
+**Scoping corrections** (from `runs/auto-20260706-100435` scoping) that reshape the
+open-problems list: the **rule-50 plane already exists** (plane 101); the move-cap
+**already labels a draw** unless `HYZERO_MATERIAL_SHAPING=1`; **only adjudication
+mislabels** won-but-unconverted games; curriculum starts are identifiable via
+`initial_fen.is_some()`; and the **MLH search bonus is already env-gated and applies
+to self-play** (factor default 0, q_threshold 0.8) — a **zero-code lever**, not the
+"inert" reading of the campaign-1 table.
+
+**Campaign 2 plan** (`runs/auto-20260706-100435`):
+- **iter-1** — guarded `MLH_CAP=30` closeout (watchdog) to finally produce the
+  unproduced verdict.
+- **iter-2** — lc0-style **repetition planes** (1×8 history, 102 → 110) **plus a
+  curriculum adjudication gate** (skip adjudication when `initial_fen` is set),
+  from-scratch retrain.

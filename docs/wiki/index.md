@@ -15,6 +15,7 @@ current source tree.
 - [Self-Play Coordinator](selfplay-coordinator.md) — persistent game loops, game_task, inference batching, training pipeline
 - [Neural Networks](neural-networks.md) — MuZero h/g/f models, tensor shapes, K-step training loop, SimSiam consistency, pretraining
 - [Replay Subsystem](replay-subsystem.md) — in-memory training buffer + opt-in per-ply MCTS replay capture and viewer
+- [Conversion Levers](conversion-levers.md) — verdict ledger of every conversion lever tried across the three campaigns (2026-06/07); what works, what's falsified, operational gotchas
 
 ## Evaluation & Promotion
 - [Elo Ladder Evaluation](elo-ladder-eval.md) — per-opponent champion-challenger ladder, Elo math, promotion gates, `ladder_match` log line
