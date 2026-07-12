@@ -15,6 +15,7 @@ Run with: cd python && pytest tests/test_memorization_radius.py -v
 from __future__ import annotations
 
 import importlib.util
+import os
 import random
 from pathlib import Path
 
@@ -26,7 +27,17 @@ _MOD_PATH = (
 )
 _spec = importlib.util.spec_from_file_location("memorization_radius", _MOD_PATH)
 mr = importlib.util.module_from_spec(_spec)
+# The module sets HYZERO_* head env defaults at import (it is normally run as a
+# script). Snapshot and restore those keys so importing it here does not leak
+# categorical/moves-left head config into the rest of the test suite.
+_ENV_KEYS = ("HYZERO_VALUE_HEAD", "HYZERO_MOVES_LEFT_HEAD")
+_saved_env = {k: os.environ.get(k) for k in _ENV_KEYS}
 _spec.loader.exec_module(mr)
+for _k, _v in _saved_env.items():
+    if _v is None:
+        os.environ.pop(_k, None)
+    else:
+        os.environ[_k] = _v
 
 
 # A KRRvK win with Black king in the corner-ish region, White (attacker) to move.
