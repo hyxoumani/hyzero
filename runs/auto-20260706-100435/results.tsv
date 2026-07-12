@@ -1,0 +1,16 @@
+iter	branch	commit	score	status	description
+0	auto/20260702-151405-iter-42	7522646	14.2	baseline	baseline = July campaign tip, conversion probe 34/240 (iter-42 measured)
+1a	auto/20260706-100435-iter-1	fc65688	12.5	control	MLH_CAP=30 12h retrain, probe bonus-OFF (control arm) 30/240, ckpt model_v086712
+1b	auto/20260706-100435-iter-1	fc65688	12.5	discard	probe bonus=0.2 q_thr=0.8 cap=30: 30/240 identical to control, no move changed
+1d	auto/20260706-100435-iter-1	fc65688	12.1	discard	diagnostic bonus=5.0 q_thr=0: 29/240, wiring live but m-signal flat -> MLH exhausted (valid expt)
+2	auto/20260706-100435-iter-2	0cc3cad	10.8	discard	24h from-scratch rep-planes+adj-gate: 26/240, labels truthful but value collapsed to draw prior (loss pinned 1.09-1.17), ckpt model_v002929 = iter-3 substrate
+3	auto/20260706-100435-iter-3	20ce90d	5.8	discard-truncated	TB-steep FRAC=0.75 from-scratch, killed 5.5h/12h on TB-OVERFIT forensic (values fit, zero transfer, cm frozen); probe 14/240 on v594; value-distill falsified on categorical head
+4	auto/20260706-100435-iter-4	5178519	24.2	keep	SF-demo policy supervision FRAC=0.25 8k pos, 12h resume from v594: 58/240 = NEW BEST (+10pp vs 14.2 baseline, ~4.4sigma); caveat TB defaults rode along; guard died in harness restart, probe by hand; ckpt backup_iter4_policy_v10128.pt
+5	auto/20260706-100435-iter-4	5178519	18.3	discard	dose-response 52k demos FRAC=0.4 TB-off 11h: 44/240, below iter-4 24.2 (~1.6sigma) — dose does NOT scale; rc=1 exit was ladder-noise artifact (1344 pool load fails), trained full, probed by hand; ckpt backup_iter5_bulkdemo_v20965.pt
+6	auto/20260706-100435-iter-4	99c73fa	23.3	discard	three-stream (demos x3 + SF-labeled corpus) FRAC=0.3 ~12h cumulative: 56/240, statistically tied with iter-4 24.2 (<1sigma), recovers iter-5 regression; 3 ladder promotions (first live 110-plane pool); ckpt backup_iter_iter-6c_threestream_resume_final.pt
+6a	audit	99c73fa	24.7	audit-contaminated	deep-probe on TRAINED starts (probe_deep=demo seeds): 74/300
+6b	audit	99c73fa	4.0	audit-holdout	HELD-OUT probe (150 fresh starts, 0 overlap, avg 19.8 plies): 12/300 — iters 4-6 scores predominantly memorization; contamination = demo generator used probe start files
+7	auto/20260706-100435-iter-4	99c73fa	1.7	discard	CLEAN-SPLIT: bulk-only demos (0 probe overlap) FRAC=0.25 12h from pre-demo v594: primary 4/240=1.7 (substrate was 5.8 — deep demos DEGRADE shallow skill), held-out 2/300=0.7 — demos teach ZERO transferable technique; memorization conclusion locked
+8	auto/20260706-100435-iter-4	edc4dec	2.7	discard	clean baseline 12h pure selfplay from iter-6c wts: primary 20.8 (memorization sticky, was 23.3), HELD-OUT 2.7 (~flat vs 4.0) — selfplay alone adds no generalization; honest baseline pinned ~3%
+8s	search-arm	edc4dec	0.0	audit-search	400-sim held-out on iter-6c net: 0/150 vs 4.0% @100 sims — MORE SEARCH HURTS; miscalibrated value amplification confirmed; calibration = binding-constraint suspect
+9	auto/20260706-100435-iter-4	197f95e	1.3	discard	fresh-curriculum 8165 starts 12h resume iter-8: primary 7.5 (memorization ERODED from 20.8), HELD-OUT 1.3 (flat vs 2.7-4.0) — variety alone builds no technique; in-run climb was noise
