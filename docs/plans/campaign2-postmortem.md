@@ -1,18 +1,24 @@
-# Campaign 2 Post-Mortem — `runs/auto-20260706-100435`
+# Campaigns 2 & 3 Post-Mortem — `runs/auto-20260706-100435`
 
-Endgame-conversion campaign, 2026-07-06 → 07-11. Successor to campaign 1
+Endgame-conversion campaign, 2026-07-06 → 07-12. Successor to campaign 1
 (`runs/auto-20260702-151405`, 43 iters) and the June signal-starvation run.
-Current-truth record; supersedes optimistic language in the iter-4/5/6 rows of
-`results.tsv` and in `docs/wiki/conversion-levers.md`. Read alongside
-`docs/wiki/conversion-campaign-202607.md` (2026-07-06 launch section).
+Campaign 2 (iters 1–7) retracted a contaminated demonstration "breakthrough";
+campaign 3 (iters 8–10 + arms) closed the data-side and inference-compute
+frontiers. Current-truth record; supersedes optimistic language in the
+iter-4/5/6 rows of `results.tsv` and in `docs/wiki/conversion-levers.md`. Read
+alongside `docs/wiki/conversion-campaign-202607.md` (2026-07-06 launch section).
 
 ## 1. Executive summary
 
-Seven executed iterations plus two audit probes (rows 6a/6b) over five days;
-iter-8 (clean baseline) is in flight on 07-11 and iter-9 (fresh curriculum) is
-pending. The campaign's headline result — a **Stockfish-demonstration policy
-supervision "breakthrough," iter-4 at 24.2% conversion vs the 14.2% baseline
-(+10pp, ~4.4σ)** — is **RETRACTED**.
+Ten executed iterations plus audit/search arms over six days. Campaign 2's
+headline result — a **Stockfish-demonstration policy supervision "breakthrough,"
+iter-4 at 24.2% conversion vs the 14.2% baseline (+10pp, ~4.4σ)** — is
+**RETRACTED** (contamination, §4). Campaign 3 (iters 8–10) then swept the
+remaining data-side families (pure selfplay, variety curriculum, calibration)
+and the inference-compute axis (search-sim scaling) — **all flat on held-out
+starts (~1–3%)**, with search scaling actively *inverting* conversion on both
+over- and re-calibrated nets. See §7 for the convergent architectural
+conclusion.
 
 A contamination audit found the demo generator was seeded from the probe fixture
 files, so the net was trained on the exact positions it was later scored on. The
@@ -45,8 +51,11 @@ is negative knowledge (levers falsified) and infrastructure.
 | 6a | audit: deep-probe on **trained** starts | 74/300 = 24.7% | audit-contaminated |
 | 6b | audit: **held-out** probe (150 fresh starts, 0 overlap) | 12/300 = **4.0%** | audit-holdout — iters 4–6 predominantly memorization |
 | 7 | CLEAN-SPLIT bulk-only demos (0 overlap) FRAC=0.25, 12h from pre-demo v594 | primary 4/240 = **1.7%**, held-out 2/300 = 0.7% | discard — demos teach **zero transferable technique**; memorization locked |
-| 8 | clean baseline (MLH_CAP=30, resume from three-stream, TB defaults pinned OFF) | — | in flight (07-11) |
-| 9 | fresh-curriculum retrain | — | pending |
+| 8 | pure-selfplay clean baseline (TB defaults pinned OFF, resume three-stream) | primary 20.8%, **held-out 2.7%** | discard — no generalization from truthful selfplay; held-out flat, memorization sticky on primary |
+| 8-s | search inversion: 400 sims on demo/overconfident net | **0/150 held-out** vs 4.0% @100 sims | discard — more sims REVERSE conversion (miscalibrated value amplified) |
+| 9 | fresh-curriculum retrain (8,165 unique starts, variety) | **held-out 1.3%** | discard — flat; BUT radius diagnostic: variety **erased memorization** (d0 +46→0) AND **overconfidence** (0.94→0.33) with no skill built |
+| 10 | calibration (label-smooth 0.05 + curriculum) | **held-out 2.0%** | discard — flat |
+| 10-s | final search arm: 400 sims on iter-10 calibrated net | **0/150 held-out** | discard — search scaling dead on calibrated net too → **inference-compute path closed** |
 
 ## 3. Root-cause work that stands
 
@@ -142,7 +151,7 @@ Even with a null scientific result, the campaign hardened the toolchain:
   ~8,165-start (100k-FEN) curriculum with mate-puzzle + near-mate mixing to break
   the seen-set overfit.
 
-## 6. Open questions & campaign-3 framing
+## 6. Open questions & campaign-3 framing (as set at campaign-2 close)
 
 The central unknown is now **memorization vs generalization**: the net can
 memorize demonstrated conversions but transfers ~none to unseen positions of the
@@ -162,9 +171,60 @@ same class. Directions:
   active in self-play generation** (not just at probe time) — the campaign only
   ever tested the bonus at probe time, where it was inert.
 
-**Bottom line.** Three campaigns, 130+ iterations, conversion still unsolved. The
-one lever that ever moved in-game behavior (policy-level SF demonstrations) is now
-known to move it only via memorization. Campaign 3 must prove any gain on
-held-out starts or it does not count.
-</content>
-</invoke>
+## 7. Campaign 3 close (07-11/12) & final conclusion
+
+Campaign 3 held the standing rules (held-out probe primary, control arms,
+smoke-tests) and worked the two frontiers left open at campaign-2 close: the
+last data-side families, and inference-time compute (search-sim scaling).
+
+**Data-side families — all flat on held-out (~1–3%):**
+
+- **iter-8 pure selfplay** (truthful labels, no demos): primary 20.8% but
+  **held-out 2.7%** — a flat baseline. Truthful selfplay alone generalizes
+  nothing; the primary number is sticky memorization, not skill.
+- **iter-9 variety curriculum** (8,165 unique starts): **held-out 1.3%**, flat.
+  Its diagnostic value is decisive: the radius study shows variety **erases
+  memorization** (distance-0 overhang +46 → 0) **and value overconfidence**
+  (0.94 → 0.33) simultaneously — but builds **no** conversion skill in their
+  place. Overfit and overconfidence were the *only* things the seen-set number
+  was made of.
+- **iter-10 calibration** (label-smooth 0.05 + curriculum): **held-out 2.0%**,
+  flat. Explicit calibration does not convert either.
+
+**Inference-compute axis — search scaling dead, and *inverting*:**
+
+- On the overconfident demo net, **400 sims scored 0/150** held-out vs 4.0% at
+  100 sims — more search *reversed* conversion (miscalibrated value amplified).
+- The natural rescue — recalibrate the value, then scale search — also failed:
+  the **final 400-sim arm on the iter-10 calibrated net scored 0/150**. Search
+  scaling is dead on both over- and re-calibrated nets. **The inference-compute
+  path is closed.**
+
+**Final conclusion.** Across campaigns 2–3, **five data families** (SF-demo
+policy supervision, dose-scaled demos, three-stream corpus, pure selfplay,
+variety/calibration curricula) **and search-sim scaling are all flat on held-out
+starts (~1–3%)**. The one lever that ever moved in-game behavior did so purely by
+memorization; every honest, generalization-tested lever lands at the noise floor.
+The evidence is now convergent, and it points away from data and search and at
+the **architecture**: a hidden-state MuZero search with **no real-board grounding
+below the root** cannot execute the long forced/check sequences that conversion
+requires (terminals invisible past depth 1; §3), compounded by candidate limits
+in **capacity** and **representation**.
+
+**Campaign 4 candidates (ranked):**
+
+1. **Hybrid search — real-board expansion for forced/check sequences.** Ground a
+   real board (not the learned hidden state) for forced lines and check
+   sequences below the root, so mate/stalemate become visible where they matter.
+   This is the **largest structural gap** vs working engines (lc0/AZ/Stockfish
+   all search on the true board) and the most direct read of the convergent
+   evidence.
+2. **Capacity sweep.** More channels/blocks — test whether the plateau is a raw
+   representation-capacity limit before committing to a search rebuild.
+3. **Accept engine-assisted scope.** If (1)–(2) also plateau, redefine the
+   product as engine-assisted play rather than pure-network conversion.
+
+**Bottom line.** Three campaigns, 130+ iterations, conversion still unsolved. Data
+levers and search-compute are exhausted and generalization-falsified; the
+remaining frontier is architectural. Campaign 4 leads with hybrid real-board
+search below the root.
