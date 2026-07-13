@@ -1,15 +1,18 @@
 # Conversion Levers
 
 The conversion problem — teaching hyzero to actually *finish* won positions rather
-than shuffle indefinitely — remains unsolved as of 2026-07-11, across three
-campaigns: the June signal-starvation run (44 iters), the July-1 run (43 iters),
-and the July-2 run at `runs/auto-20260706-100435`. The honest current metric is
-**generalized conversion ~3% on the held-out fixture**
-(`data/probe_holdout_starts_150.txt`) — now the PRIMARY metric, because the old
-120-start probe is contaminated for any demo-trained lineage (see retraction
-below). The plateau is unbroken after three campaigns. Everything that operates
-through the value head — including two independent TB-distillation attempts — has
-been falsified, and the one apparent policy-level breakthrough was a data leak.
+than shuffle indefinitely — closes **UNSOLVED** after three campaigns (~100
+iterations, 2026-06 → 07-12). The honest metric is **generalized conversion ~1–3%
+on the held-out fixture** (`data/probe_holdout_starts_150.txt`), now PRIMARY
+because the old 120-start probe is contaminated for any demo-trained lineage (see
+retraction below). Every **data-side** lever family is flat on that fixture:
+demonstrations (memorization only), curriculum variety (erases recall +
+overconfidence, builds nothing), pure truthful selfplay, value-level TB
+distillation (both heads), and value calibration (label smoothing). Search scaling
+also fails — overconfident net 4.0→0.0 @400 sims AND calibrated net 1.3→0.0 @400 —
+so it is not a value-trust problem alone. Convergent conclusion: the constraint is
+**architectural** (a hidden-state MuZero-style search cannot execute long forced
+sequences without real-board grounding below root). Attack structure, not data.
 
 ## Lever ledger
 
@@ -30,6 +33,13 @@ been falsified, and the one apparent policy-level breakthrough was a data leak.
   fit the value loss with bimodal ±0.9 `tgt_hist` (mixing provably active) yet
   produced ZERO game transfer: cm_count frozen, kqk_value probes 0.37–0.57 vs the
   ~1.0 needed. The *mechanism*, not the head, is the dead end.
+- **Curriculum variety (8165 unique starts)** — FALSIFIED as a conversion lever,
+  HIGH diagnostic value. Held-out 1.3 flat, yet it *erased* both failure modes it
+  was meant to fix: memorization (d0 exact-start +46→0) AND value overconfidence
+  (0.94→0.33). Variety washes out recall and calibration artifacts but builds no
+  transferable technique — conversion value nil.
+- **Value calibration (label-smooth 0.05)** — FALSIFIED. Held-out 2.0 flat.
+  Smoothing the categorical value targets does not unlock finishing.
 - **Root-child terminal grounding (mcts)** — PARTIAL. Defenders now exploit hangs
   and forced draws exactly, but attacker-side avoidance still needs value/policy:
   terminals are only visible at depth 2 from the attacker's root.
@@ -45,10 +55,11 @@ been falsified, and the one apparent policy-level breakthrough was a data leak.
   earlier "24.2% / only lever that changed behavior" claim was this leak.
 - **Pure truthful selfplay (12h)** — NO generalization gain. iter-8 held-out 2.7%
   flat vs 4.0 baseline. More honest data alone does not break the plateau.
-- **Search scaling** — INVERTED. 400 sims scored 0/150 held-out vs 4.0% @100:
-  more search amplifies the miscalibrated value head (flat overconfidence
-  off-manifold; radius study agreement 46%→12% while value stays 0.94→0.92).
-  **Value-head calibration is the current binding-constraint hypothesis.**
+- **Search scaling** — DEAD ON BOTH NETS. Overconfident net INVERTS: 400 sims
+  scored 0/150 held-out vs 4.0% @100 (more search amplifies flat off-manifold
+  overconfidence; radius agreement 46%→12% while value stays 0.94→0.92). Calibrated
+  net still dead: 1.3 @100 → 0.0 @400. Not a value-trust problem alone — the
+  architectural read now supersedes the earlier "calibration is binding" hypothesis.
 - **Memorization radius** — local generalization exists but does not compound:
   +46pts exact start / +20 one square off / +10 two squares off; sequences do not
   chain into finished mates.
