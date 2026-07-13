@@ -190,6 +190,32 @@ fn root_mate_solver_plies() -> u32 {
         .unwrap_or(0)
 }
 
+/// Env-gate for the forced-line quiescence extension of root-child grounding.
+/// True only when `HYZERO_FORCED_EXTENSION` is set to a truthy value ("1", "true",
+/// "yes", ...). DEFAULT off: `root_child_terminals` then grounds ONLY immediate
+/// terminals, bit-identical to before this knob existed. Read per-call
+/// (TestEnvGuard-compatible).
+fn forced_extension_enabled() -> bool {
+    match std::env::var("HYZERO_FORCED_EXTENSION") {
+        Ok(v) => {
+            let s = v.trim().to_ascii_lowercase();
+            !(s.is_empty() || s == "0" || s == "false" || s == "no")
+        }
+        Err(_) => false,
+    }
+}
+
+/// Ply cap for the forced-line walk below a depth-1 child. `HYZERO_FORCED_EXT_DEPTH`,
+/// default 8, clamped to [1, 64], counted in half-moves. Read per-call
+/// (TestEnvGuard-compatible), parsed like the sibling knobs above.
+fn forced_ext_depth() -> u32 {
+    std::env::var("HYZERO_FORCED_EXT_DEPTH")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .map(|n| n.clamp(1, 64))
+        .unwrap_or(8)
+}
+
 /// Compute the self-play temperature for `turn_count` given the
 /// `temperature_moves` exploration window. Within the window: 1.0. Past it,
 /// when annealing is enabled, linearly interpolate 1.0 → 0.01 over
@@ -1191,6 +1217,11 @@ fn root_child_terminals(
     side_to_move: Color,
     turn_count: usize,
 ) -> Vec<Option<f32>> {
+    // Resolve the forced-extension gate ONCE (not per child). When off, the match
+    // below is bit-identical to the immediate-terminal-only grounding: every
+    // Ongoing / Err root move stays `None`.
+    let forced_ext = forced_extension_enabled();
+    let depth_cap = if forced_ext { forced_ext_depth() } else { 0 };
     legal_actions
         .iter()
         .map(|&pov_action| {
@@ -1207,11 +1238,91 @@ fn root_child_terminals(
                 // Mate: the side to move in the resulting position is checkmated →
                 // -1.0 from that (leaf) POV. Every rule-draw is 0.0.
                 Ok((_, GameResult::Checkmate(_))) => Some(-1.0),
-                Ok((_, GameResult::Ongoing)) | Err(_) => None,
+                // Still Ongoing: with the extension on, walk a BOUNDED forced line
+                // below this depth-1 child and ground it only if the chain provably
+                // ends in a terminal. Off → `None` (network fallback), unchanged.
+                Ok((_, GameResult::Ongoing)) => {
+                    if forced_ext {
+                        forced_line_value(&probe, opposite_color(side_to_move), turn_count + 1, depth_cap)
+                    } else {
+                        None
+                    }
+                }
+                Err(_) => None,
                 Ok((_, _)) => Some(0.0),
             }
         })
         .collect()
+}
+
+/// Opposite color helper for the forced-line walk (local; `Color` has no such
+/// method in scope here).
+#[inline]
+fn opposite_color(color: Color) -> Color {
+    match color {
+        Color::White => Color::Black,
+        Color::Black => Color::White,
+    }
+}
+
+/// Walk a BOUNDED forced line from `start` (a non-terminal position with `stm` to
+/// move, whose `turn_count` parity matches `stm` exactly as in real play) and
+/// return the TRUE game value of its forced conclusion, expressed from `start`'s
+/// side-to-move POV — the depth-1 leaf POV that `root_child_terminals` stores and
+/// the tree backpropagation flips up to the root mover. Returns `None` when the
+/// line is not forced to a terminal within `max_depth` plies (→ network fallback,
+/// exactly as ungrounded children behave today).
+///
+/// A line is "forced" only while the side to move has EXACTLY ONE legal move: the
+/// walk follows that single reply and stops the instant a position offers a real
+/// choice (>1 legal move) or the depth cap is reached. A single-legal-move position
+/// has a determined continuation, so following it preserves the exact game value no
+/// matter which side is moving — this keeps the extension sound (no minimax).
+///
+/// Parity: `n` plies below `start` the POV has flipped `n` times. A checkmate is
+/// -1.0 from the mated side's (terminal) POV, so it maps to `(-1)^(n+1)` at the
+/// start POV; every rule-draw is 0.0 at any parity.
+fn forced_line_value(
+    start: &GameBoard,
+    stm: Color,
+    turn_count: usize,
+    max_depth: u32,
+) -> Option<f32> {
+    let mut probe = start.clone();
+    let mut side = stm;
+    let mut tc = turn_count;
+    let mut n: u32 = 0;
+
+    while n < max_depth {
+        let moves = get_legal_moves(&probe, side);
+        // Only a single forced reply extends the line. A real choice (>1) — or a
+        // move-less ongoing position, which cannot occur — stops the walk.
+        if moves.len() != 1 {
+            return None;
+        }
+        let move_str = action_to_notation(moves[0], side, &probe);
+        n += 1;
+        match probe.process_move(&move_str, side, tc) {
+            // The single forced move delivered mate: the resulting position's side
+            // to move is checkmated (-1.0 at that terminal POV). Flip once per
+            // walked ply to express it from `start`'s POV.
+            Ok((_, GameResult::Checkmate(_))) => {
+                let sign = if n % 2 == 0 { 1.0 } else { -1.0 };
+                return Some(-sign);
+            }
+            // Still forced-onward: continue with the opponent to move.
+            Ok((_, GameResult::Ongoing)) => {
+                side = opposite_color(side);
+                tc += 1;
+            }
+            // Any rule-draw terminal is 0.0 at every parity.
+            Ok((_, _)) => return Some(0.0),
+            // A generated legal move should always apply; be conservative and bail
+            // to the network rather than fabricate a value.
+            Err(_) => return None,
+        }
+    }
+    None
 }
 
 fn action_to_notation(action: ActionIndex, color: Color, board: &GameBoard) -> String {
@@ -3282,5 +3393,174 @@ mod tests {
             terminals.iter().all(|t| t.is_none()),
             "no startpos move ends the game — grounding must be inert"
         );
+    }
+
+    // ---- Forced-line quiescence extension (HYZERO_FORCED_EXTENSION) ----
+    //
+    // The mate FENs below are single-legal-move-forced for BOTH sides along the
+    // whole line (the only kind the sound walk grounds); all are validated against
+    // the ENGINE's own checkmate/stalemate detection, and each `stm` has exactly one
+    // legal move (asserted), so the walk's continuation is genuinely forced.
+
+    /// ODD-depth forced mate: the side to move has a single legal move that is
+    /// itself checkmate (n=1). The mover wins, so from the START (mover) POV the
+    /// grounded value is +1.0 — `(-1)^(n+1)` at odd n. FAILS without the walk (the
+    /// old grounding only saw immediate terminals, never a move-away mate).
+    #[test]
+    fn forced_line_grounds_odd_depth_mate_as_plus_one() {
+        let precomputed = Arc::new(PrecomputedItems::begin_precomputing());
+        // White Kb7 is checked by Qa8; White's ONLY legal move mates (n=1).
+        let (board, stm, _) =
+            board_from_fen("q7/kK6/2Q5/8/8/8/R7/8 w - - 0 1", precomputed).unwrap();
+        assert_eq!(stm, Color::White);
+        assert_eq!(
+            get_legal_moves(&board, stm).len(),
+            1,
+            "position must be single-legal-move-forced"
+        );
+        assert_eq!(
+            forced_line_value(&board, stm, 0, 8),
+            Some(1.0),
+            "an n=1 forced mate delivered by the mover grounds +1.0 at the start POV"
+        );
+    }
+
+    /// EVEN-depth forced mate: the side to move is forced (single legal move) into a
+    /// position where the OPPONENT's single legal move mates (n=2). The start side
+    /// loses, so from the START POV the grounded value is -1.0 — the sign has flipped
+    /// versus the odd case, i.e. `(-1)^(n+1)` at even n. FAILS without the walk.
+    #[test]
+    fn forced_line_grounds_even_depth_mate_as_minus_one() {
+        let precomputed = Arc::new(PrecomputedItems::begin_precomputing());
+        let (board, stm, _) =
+            board_from_fen("1kq5/4Q3/K7/2q5/B7/8/8/8 w - - 0 1", precomputed).unwrap();
+        assert_eq!(stm, Color::White);
+        assert_eq!(get_legal_moves(&board, stm).len(), 1);
+        assert_eq!(
+            forced_line_value(&board, stm, 0, 8),
+            Some(-1.0),
+            "an n=2 forced mate delivered by the opponent grounds -1.0 at the start POV"
+        );
+    }
+
+    /// A forced line that ends in a rule-draw grounds 0.0 regardless of depth/parity.
+    /// Here the side to move has a single legal move (a capture) into K-vs-K, an
+    /// immediate insufficient-material draw.
+    #[test]
+    fn forced_line_grounds_forced_draw_as_zero() {
+        let precomputed = Arc::new(PrecomputedItems::begin_precomputing());
+        // Black Kh8's only move is Kxh7 → K vs K (insufficient material).
+        let (board, stm, _) =
+            board_from_fen("7k/5K1P/8/8/8/8/8/8 b - - 0 1", precomputed).unwrap();
+        assert_eq!(stm, Color::Black);
+        assert_eq!(get_legal_moves(&board, stm).len(), 1);
+        assert_eq!(forced_line_value(&board, stm, 1, 8), Some(0.0));
+    }
+
+    /// A position offering a real choice (>1 legal move) is NOT forced: the walk
+    /// stops immediately and returns `None` (→ network fallback, unchanged behavior).
+    #[test]
+    fn forced_line_returns_none_for_unforced_position() {
+        let precomputed = Arc::new(PrecomputedItems::begin_precomputing());
+        let (board, stm, _) =
+            board_from_fen("8/8/8/8/8/5k2/7r/6K1 b - - 0 1", precomputed).unwrap();
+        assert!(
+            get_legal_moves(&board, stm).len() > 1,
+            "position must offer a real choice"
+        );
+        assert_eq!(
+            forced_line_value(&board, stm, 1, 8),
+            None,
+            "an unforced position grounds nothing"
+        );
+    }
+
+    /// The depth cap bounds the walk: an n=2 forced mate is invisible at cap 1
+    /// (the walk exhausts its budget one ply short and bails to `None`) but is
+    /// grounded once the cap reaches 2.
+    #[test]
+    fn forced_line_respects_depth_cap() {
+        let precomputed = Arc::new(PrecomputedItems::begin_precomputing());
+        let (board, stm, _) =
+            board_from_fen("1kq5/4Q3/K7/2q5/B7/8/8/8 w - - 0 1", precomputed).unwrap();
+        assert_eq!(
+            forced_line_value(&board, stm, 0, 1),
+            None,
+            "cap 1 cannot reach the 2-ply mate"
+        );
+        assert_eq!(
+            forced_line_value(&board, stm, 0, 2),
+            Some(-1.0),
+            "cap 2 reaches the mate"
+        );
+    }
+
+    /// Integration + regression: `root_child_terminals` grounds a depth-1 child whose
+    /// forced continuation reaches a terminal ONLY when `HYZERO_FORCED_EXTENSION` is
+    /// on. With the gate off the grounding is bit-identical to the immediate-terminal
+    /// case (all `None` here). Board: White to move; the pawn push h6-h7 leaves Black
+    /// a single reply (Kxh7 → K vs K draw); every other white move keeps Black a real
+    /// choice. FAILS without the walk (the ON case would also be all-`None`).
+    #[test]
+    fn root_child_terminals_forced_extension_grounds_only_when_enabled() {
+        let _env = TestEnvGuard::new(&["HYZERO_FORCED_EXTENSION", "HYZERO_FORCED_EXT_DEPTH"]);
+        let precomputed = Arc::new(PrecomputedItems::begin_precomputing());
+        // White Kf7, Ph6; Black Kh8. Only h6-h7 forces Black (→ Kxh7, KvK draw).
+        let (board, stm, _) =
+            board_from_fen("7k/5K2/7P/8/8/8/8/8 w - - 0 1", precomputed).unwrap();
+        let legal = pov_legal_actions(&board, stm);
+
+        // Gate OFF (default): strictly the immediate-terminal grounding → all None.
+        // SAFETY: env mutation serialized by TestEnvGuard for this test's duration.
+        unsafe {
+            std::env::remove_var("HYZERO_FORCED_EXTENSION");
+        }
+        let off = root_child_terminals(&board, &legal, stm, 0);
+        assert!(
+            off.iter().all(|t| t.is_none()),
+            "gate off: no depth-1 move is an immediate terminal → all None (regression)"
+        );
+
+        // Gate ON: the single forced-draw continuation is grounded as 0.0.
+        // SAFETY: still under the same TestEnvGuard.
+        unsafe {
+            std::env::set_var("HYZERO_FORCED_EXTENSION", "1");
+        }
+        let on = root_child_terminals(&board, &legal, stm, 0);
+        assert_eq!(
+            on.iter().filter(|t| **t == Some(0.0)).count(),
+            1,
+            "gate on: exactly the h6-h7 push grounds as a forced draw (0.0)"
+        );
+        assert!(
+            on.iter().all(|t| *t != Some(1.0) && *t != Some(-1.0)),
+            "no forced mate exists here — only the draw is grounded"
+        );
+    }
+
+    /// Env parsing for the forced-extension gate and its depth cap follow the sibling
+    /// knob conventions: unset → off / default, truthy → on, and the cap clamps.
+    #[test]
+    fn forced_extension_env_gates_parse_and_clamp() {
+        let _env = TestEnvGuard::new(&["HYZERO_FORCED_EXTENSION", "HYZERO_FORCED_EXT_DEPTH"]);
+        // SAFETY: env mutation serialized by TestEnvGuard for this test's duration.
+        unsafe {
+            std::env::remove_var("HYZERO_FORCED_EXTENSION");
+            std::env::remove_var("HYZERO_FORCED_EXT_DEPTH");
+        }
+        assert!(!forced_extension_enabled(), "unset gate is off");
+        assert_eq!(forced_ext_depth(), 8, "unset depth defaults to 8");
+        // SAFETY: still under the same TestEnvGuard.
+        unsafe {
+            std::env::set_var("HYZERO_FORCED_EXTENSION", "1");
+            std::env::set_var("HYZERO_FORCED_EXT_DEPTH", "999");
+        }
+        assert!(forced_extension_enabled(), "truthy gate is on");
+        assert_eq!(forced_ext_depth(), 64, "above-range depth clamps to 64");
+        // SAFETY: still under the same TestEnvGuard.
+        unsafe {
+            std::env::set_var("HYZERO_FORCED_EXTENSION", "0");
+        }
+        assert!(!forced_extension_enabled(), "\"0\" disables the gate");
     }
 }
