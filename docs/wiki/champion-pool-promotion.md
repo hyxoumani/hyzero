@@ -1,108 +1,73 @@
 # Champion Pool & Promotion
 
-The champion subsystem persists the current best model, archives a bounded
-history of past champions, and recovers the champion version across restarts.
-Code: `src/selfplay/champion.rs` (store + persistence), `src/selfplay/pool.rs`
-(archive enumeration), and `src/bin/selfplay.rs` (boot-time recovery).
+The champion subsystem holds the live best model, keeps a bounded on-disk
+history of past champions, and gates promotion of each new training checkpoint.
+Pool membership is not a registry — it is a filesystem scan of
+`checkpoints/best_v{NNN}.pt`, newest-k. As of 2026-07-09 the pool runs on the
+110-plane categorical-value architecture; the legacy 102-plane champions are no
+longer seeded. Code: `src/selfplay/champion.rs` (store + persistence),
+`src/selfplay/pool.rs` (archive scan), `src/selfplay/evaluation.rs`
+(promotion gate), `src/bin/selfplay.rs` (boot-time recovery).
 
-## ChampionStore (`champion.rs`)
+## Key decisions
 
-```rust
-struct ChampionStore {
-    champion: RwLock<Arc<dyn Evaluator>>,   // current champion evaluator
-    champion_version: AtomicU64,            // 0 = Random baseline
-    archive_depth: usize,                   // max best_v{NNN}.pt to keep
-    archive_files: RwLock<Vec<PathBuf>>,    // tracked archives, newest last
-}
-```
+- **Pool = filesystem scan, no registry.** `pool.rs latest_archive_versions`
+  scans `checkpoints/best_v{NNN}.pt` (strip `best_v`, strip `.pt`, parse `u64`),
+  excludes the live champion's own version, sorts newest-first, returns top `k`
+  (`pool_size`, default 3). Empty vec on a missing/unreadable dir — never panics.
+- **Champion version = max archive filename.** `find_latest_archive_version()`
+  in `selfplay.rs` picks the highest `NNN` on restart; version 1 if `best.pt`
+  exists but no archive; version 0 (RandomEvaluator) if resume is missing.
+- **Two-stage promotion gate** (`evaluation.rs`, ~l.472/924):
+  - Empty-pool bootstrap: `win_rate ≥ HYZERO_PROMOTION_THRESHOLD` (0.55). Only
+    path that can fire the FIRST promotion; single-shot — once any `best_v` lands
+    every later cycle routes through Elo.
+  - Pool path: `candidate_elo > opponent_initial_elo + HYZERO_PROMOTION_ELO_DELTA`
+    (20.0). Both gates also require `cooldown_ok` (`promotion_cooldown_games`).
+- **Legacy 102-plane re-seed is OFF by default.** `run_baseline.sh` only copies
+  `backup_champion_v3806/v3905` into the pool when `HYZERO_LEGACY_POOL_SEED=1`.
+  Those nets use the legacy scalar value head; seeding them made every pool
+  member fail to load (POOL_DEAD) and starved the ladder. Skipped-by-default plus
+  the startup cleanup lets a fresh-arch candidate found the pool via bootstrap.
+- **First 110-plane pool founded 2026-07-09** — `best_v29965` at 0.562 bootstrap
+  win-rate; 3 promotions that run, the first genuine promotions since 2026-06-10.
 
-- `new(initial, archive_depth)` starts at version 0.
-- `new_with_version(initial, archive_depth, starting_version)` boots from an
-  existing champion (used on restart). The binary constructs the store with
-  `archive_depth = 5`.
-- `version()` — atomic read, no lock.
-- `champion()` — clones the current evaluator under a short read lock.
+## Checkpoint persistence
 
-### Promotion (`promote`)
+`persist_champion_checkpoint` writes two files into `checkpoints/`:
 
-`promote(new_champion, new_version, checkpoint_src) -> u64`:
-1. Take the write lock and swap the evaluator.
-2. Store `new_version` (Release).
-3. If a `checkpoint_src` path is given, persist it (see below) and track the new
-   `checkpoints/best_v{NNN:03}.pt` archive. **Prune** the oldest while
-   `archive_files.len() > archive_depth`.
+- **`best.pt`** — live champion, written atomically: copy `src` → `best.pt.tmp`,
+  `sync_all()`, then `rename` (the atomic publish; never seen half-written).
+- **`best_v{NNN}.pt`** — archive copy, `NNN` zero-padded to min width 3
+  (`format!("best_v{:03}.pt", version)`). Versions ≥1000 keep their full digits.
 
-## Checkpoint Persistence (`persist_champion_checkpoint`)
-
-Writes two files into `checkpoints/`:
-
-- **`best.pt`** — the live champion, written **atomically**: copy `src` →
-  `best.pt.tmp`, `sync_all()`, then `rename(best.pt.tmp → best.pt)`. The rename is
-  the atomic publish step.
-- **`best_v{NNN}.pt`** — an archive copy of `best.pt`, where `NNN` is the version
-  zero-padded to 3 digits (`format!("checkpoints/best_v{:03}.pt", version)`).
-
-Archive pruning removes the oldest `best_v{NNN}.pt` files once more than
-`archive_depth` (default 5) exist, logging `[champion] pruned archive: …`.
-
-## Archive Enumeration (`pool.rs`)
-
-`latest_archive_versions(checkpoints_dir, exclude_version, k)` scans for
-`best_v{NNN}.pt`, parses the version (`strip_prefix("best_v")` →
-`strip_suffix(".pt")` → `parse::<u64>()`), excludes `exclude_version` (the live
-champion's own version), sorts newest-first, and returns the top `k` as
-`(version, path)`. Returns an empty vec on a missing/unreadable directory (never
-panics). This is what the [Elo Ladder](elo-ladder-eval.md) calls to build its
-opponent pool (with `k = pool_size`, default 3).
-
-## Champion-version Recovery on Restart
-
-`find_latest_archive_version()` in `src/bin/selfplay.rs` scans `checkpoints/` for
-`best_v{NNN}.pt` and returns the highest `NNN` (same filename parsing as
-`pool.rs`). On startup, if the resume checkpoint exists
-(`HYZERO_RESUME_FROM`, default `checkpoints/best.pt`):
-
-- starting version = `find_latest_archive_version()` if any archive exists, else
-  **1** (with a notice that no archive was found);
-- the resume bytes are loaded into a dedicated champion `InferenceServer`, and the
-  store is built with `new_with_version(champion_eval, 5, starting_version)`.
-
-If the resume checkpoint is missing or unreadable, the champion falls back to
-`RandomEvaluator` at version 0, and the ladder uses the empty-pool win-rate
-bootstrap until the first promotion.
-
-## Promotion Gate & Scoring Weights
-
-The promotion **decision** lives in the eval task (see
-[Elo Ladder](elo-ladder-eval.md)):
-
-- Empty-pool bootstrap: `win_rate ≥ promotion_threshold`
-  (`HYZERO_PROMOTION_THRESHOLD`, default 0.55).
-- Pool path: `candidate_elo > opponent_initial_elo + promotion_elo_delta`
-  (`HYZERO_PROMOTION_ELO_DELTA`, default 20.0).
-
-Scoring weights (consumed by `scripts/run_baseline.sh`, not the promotion gate):
-
-- `HYZERO_CHAMPION_SCORE_WEIGHT` (default 2.0) — per-promotion weight in the
-  composite score.
-- `HYZERO_ELO_SCORE_WEIGHT` (default 0.05) — multiplier on the signed Elo term
-  `(last_candidate_elo − 1500)`.
-
-See [Baseline Scoring](baseline-scoring.md) for the full formula.
+On `promote`, the store swaps the evaluator under a write lock, stores the new
+version (Release), persists the checkpoint, and **prunes** oldest archives while
+`archive_files.len() > archive_depth` (default 5), logging `[champion] pruned`.
 
 ## Gotchas
 
-- **`archive_depth` (5) is separate from `pool_size` (3).** The store keeps up to
-  5 archives on disk; the ladder uses up to 3 of them as opponents per cycle.
-- **`best.pt` is the live champion; `best_v{NNN}.pt` are the immutable archives.**
-  The atomic `.tmp` rename guarantees `best.pt` is never seen half-written.
-- **Recovery defaults to version 1** when `best.pt` exists but no `best_v{NNN}.pt`
-  archive does — so the ladder doesn't restart at 0 with valid weights.
-- `run_baseline.sh` wipes `model_v*.pt` and `best*.pt` (except the resume-from
-  file) at startup — see [Baseline Scoring](baseline-scoring.md).
+- **`run_baseline.sh` startup DELETES all `model_v*.pt` and all `best*.pt`**
+  except the resume-from file. Champion continuity across baseline runs is NOT
+  automatic — resume rides exclusively on `run_iter_guarded.sh`'s snapshot.
+- **All-members-fail-load used to be a SILENT 0-game cycle.** A 102-vs-110 shape
+  mismatch went unnoticed for ~a month. Now surfaced loudly as
+  `[eval] ERROR: POOL_DEAD` (evaluation.rs ~l.871) — pool had members, 0 loaded,
+  cycle void. The gate cannot promote (win_rate 0.0) but the operator sees it.
+- **Eval cycles fire per new checkpoint** — 500ms version poll
+  (`poll_interval_ms`), 8 games/side (`games_per_side`). A degraded cycle
+  (champion/challenger inference error mid-cycle) is read-and-cleared and skips
+  the promotion decision entirely (re-arm, no garbage promotion).
+- **Ladder decisive results are mostly seeded-material adjudications.** Eval-side
+  adjudication is ON by default (`HYZERO_EVAL_ADJUDICATE`); promotions therefore
+  measure advantage-*holding* more than *outplaying*. Conversion probes remain
+  the real skill metric — see [[conversion-levers]].
+- **`archive_depth` (5) ≠ `pool_size` (3).** Store keeps up to 5 archives on
+  disk; the ladder uses up to 3 of them as opponents per cycle.
 
 ## Related
 
-- [Elo Ladder Evaluation](elo-ladder-eval.md) — promotion decisions, opponent pool
-- [Baseline Scoring](baseline-scoring.md) — startup wipe, scoring weights
-- `src/selfplay/champion.rs`, `src/selfplay/pool.rs`, `src/bin/selfplay.rs`
+- [[elo-ladder-eval]] — promotion decisions, opponent pool, Elo math
+- [[conversion-levers]] — the skill metric behind seeded-material ladder wins
+- [[selfplay-coordinator]] — checkpoint production, version channel
+- `src/selfplay/champion.rs`, `src/selfplay/pool.rs`, `src/selfplay/evaluation.rs`

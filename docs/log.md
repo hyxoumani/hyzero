@@ -34,3 +34,4 @@
 2026-07-08 — Compact: campaign-2 lever ledger to conversion-levers.md (policy supervision = first behavioral lever; value distillation falsified; hang 78->32)
 2026-07-08 — Compact(delta): restart-orphan + env-default-leak gotchas to conversion-levers.md
 2026-07-11 — Wiki correction shipped: 24.2% breakthrough RETRACTED (contamination); honest state ~3% held-out; search-inversion + radius findings added
+2026-07-12 — Compact: mcts.md + champion-pool-promotion.md rewritten to current truth (grounding, forced extension, 110-plane bootstrap, POOL_DEAD); conversion-levers already current

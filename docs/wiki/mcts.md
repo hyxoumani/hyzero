@@ -1,8 +1,10 @@
 # MCTS (Monte Carlo Tree Search)
 
-A fresh transient tree is built for every move, searched for `num_simulations`,
-then the visit distribution is extracted and the tree discarded. Implementation
-in `src/mcts/{tree,node,puct,gumbel,evaluator}.rs`.
+A fresh transient tree is built for every move, searched for `num_simulations`, then
+the visit distribution is extracted and the tree discarded. Below the root the tree is
+**terminal-blind** — children are latent hidden states seeded from `top_k(64)` priors,
+so real-board terminals are invisible except at depth 1, where the driver injects ground
+truth. Implementation in `src/mcts/{tree,node,puct,gumbel,evaluator}.rs`; grounding in `src/selfplay/game_task.rs`.
 
 ## Evaluator Interface
 
@@ -10,117 +12,88 @@ in `src/mcts/{tree,node,puct,gumbel,evaluator}.rs`.
 
 ```rust
 trait Evaluator {
-    async fn root_setup(&self, obs: &BoardObservation, legal_mask: &[bool])
-        -> (HiddenState, Policy, f32);                       // h() + f()
-    async fn expand_leaf(&self, hs: &HiddenState, action: ActionIndex)
-        -> (HiddenState, f32, Policy, f32);                  // g() + f()
+    async fn root_setup(&self, obs, legal_mask) -> (HiddenState, Policy, f32); // h()+f()
+    async fn expand_leaf(&self, hs, action)   -> (HiddenState, f32, Policy, f32); // g()+f()
 }
 ```
 
 Implementations: `ChannelEvaluator` (routes to the Python inference batcher) and
-`RandomEvaluator` (uniform policy, zero value — used in tests and as the
-ladder's v0 baseline).
+`RandomEvaluator` (uniform policy, zero value — tests + ladder v0 baseline).
 
 ## Per-move Flow
 
-1. Encode board → `BoardObservation` (102 planes; see [Board Encoding](board-encoding.md)).
-2. `evaluator.root_setup(obs, legal_mask)` → `(hidden, policy, value)`.
-3. `MCTSTree::new(...)` seeds the root (1 visit, root_value), then optionally mixes Dirichlet noise.
-4. `run_simulations(evaluator)` runs `num_simulations` simulations.
-5. `select_action(temperature)` picks the move from visit counts.
-6. Apply the move, record a `StepRecord`, discard the tree.
+1. Encode board → `BoardObservation` (see [Board Encoding](board-encoding.md)).
+2. `root_setup` → `(hidden, policy, value)`; `MCTSTree::new` seeds the root.
+3. Driver computes `root_child_terminals(...)` → `set_root_terminals(...)`.
+4. `run_simulations` runs `num_simulations`; `select_action(temperature)` picks.
+5. Apply the move, record a `StepRecord`, discard the tree.
 
-## A Single PUCT Simulation (`run_simulations_puct`)
+## PUCT Simulation
 
-1. **SELECT**: walk down with `select_child` (PUCT) until reaching an unexpanded child or a terminal (no legal actions).
-2. **EXPAND**: `expand_leaf(hidden, action)` → next hidden state, reward, child policy, value.
-3. **EVALUATE**: the leaf value initializes the new child.
-4. **BACKUP**: `backpropagate(path, value)` propagates the value to the root.
+SELECT (walk down via `select_child`) → EXPAND (`expand_leaf`) → EVALUATE (leaf
+value) → BACKUP. **Score:** `Q + c·P·sqrt(N_parent)/(1+N)`, `c=1.5`. With
+`HYZERO_MCTS_QNORM` on (default) selection uses `select_child_normalized`: MinMax-
+normalized Q plus FPU reduction (`DEFAULT_FPU_REDUCTION=0.25`) for unvisited children.
+**Backup is reward-aware:** `G_{k-1} = r_k − G_k` (γ=1); zero rewards degenerate to classic per-ply negation (**exactly one sign flip per ply**).
 
-**PUCT score** (`src/mcts/puct.rs::puct_score`):
-```
-score(a) = Q(s,a) + c · P(s,a) · sqrt(N_parent) / (1 + N(a))
-```
-`Q = total_value / visit_count` (0 if unvisited), `c` = `exploration_constant`
-(default 1.5). `select_child` collects all children within `TIE_EPSILON = 1e-6`
-of the best score and **breaks ties uniformly at random** (see "Selection
-Mechanics").
+## Root-child Terminal Grounding (2026-07-08)
 
-**Backup is reward-aware** (`backpropagate`): for a path of depth D with leaf
-value `v` and edge rewards `r_1..r_D`, it computes `G_D = v`, `G_{k-1} = r_k − G_k`
-(γ = 1) and stores each node's return in its parent's POV. With zero rewards this
-degenerates to the classic two-player negation (`value` flips sign per ply), so
-zero-reward tests pass bit-for-bit.
+`root_child_terminals` applies each depth-1 legal move to the **real** cloned board:
+mate → `-1.0`, rule-draw → `0.0` (both leaf/resulting-STM POV), Ongoing/Err →
+`None`. `set_root_terminals` installs the vector (parallel to `legal_actions`). On
+expansion a grounded child becomes a terminal node whose TRUE value is backed up
+**verbatim on every visit** — never replaced by the network estimate, never
+expanded below. Fixes defender exploitation and root-mate detection. Black actions
+are `flip_action`-mapped to absolute coords first.
 
-## Root Noise (Dirichlet)
+## Forced-line Quiescence Extension (2026-07-12)
 
-When `add_root_noise` is true and Gumbel is off, root priors are mixed:
-`P(a) = (1 − ε)·P(a) + ε·η_a`, with `η ~ Dir(α)` sampled via Marsaglia-Tsang
-Gamma. Defaults `ε = 0.25` (`HYZERO_DIRICHLET_EPS`; `scripts/run_baseline.sh`
-exports 0.10), `α = 0.3` (`HYZERO_DIRICHLET_ALPHA`, the AlphaZero chess value).
-`add_root_noise` is true
-for self-play, false for evaluation. Dirichlet sampling is slow in debug builds —
-use `--release`.
+Env-gated (`HYZERO_FORCED_EXTENSION=1`, off by default; `HYZERO_FORCED_EXT_DEPTH`
+default 8). When on, an Ongoing depth-1 child walks a **single-legal-move** forced
+chain on a cloned board (`forced_line_value`): follows the lone reply until a
+terminal, a real choice (>1 legal move → `None`), or the depth cap (→ `None`,
+network fallback). Sound without minimax because a one-move position has a determined
+continuation. Mate parity: `(-1)^(n+1)` at the start (leaf) POV; draws `0.0` at any
+parity. Gate resolved once per `root_child_terminals` call, not per child; off-path
+is bit-identical to immediate-terminal-only grounding.
 
-## Gumbel-Top-k + Sequential Halving
+## MLH Search Bonus
 
-When `MCTSConfig.gumbel_top_k = Some(k)`, root selection switches from PUCT-with-
-Dirichlet to Gumbel-Top-k with sequential halving (`run_simulations_gumbel`,
-helper in `src/mcts/gumbel.rs`). `k` is capped to the legal-action count. Gumbel
-sampling provides its own root noise, so Dirichlet is auto-disabled in this mode.
-Internal nodes still use PUCT.
+`MlhBonus` (lc0 moves-left bonus) parsed from env once via
+`MlhBonus::from_env_cached()` (`OnceLock`, hot-path safe). Default OFF
+(`HYZERO_MLH_SEARCH_BONUS=0.0` → `is_off`); as a conversion lever it was validly
+**exhausted** — see [[conversion-levers]].
 
-## Action Selection (`select_action`)
+## Root Noise + Gumbel
 
-`MCTSConfig` default: `num_simulations = 800`, `exploration_constant = 1.5`,
-`add_root_noise = true`, `gumbel_top_k = None`.
+Dirichlet (`add_root_noise` && no Gumbel): `P=(1−ε)P+ε·η`, `η~Dir(α)`, ε=0.25
+(`HYZERO_DIRICHLET_EPS`; baseline exports 0.10), α=0.3 (`HYZERO_DIRICHLET_ALPHA`);
+on for self-play, off for eval. When `gumbel_top_k=Some(k)`, root uses Gumbel-Top-k
++ sequential halving (`gumbel.rs`) supplying its own root noise so Dirichlet auto-
+disables; internal nodes stay PUCT. All env knobs `OnceLock`-cached.
 
-- **temperature ≤ EPSILON** (greedy): find the max visit count, collect all
-  tied-max indices, pick one **uniformly at random**. A plain first-max argmax
-  would bias toward `legal_actions[0]`.
-- **temperature > 0**: sample proportional to `visit_count^(1/temperature)`.
+## Action Selection
 
-## Selection Mechanics — Color-Symmetry Caveats
-
-Two interacting issues at the action-selection boundary previously produced a
-systemic color bias (~83% Black dominance) despite symmetric rules:
-
-1. **Argmax tie-break bias.** Under uniform priors and value≈0 early in training,
-   visit ties are common. Picking the first-encountered max biases toward index 0.
-   *Fix:* random tie-break in both `select_action` (root) and `select_child`
-   (internal PUCT), implemented today.
-2. **Color-asymmetric `legal_actions` ordering.** `get_legal_moves()` iterates
-   absolute squares 0..63, so White's index-0 action is a knight move while
-   Black's is a pawn move. Combined with bias #1 this systematically favored one
-   color's move types. *Fix:* callers must `legal_actions.sort_unstable()` after
-   POV-flipping so both colors present identical sorted lists. Verified by
-   `test_legal_actions_ordering_is_color_symmetric_after_sort`.
-
-**Lesson**: current-player-perspective encoding makes POV invariance fragile —
-every consumer of `legal_actions` must be POV-aware (symmetric indices, random
-tie-breaks, aligned visit distributions).
-
-## Replay Capture (diagnostic)
-
-`extract_root_diagnostics()` snapshots per-child `child_visits`, `priors`,
-`q_values` (parallel to `root.legal_actions`) for the opt-in `.replay` capture —
-see [Replay Subsystem](replay-subsystem.md). Distinct from the training replay
-buffer.
+Default `num_simulations=800`. **temp ≤ EPSILON (greedy):** collect all tied-max
+visit indices, pick uniformly at random (plain argmax biases `legal_actions[0]`).
+**temp > 0:** sample ∝ `visit_count^(1/temp)`. Callers must `sort_unstable()` the
+POV-flipped `legal_actions` so both colors present identical sorted lists (fixes ~83%
+color bias; POV-encoding makes invariance fragile — every consumer must be POV-aware).
 
 ## Gotchas
 
-1. **Transient tree**: discarded after each move; no caching between moves.
-2. **Backup negation**: value flips sign per ply (zero-reward case) — the general
-   recurrence `G_{k-1} = r_k − G_k` subsumes it.
-3. **Legal-mask NaN**: masked illegal logits become `-inf`; `nan_to_num` keeps
-   `0·(−inf)` from producing NaN.
-4. **Dirichlet cost**: very slow in debug — always `--release` for e2e.
+1. **Terminal-blind below root** by construction: latent `top_k(64)` children are never
+   empty and true terminals invisible — the architectural constraint behind the three-campaign conversion conclusion. See [[conversion-levers]].
+2. **Search scaling can INVERT** with a miscalibrated value head: 400 sims scored
+   0 where 100 scored 4% — deeper search amplifies confident-wrong values.
+3. **Leaf-POV parity is load-bearing:** grounding values stored leaf-POV, backprop applies
+   exactly ONE sign flip per ply. New grounding sources must match — parity bugs are silent.
+4. **Transient tree:** discarded each move; no cross-move caching.
+5. **Legal-mask NaN:** masked logits → `-inf`; `nan_to_num` avoids `0·(−inf)`.
 
 ## Related
 
-- [Self-Play Coordinator](selfplay-coordinator.md) — the game loop that drives search
+- [[conversion-levers]] — why grounding/MLH did not solve conversion
+- [[selfplay-coordinator]] — the game loop + driver that grounds the root
 - [Neural Networks](neural-networks.md) — the evaluator's h/g/f networks
-- [Board Encoding](board-encoding.md) — action flipping, legal-action ordering
-- `src/mcts/tree.rs` — `MCTSTree`, `run_simulations_*`, `backpropagate`, `select_action`
-- `src/mcts/puct.rs` — `puct_score`, `select_child`
-- `src/mcts/gumbel.rs` — Gumbel-Top-k helper
+- `src/mcts/tree.rs`, `src/mcts/puct.rs`, `src/selfplay/game_task.rs`

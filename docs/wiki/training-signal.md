@@ -21,10 +21,11 @@ run-by-run evidence (including the v3840 promotion under the fixed settings).
 The same 2026-06-10 diagnosis showed self-play was **92.6% draws** (repetition
 63.5%, insufficient-material 20.4%, move-cap 11.9%, fifty-move 3.2%, stalemate
 0.9%) — all formerly scored 0.0, so value targets clustered at +0.16±0.6.
-Merge `f64ba38` therefore **enables material shaping in `run_baseline.sh`**
-(`HYZERO_MATERIAL_SHAPING=1`) after making it safe: terminal scoring is now
-routed through `score_board_terminal`, which shapes only *rule* draws and never
-*true* draws. See *Material shaping* below.
+Merge `f64ba38` therefore **made material shaping safe** as an env-gated option
+(`HYZERO_MATERIAL_SHAPING`, default OFF): terminal scoring is now routed through
+`score_board_terminal`, which — *when enabled* — shapes only *rule* draws and never
+*true* draws. The baseline itself leaves the knob unset (SOTA alignment: train on
+exact game outcomes); shaping stays an opt-in. See *Material shaping* below.
 
 ## Key decisions
 
@@ -34,8 +35,8 @@ routed through `score_board_terminal`, which shapes only *rule* draws and never
   positional so no on-disk type may gain fields. Formula in step-t POV:
   `G_t = Σ (-1)^i γ^i r_{t+i} + (-1)^m γ^m · bootstrap`, with the terminal branch
   substituting the POV-converted `game_outcome` for the `root_value` bootstrap.
-  A shaped rule-draw outcome enters here as that terminal `game_outcome` and
-  backfills value targets along the n-step TD tail.
+  A shaped rule-draw outcome (when shaping is enabled) enters here as that terminal
+  `game_outcome` and backfills value targets along the n-step TD tail.
 - **β collapses to 0 whenever a TD target exists** (`training.rs`) so the outcome is
   not double-counted through the TD tail; β/conditional-β keep their old meaning only
   on the legacy (`td_targets[k]==None`) path.
@@ -50,8 +51,9 @@ routed through `score_board_terminal`, which shapes only *rule* draws and never
   (stalemate, insufficient material) ALWAYS store 0.0 — drawn by position
   regardless of material. *Rule* draws (threefold repetition, fifty-move, and
   the move-cap where the board is still `Ongoing` at `MAX_GAME_LENGTH=300`) store
-  `tanh(Δmaterial/scale)` when `HYZERO_MATERIAL_SHAPING=1`. The PGN result label
-  stays 1/2-1/2 for every shaped rule draw (decoupled from the shaped value).
+  `tanh(Δmaterial/scale)` only when `HYZERO_MATERIAL_SHAPING=1` (non-default);
+  otherwise they store the true 0.0. The PGN result label stays 1/2-1/2 for every
+  shaped rule draw (decoupled from the shaped value).
 - **MinMaxStats normalization is selection-only.** Defined in `mcts/node.rs`
   (consumed by `puct.rs::select_child_normalized`, threaded through `tree.rs`);
   normalization affects child selection only — stored `total_value`/Q feeding the TD
@@ -59,27 +61,31 @@ routed through `score_board_terminal`, which shapes only *rule* draws and never
 - **Antisymmetry regularizer is flag-gated at weight 0** by default (`trainer.py`):
   zero extra forward passes until `HYZERO_ANTISYM_LOSS_WEIGHT > 0`.
 
-## Material shaping (enabled in baseline 2026-06-10, `f64ba38`)
+## Material shaping (env-gated option, default OFF; `f64ba38`)
 
 With 92.6% of self-play games drawing to 0.0 (breakdown above), the value head
 saw almost no non-zero targets — the same starvation that motivated TD targets,
-now from the *terminal* side. `f64ba38` enables `HYZERO_MATERIAL_SHAPING=1` in
-`run_baseline.sh` and refactors terminal scoring into `score_board_terminal`:
+now from the *terminal* side. `f64ba38` makes `HYZERO_MATERIAL_SHAPING` safe to
+enable and refactors terminal scoring into `score_board_terminal`. The knob is
+env-gated and defaults OFF; `run_baseline.sh` leaves it unset (SOTA alignment,
+train on exact outcomes), so the behavior below applies only when
+`HYZERO_MATERIAL_SHAPING=1` (non-default):
 
 - **True draws never shaped.** `GameResult::Stalemate` and `InsufficientMaterial`
   return `(0.0, is_draw=true)` unconditionally — the position is drawn whatever
   material sits on the board, so `tanh(Δ)` would teach a false value (a stalemate
   with a queen up is still a draw, not a near-win).
-- **Rule draws shaped.** `ThreefoldRepetition`, `FiftyMoveRule`, and the move-cap
-  exit (board still `Ongoing` at `MAX_GAME_LENGTH=300`) return
-  `(tanh(Δmaterial/scale), true)`. `Δmaterial` is the white-absolute material
-  diff in pawn units (P1/N3/B3/R5/Q9, king 0; `compute_material_diff`); `scale`
-  is `HYZERO_MATERIAL_SHAPING_SCALE` (default 5.0, clamped [0.5, 100]).
+- **Rule draws shaped (when enabled).** `ThreefoldRepetition`, `FiftyMoveRule`, and
+  the move-cap exit (board still `Ongoing` at `MAX_GAME_LENGTH=300`) return
+  `(tanh(Δmaterial/scale), true)` under `HYZERO_MATERIAL_SHAPING=1`, else `(0.0, true)`.
+  `Δmaterial` is the white-absolute material diff in pawn units (P1/N3/B3/R5/Q9,
+  king 0; `compute_material_diff`); `scale` is `HYZERO_MATERIAL_SHAPING_SCALE`
+  (default 5.0, clamped [0.5, 100]).
 - **PGN label decoupled.** A shaped rule draw still reports 1/2-1/2 and
   `is_draw=true` (for the trainer's draw penalty). Conflating the two was the
   2026-04-23 PGN labeling confusion (shaped Δ>0.5 got tagged 1-0/0-1).
-- **The shaped value flows through TD.** It enters as the terminal `game_outcome`
-  and backfills value targets via `replay_buffer.rs::compute_td_target`.
+- **The shaped value flows through TD.** When enabled it enters as the terminal
+  `game_outcome` and backfills value targets via `replay_buffer.rs::compute_td_target`.
 
 This is why the knob was *unsafe to enable before* `f64ba38`: the old `_`
 catch-all shaped every non-checkmate terminal, including true draws — e.g. a
@@ -91,7 +97,7 @@ insufficient-material with a lead stay 0.0).
 **Resignation is not a separate bug.** The resign threshold clamp [-1.0, -0.5]
 is unreachable while values cluster near 0 — resignation simply never fires, so
 resign tuning is pointless until the value spread recovers (which is exactly
-what shaping + TD targets aim to restore).
+what TD targets — and shaping, if opted in — aim to restore).
 
 ## Policy-target noise (root-caused 2026-06-10)
 
@@ -143,7 +149,7 @@ the problem is search/self-play signal, not the trainer.
 | `HYZERO_TD` | on | enable n-step TD value targets |
 | `HYZERO_TD_NSTEP` | 5 | TD horizon n (min 1) |
 | `HYZERO_TD_GAMMA` | 0.997 | TD discount γ (clamp 0..1) |
-| `HYZERO_MATERIAL_SHAPING` | off | shape rule-draw value targets via `tanh(Δ/scale)` (baseline script: on; true draws never shaped) |
+| `HYZERO_MATERIAL_SHAPING` | off | shape rule-draw value targets via `tanh(Δ/scale)` (baseline script: unset — code default OFF, per run_baseline.sh:290; true draws never shaped) |
 | `HYZERO_MATERIAL_SHAPING_SCALE` | 5.0 | tanh denominator; larger shrinks the signal (clamp 0.5..100) |
 | `HYZERO_RESIGN` | on | value-based resignation (self-play only) |
 | `HYZERO_RESIGN_THRESHOLD` | −0.90 | root_value at/below which a ply counts (clamp −1..−0.5; unreachable while values cluster near 0) |
@@ -159,7 +165,7 @@ the problem is search/self-play signal, not the trainer.
 | `HYZERO_EVAL_ADJUDICATE` | on | eval-side cap adjudication |
 | `HYZERO_EVAL_ADJ_MARGIN` | 5 | material lead to adjudicate a non-checkmate eval terminal |
 | `HYZERO_POLICY_ENTROPY_WEIGHT` | 0.0 | policy entropy *bonus* — any β>0 flattens; keep at 0 |
-| `HYZERO_TB_POLICY_WEIGHT` | 1.0 | TB rows' policy-CE scale (baseline script: 0.0; TB value/reward unaffected) |
+| `HYZERO_TB_POLICY_WEIGHT` | 1.0 | TB rows' policy-CE scale (baseline script: 0.5; TB value/reward unaffected) |
 | `HYZERO_LR_COSINE_T_MAX` | (script-computed) | cosine LR decay span; `run_baseline.sh` sets `DURATION/60*18` (≈18 trainer steps/min), floored at 100 — no longer hardcoded 14000 |
 | `HYZERO_ANTISYM_LOSS_WEIGHT` | 0 | antisymmetry regularizer weight |
 | `HYZERO_ANTISYM_PROBE_N` | 8 | samples in the per-call `[antisym]` probe (clamp 1..64) |
@@ -167,7 +173,10 @@ the problem is search/self-play signal, not the trainer.
 Set the booleans off + weights 0 to recover pre-fix runtime behavior with no code
 revert (no on-disk format changed). The 2026-06-10 knobs default to *legacy*
 behavior in code (`HYZERO_TB_POLICY_WEIGHT=1.0`, ε=0.25, shaping off);
-`run_baseline.sh` overrides them (0.0, 0.10, shaping on).
+`run_baseline.sh` overrides the first two (0.5, 0.10) but leaves shaping unset
+(code default OFF).
+
+> **Warning:** script defaults LEAK into any run not explicitly overriding them — pin every supervision env var in EXTRA_ENV (this exact default confounded a 2026-07 experiment).
 
 ## Gotchas
 
@@ -181,7 +190,7 @@ behavior in code (`HYZERO_TB_POLICY_WEIGHT=1.0`, ε=0.25, shaping off);
   and insufficient material; never fold them back into the rule-draw arm.
 - **Move-cap is `GameResult::Ongoing`.** At `MAX_GAME_LENGTH=300` the board never
   reached a terminal, so the cap match-arm pairs `Ongoing` with the rule draws —
-  it is shaped, not a true draw.
+  it is shaped (when the knob is on), not a true draw.
 - **The `[eval] … ladder_match` log line is a grep contract** for
   `run_baseline.sh` (`win_rate=`, `candidate_elo=`). The fix changes only the numeric
   values of existing fields, not the format.
@@ -194,7 +203,8 @@ behavior in code (`HYZERO_TB_POLICY_WEIGHT=1.0`, ε=0.25, shaping off);
   the value head is approaching POV-antisymmetry.
 - **Resign threshold is unreachable in a starved value head.** The clamp
   [-1.0, -0.5] can't be hit while values cluster near 0, so resignation never
-  fires — don't tune resign params until shaping + TD restore the value spread.
+  fires — don't tune resign params until TD (and shaping, if enabled) restore the
+  value spread.
 - **Resign calibration:** `HYZERO_RESIGN_DISABLE_FRAC` (default 0.1) plays that
   fraction of games ungated to the end, guarding against early resignation
   reinforcing a bad value head; 2026-06-09/10 calibration probes logged 0 false
@@ -229,5 +239,6 @@ behavior in code (`HYZERO_TB_POLICY_WEIGHT=1.0`, ε=0.25, shaping off);
   - `python/hyzero/training/trainer.py` (`_policy_loss` entropy bonus + TB
     policy-CE gating + legal/replay entropy metrics; [antisym] probe + regularizer)
   - `python/hyzero/data/tablebase.py` (uniform-over-Syzygy-optimal policy targets)
-  - `scripts/run_baseline.sh` (material shaping on; cosine T_max = DURATION/60*18;
-    `last_antisym_mean_sum` extraction; 2026-06-10 knob overrides)
+  - `scripts/run_baseline.sh` (material shaping left unset — code default OFF;
+    cosine T_max = DURATION/60*18; `last_antisym_mean_sum` extraction;
+    2026-06-10 knob overrides)
