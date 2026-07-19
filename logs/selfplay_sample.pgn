@@ -97,3 +97,61 @@ d7c6 139. b8h2 c6c5 140. h8g7 b3b2 141. h2c7 c5d4 142. c7b6 d4d5 143. g7f8q
 c2e4 144. b6d4 d5e6 145. f8g7 e6d7 146. g7h8q b2b1n 147. d4b6 d7c6 148. h8g7
 c6b7 149. b6c5 e4h7 150. c5g1 h7g6 1/2-1/2
 
+[Event "Selfplay model_v1"]
+[White "selfplay_white"]
+[Black "selfplay_black"]
+[Result "1/2-1/2"]
+
+1. b1a3 g7g5 2. h2h4 a7a6 3. c2c4 b7b6 4. e2e3 h7h5 5. d1g4 h5g4 6. d2d3 h8h6
+7. h4g5 f8g7 8. g1f3 h6d6 9. c4c5 g7b2 10. f3d2 g8h6 11. h1h3 d6d4 12. a3b5
+f7f5 13. e1d1 d4e4 14. h3f3 a6b5 15. c5c6 a8a4 16. d1e2 a4a7 17. f3f5 b2c3 18. a2a3
+c3g7 19. f2f4 e4a4 20. d2b3 a7a5 21. c6d7 b8d7 22. e2e1 a4e4 23. f5f8 e8f8 24. a3a4
+g4g3 25. d3d4 e4d4 26. f4f5 d4d3 27. b3d4 a5a4 28. c1b2 c8b7 29. d4b3 a4a8 30. f1e2
+d3d6 31. b3c5 e7e6 32. b2e5 b7f3 33. e5b2 f3e2 34. b2c3 h6f5 35. c3b2 a8a5 36. b2a3
+e6e5 37. c5b7 e2g4 38. a1b1 a5a8 39. a3c5 g4e2 40. c5d4 d7b8 41. b1b2 a8a5 42. b7d6
+g7f6 43. d6f7 f5h6 44. e1e2 f6e7 45. f7d8q a5a7 46. d4c5 f8e8 47. b2b5 b8a6
+48. c5d4 c7c5 49. d4c5 a6b8 50. d8e6 a7a3 51. c5d4 h6g8 52. d4b2 a3a8 53. b2e5
+e7b4 54. b5c5 b4d2 55. e5d6 e8f7 56. c5a5 f7g6 57. a5a1 d2c1q 58. a1a3 g8f6
+59. e6d8 a8a5 60. g5f6 a5a7 61. a3a6 c1a3 62. a6a7 b8d7 63. d8b7 g6h7 64. a7a3
+d7f8 65. e2d3 f8e6 66. d3e2 b6b5 67. e3e4 h7h8 68. d6c7 b5b4 69. a3d3 e6f4 70. c7f4
+h8h7 71. f4e3 h7g6 72. f6f7 g6h5 73. b7c5 h5h4 74. e3g5 h4g5 75. c5e6 g5g4 76. d3b3
+g4h4 77. b3a3 b4b3 78. e2d3 h4g4 79. d3c3 g4h4 80. f7f8r b3b2 81. f8b8 h4g4
+82. c3c2 b2b1n 83. b8b7 b1c3 84. c2b2 c3d5 85. e4e5 d5b6 86. b7a7 b6a4 87. b2b3
+a4c3 88. a7a6 g4h4 89. a6a5 c3a2 90. e6c7 h4h5 91. c7a8q a2c3 92. a5a4 c3e2
+93. a8c7 e2f4 94. e5e6 f4g2 95. b3a2 h5h6 96. a4b4 g2e3 97. b4f4 e3d1 98. a2b3
+g3g2 99. c7a8q h6g7 100. f4f3 g7g6 101. f3e3 g6g5 102. e3e2 g2g1n 103. b3a2
+g5g6 104. a8b6 g6h6 105. b6c4 d1c3 106. a2b3 c3b1 107. e2g2 g1f3 108. e6e7 h6h7
+109. c4b2 b1d2 110. b3c2 d2b3 111. a3a1 b3a5 112. a1h1 f3h2 113. g2e2 a5b7 114. e7e8b
+h7g8 115. b2a4 h2f1q 116. e2e1 b7a5 117. a4b2 a5c4 118. b2d1 c4b6 119. d1e3
+b6c8 120. e3g2 c8d6 121. c2b3 g8g7 122. e1c1 d6f7 123. h1f1 g7h6 124. c1e1 f7h8
+125. g2h4 h6g7 126. e1e6 h8g6 127. b3b2 g7g8 128. e8a4 g8h7 129. f1g1 h7g7 130. g1g2
+g7h7 131. e6f6 g6h4 132. b2b1 h4f5 133. f6c6 h7h8 134. g2c2 h8g7 135. c2c3 g7f8
+136. c6e6 f5d4 137. e6e4 d4f3 138. c3c5 f8f7 139. c5h5 f3h4 140. b1c2 f7g7 141. a4b3
+g7f6 142. c2b2 h4g2 143. e4a4 f6g7 144. h5h2 g2h4 145. b2c1 g7f6 146. a4a7 f6g5
+147. c1b1 h4f3 148. b1c2 f3d2 149. a7a2 g5g6 150. h2h3 g6f5 1/2-1/2
+
+[Event "Selfplay model_v1"]
+[White "selfplay_white"]
+[Black "selfplay_black"]
+[Result "1/2-1/2"]
+
+1. b1c3 c7c5 2. a2a3 b7b5 3. c3b5 f7f6 4. h2h4 c8a6 5. b2b3 g8h6 6. g1h3 e7e6
+7. c2c3 d8e7 8. g2g3 c5c4 9. h3f4 e7a3 10. b5c7 e8d8 11. c7d5 a3b4 12. f4h3
+b4e7 13. h1g1 b8c6 14. h3g5 e6e5 15. f1g2 c6b8 16. d5c7 h6f7 17. e2e3 h7h6 18. g5h7
+f7g5 19. f2f3 e7c5 20. e1f2 g5f3 21. d1e2 c5e3 22. f2e3 h8g8 23. e2e1 b8c6 24. g2h1
+f3d4 25. e1f2 c6a5 26. h1a8 a5b7 27. g1f1 d4c2 28. e3f3 c2a1q 29. f2e2 g7g6
+30. f3f2 e5e4 31. c7a6 d7d5 32. f1h1 d8e7 33. f2g1 e7f7 34. h7g5 h6g5 35. e2c4
+f7e7 36. h1h2 b7d8 37. a6c7 f6f5 38. a8b7 d5d4 39. c4f7 e7f7 40. g1f1 d4d3 41. b3b4
+f8g7 42. c3c4 g7h6 43. b7d5 d8e6 44. c7a8q g8d8 45. b4b5 f7e7 46. a8c7 e7f7
+47. c4c5 g5g4 48. d5a8 g6g5 49. h4g5 d8d4 50. f1g2 d4d7 51. g5h6 f5f4 52. g2h1
+e6d8 53. h2h5 f7g6 54. h5h3 g6f5 55. g3f4 a7a5 56. h3h4 d7c7 57. a8c6 f5g6 58. h1h2
+e4e3 59. d2e3 d8f7 60. e3e4 a5a4 61. c6b7 d3d2 62. b7d5 a1c2 63. c1d2 c7c6 64. d2e3
+c6e6 65. h4g4 g6f6 66. e3g1 e6e5 67. d5b7 c2e1q 68. h2g3 e5d5 69. h6h7 d5g5
+70. g1f2 g5g7 71. b7a6 e1f3 72. g4g5 f6e6 73. a6b7 f7h6 74. g3f3 h6g4 75. b7c8q
+e6e7 76. f2g3 a4a3 77. g5f5 g4e3 78. f3e2 a3a2 79. g3f2 g7g5 80. f2g1 a2a1n
+81. h7h8r a1c2 82. c8d7 e3g4 83. f4g5 g4e5 84. h8h2 e5f7 85. f5f1 e7d7 86. h2h5
+f7h8 87. f1d1 d7e8 88. d1d7 h8g6 89. d7b7 g6h4 90. c5c6 c2a1q 91. b7d7 h4g2
+92. g1b6 g2e1q 93. d7c7 e1d3 94. b6f2 d3f2 95. e2f3 e8d8 96. b5b6 f2g4 97. c7a7
+g4e5 98. f3g2 d8c8 99. g5g6 e5f7 100. a7e7 a1b3 101. g6g7 c8b8 102. e7e6 b3a5
+103. e6e5 f7h8 104. h5h8 1/2-1/2
+
