@@ -1,0 +1,7 @@
+{
+  "last_reviewed_sha": "bde4f9be00d1c59b648a4f3c8e59d63c9121d99c",
+  "last_reviewed_branch": "claude/modest-rubin-8orm8d",
+  "last_reviewed_at": "2026-07-23",
+  "reviewer": "scheduled bug-review task",
+  "notes": "Bug-focused review. Findings notified out-of-band; not saved in repo. Next run should review only commits after last_reviewed_sha on the current branch."
+}
