@@ -2198,3 +2198,501 @@ d1e1 134. c3c2 e1h1 135. c2c3 f5f6 136. c3d4 g2e4 137. d4c5 e4a8 138. c5d4 h1h3
 b3d5 145. a5b6 f6f5 146. b6c7 d5e4 147. c7b8q c6d7 148. b8c7 f5e5 149. c7d8q
 g5h4 150. d8d7 e5b5 1/2-1/2
 
+[Event "Eval Cycle 1 Game 1"]
+[White "challenger v11"]
+[Black "champion v0"]
+[Result "1-0"]
+
+1. b2b4 f7f5 2. d2d4 f5f4 3. b1c3 b7b6 4. g1h3 c7c6 5. c3b5 e7e6 6. e2e3 h7h6
+7. h1g1 e8f7 8. b5c7 c8a6 9. a2a4 g7g6 10. f2f3 f7f6 11. c1d2 a6b7 12. g2g3
+d8e7 13. g1h1 e7d6 14. c7e6 d6c7 15. d1b1 d7d5 16. a4a5 c7d6 17. h3f4 f8e7 18. e6d8
+f6f5 19. b1c1 f5g5 20. d8e6 g5f5 21. a5a6 h6h5 22. f1c4 e7h4 23. c4b5 h4g3 24. h2g3
+d6f8 25. d2c3 g8h6 26. a1a4 f8c5 27. f4h3 h8g8 28. e6f8 c5b5 29. f8d7 g8h8 30. c1a1
+b5b4 31. h3f2 h8d8 32. d7b8q b4b3 33. a1b1 f5f6 34. e1e2 b3c3 35. h1g1 c3a5
+36. e3e4 d8f8 37. e2d1 f8b8 38. f2h1 b8e8 39. b1b2 h5h4 40. g3h4 f6f7 41. g1e1
+e8h8 42. c2c4 a8b8 43. e1g1 g6g5 44. a4a2 a5a2 45. b2b4 h8h7 46. h4h5 a2h2 47. b4a5
+h7h8 48. g1f1 b8c8 49. h1g3 f7f6 50. a5a1 h8h7 51. a1a4 h2g2 52. f1h1 c8d8 53. a4b5
+d8d7 54. g3f5 g2g1q 55. d1d2 g1g2 56. d2e3 h6g8 57. b5d5 c6c5 58. d4c5 h7h6
+59. f5h6 g2g1q 60. e3d2 g1f1 61. d5d4 d7d4 62. d2e3 b7c8 63. h1h4 f1d1 64. h6f5
+f6e5 65. f5h6 d1f1 66. h6g8 f1e2 67. e3e2 g5h4 68. f3f4 e5e6 69. h5h6 c8d7 70. g8f6
+d7c8 71. e2f2 b6b5 72. f4f5 e6f7 73. f2e2 h4h3 74. e2e3 f7f8 75. f6d7 f8g8 76. f5f6
+d4e4 77. e3f2 e4g4 78. f2e2 b5c4 79. e2f1 g4g5 80. f6f7 g8f7 81. d7b8q g5e5
+82. c5c6 c8d7 83. b8d7 e5a5 84. d7e5 f7e7 85. f1g1 a5d5 86. e5f3 d5h5 87. f3e1
+h5b5 88. e1d3 e7e8 89. g1h1 b5b8 90. d3c1 b8b6 91. c6c7 b6h6 92. c1b3 h6f6 93. b3a5
+f6f5 94. c7c8q e8f7 95. a5b7 f5a5 96. b7d8q f7g7 97. c8b7 g7g6 98. b7a8q g6h7
+99. a8e4 h7h6 100. e4h4 h6g7 101. d8e6 g7f7 102. h4f4 f7e8 103. f4h2 e8e7 104. e6g7
+a5a1 105. h2g1 a1c1 106. g1c1 h3h2 107. g7e8q c4c3 108. c1a1 e7e6 109. e8g7
+e6f6 110. a1e1 f6f7 111. e1f1 f7e7 112. g7h5 e7d7 113. f1e2 d7c8 114. h5f4 c8b8
+115. f4h3 b8c8 116. e2e3 c8d7 117. e3a7 d7d8 118. a7d7 d8d7 119. h3g5 d7d8 120. h1g2
+d8d7 121. g5h7 h2h1b 122. g2h1 d7d6 123. h7g5 d6d5 124. h1g1 d5d4 125. g5h7
+d4e3 126. h7f8q e3e4 127. a6a7 e4f5 128. g1f2 f5f4 129. a7a8q f4g4 130. a8d5
+g4h3 131. f8e6 h3h4 132. e6c5 h4h3 133. d5e6 h3h2 134. e6d5 c3c2 135. d5g2 1-0
+
+[Event "Eval Cycle 1 Game 1"]
+[White "challenger v7"]
+[Black "champion v0"]
+[Result "1/2-1/2"]
+
+1. g1f3 h7h6 2. e2e3 h8h7 3. b1a3 d7d5 4. g2g3 e7e6 5. d1e2 d8f6 6. f1g2 c7c6
+7. c2c4 d5c4 8. f3h4 f8a3 9. h4g6 f6e7 10. h1f1 h7h8 11. e2c4 a3c5 12. f2f3
+e8d7 13. c4d3 d7c7 14. b2b3 e7f6 15. g6h8 c5e7 16. d3e4 a7a5 17. e4g4 f6h4 18. g4d4
+f7f6 19. d4c5 h6h5 20. c5a5 c7d6 21. a5b5 h4c4 22. e1f2 e7d8 23. b5b4 d6d7 24. b4e7
+g8e7 25. c1b2 f6f5 26. b2f6 d8b6 27. b3c4 d7d8 28. h8g6 c6c5 29. f6g5 b8c6 30. e3e4
+d8e8 31. h2h3 a8a4 32. e4e5 a4a2 33. f2e2 c6b4 34. f1b1 a2a1q 35. b1h1 h5h4
+36. h1g1 a1a4 37. g1a1 b4d5 38. e2d1 a4c4 39. a1a5 d5b4 40. g6e7 h4g3 41. g5h4
+f5f4 42. a5a8 b4a2 43. a8a5 e8f7 44. e7c8q g7g6 45. d2d3 c4e4 46. a5a7 a2b4
+47. a7b7 b6c7 48. h4g5 b4a6 49. g5e7 c7d8 50. d3d4 f7g8 51. e7f8q g8f8 52. f3e4
+d8a5 53. c8b6 a5e1 54. d1e1 f8e8 55. g2h1 a6b4 56. b7h7 f4f3 57. h7h8q e8e7
+58. h8g8 b4a6 59. b6a8 c5d4 60. a8b6 e7f7 61. b6a4 f3f2 62. e1d2 f2f1q 63. d2c2
+f1c4 64. a4c3 c4a2 65. c2c1 a2d2 66. c1d2 a6b4 67. g8e8 b4d5 68. e8g8 d4d3 69. h1g2
+d5f4 70. g8g7 f7f8 71. g7g8q f8e7 72. g8b8 f4d5 73. c3b1 g6g5 74. b8b2 d5e3
+75. d2c3 e3f5 76. g2h1 g3g2 77. b2a2 f5d6 78. a2a5 g2h1r 79. c3d2 d6c8 80. a5a4
+h1d1 81. d2d1 c8b6 82. h3h4 b6a8 83. b1c3 g5g4 84. a4a1 e7e8 85. c3b5 a8c7 86. b5c7
+e8d8 87. d1c1 d3d2 88. c1b1 d8e7 89. c7b5 d2d1b 90. b1b2 d1c2 91. a1f1 e7e8
+92. b2a1 e8d7 93. f1d1 d7e8 94. d1d6 c2b3 95. b5a7 e8f7 96. d6c6 b3a2 97. c6c8
+a2c4 98. c8d8 f7g7 99. h4h5 g7f7 100. a7c8q c4b5 101. d8d5 b5a6 102. a1a2 a6f1
+103. a2a3 f7e8 104. c8d6 e8d8 105. d6c4 d8c8 106. d5b5 f1g2 107. b5b8 c8b8 108. h5h6
+b8b7 109. c4e3 b7b8 110. e3d5 b8a8 111. d5e3 g2h3 112. e3g2 a8a7 113. g2h4 a7b7
+114. h4f5 e6f5 115. a3b4 h3g2 116. b4a3 b7c6 117. a3b4 c6b6 118. b4a4 g2h3 119. a4a3
+b6c5 120. a3b3 h3f1 121. b3c3 f1a6 122. h6h7 f5e4 123. h7h8r a6c4 124. h8h6
+c5b5 125. c3d2 g4g3 126. h6h1 c4b3 127. h1h2 b3a2 128. h2h8 a2f7 129. h8b8 b5a4
+130. d2d1 f7a2 131. b8d8 a4b3 132. d8d2 b3a3 133. d2e2 a3a4 134. e2f2 a4b4 135. f2e2
+b4c4 136. e2e1 c4c5 137. e5e6 a2b1q 138. e1e2 c5d5 139. e2e3 d5e5 140. e3e2
+e5e6 141. e2d2 e6f7 142. d1e1 f7g8 143. d2g2 b1c2 144. g2h2 e4e3 145. e1e2 g8f7
+146. h2h1 f7f8 147. h1h7 c2b3 148. h7c7 f8g8 149. c7c6 g8h8 150. c6d6 h8g8 1/2-1/2
+
+[Event "Eval Cycle 1 Game 2"]
+[White "champion v0"]
+[Black "challenger v11"]
+[Result "1/2-1/2"]
+
+1. g1f3 f7f6 2. f3g1 b7b5 3. g2g3 h7h6 4. e2e3 c8b7 5. g1h3 b8a6 6. h3g5 b7c8
+7. c2c4 g7g6 8. f2f4 a6b8 9. d1e2 b5b4 10. g5f3 h6h5 11. e2d1 b8a6 12. d2d3
+c7c5 13. a2a3 d8b6 14. f3h4 b6a5 15. d1d2 a6b8 16. g3g4 d7d5 17. a3a4 a5b6 18. d3d4
+c8a6 19. h4g6 b6e6 20. d2e2 a6c4 21. e2d2 e6d7 22. b2b3 h8h6 23. f1g2 e8f7 24. f4f5
+h6g6 25. d2c3 d7a4 26. h2h3 a7a6 27. g2f3 b4c3 28. c1a3 h5h4 29. a1a2 g6g4 30. b3b4
+g4e4 31. a2f2 e4f4 32. a3b2 f4e4 33. f3g4 e4e6 34. g4e2 f8h6 35. h1g1 a4b4 36. g1h1
+c4e2 37. f2f1 e2d3 38. f1g1 b4c4 39. g1g6 c4a2 40. b1c3 h6f8 41. h1h2 e6e4 42. h2c2
+b8c6 43. c2d2 c6b8 44. g6f6 f7f6 45. b2c1 d3b1 46. e1e2 a8a7 47. e2d1 e4e3 48. d2b2
+a7d7 49. c3a4 a6a5 50. b2a2 f6g5 51. c1a3 e3d3 52. a2d2 d3h3 53. d2e2 e7e6 54. e2h2
+e6f5 55. h2h1 d7e7 56. d4c5 h3f3 57. h1g1 g5f6 58. g1g6 f6f7 59. a3c1 d5d4 60. c1f4
+f7e8 61. g6f6 b1c2 62. d1d2 f3e3 63. f6a6 e8f7 64. a6h6 b8d7 65. f4c7 d7b6 66. h6h5
+f8h6 67. h5h6 h4h3 68. c7h2 c2a4 69. h6b6 e3d3 70. d2d3 a4d1 71. b6a6 g8h6 72. a6h6
+f7g7 73. h6b6 e7e1 74. b6b2 d1e2 75. d3d2 e1b1 76. b2b7 b1b7 77. h2e5 g7g6 78. e5d4
+e2h5 79. c5c6 g6f7 80. d4a1 f7g6 81. a1f6 g6f7 82. d2e3 h3h2 83. f6g5 f7g6 84. g5f6
+b7e7 85. e3f2 e7e3 86. f2e3 h2h1q 87. f6c3 h1b1 88. c3g7 b1e1 89. e3f4 e1e4
+90. f4g3 g6g5 91. g7d4 h5g4 92. d4g1 e4a4 93. g3f2 a4a2 94. f2g3 a2g8 95. g3h2
+g8d5 96. g1a7 d5e5 97. h2g1 e5b2 98. a7b8q g5h6 99. b8c7 b2d4 100. g1h2 d4d7
+101. h2h1 g4d1 102. h1g1 d7d5 103. c7h2 d5d2 104. g1h1 d2c3 105. c6c7 f5f4 106. h2f4
+h6g7 107. f4e5 g7f7 108. h1g1 d1f3 109. e5d4 f3h5 110. d4e5 f7g8 111. e5d6 c3c6
+112. d6g3 h5e2 113. g3d6 a5a4 114. d6f8 c6c7 115. g1h1 e2g4 116. f8c5 c7d6 117. c5a7
+g4f3 118. h1g1 g8h8 119. g1f1 h8g7 120. a7d4 g7h6 121. d4b6 f3d5 122. f1e1 d6g6
+123. b6a5 d5a2 124. a5c7 g6g4 125. e1f2 g4h3 126. c7f4 h6h5 127. f4g5 h5g4 128. g5h6
+g4h5 129. f2g1 h3g2 130. g1g2 h5g4 131. g2f2 a2g8 132. f2e1 g8f7 133. e1f1 f7e8
+134. h6g7 g4h4 135. f1e1 e8c6 136. g7e5 c6e4 137. e5h8 e4g6 138. e1e2 h4g3 139. h8f6
+g3g4 140. f6a1 a4a3 141. a1b2 g6h7 142. b2a1 h7g6 143. a1h8 g4h5 144. e2f3 g6c2
+145. h8a1 h5h6 146. f3g4 c2h7 147. a1f6 h7g6 148. g4h4 g6f7 149. f6a1 h6g6 150. a1c3
+f7e8 1/2-1/2
+
+[Event "Eval Cycle 1 Game 2"]
+[White "champion v0"]
+[Black "challenger v7"]
+[Result "1/2-1/2"]
+
+1. b1c3 a7a6 2. c3e4 e7e6 3. f2f4 f7f5 4. h2h3 c7c5 5. g1f3 e6e5 6. e2e3 d8a5
+7. b2b4 g8f6 8. e1f2 f8d6 9. b4a5 f6g4 10. f2e1 c5c4 11. h1h2 b7b5 12. a2a3
+b5b4 13. e4f6 g4f6 14. f3e5 g7g5 15. d2d4 e8d8 16. g2g3 d6c7 17. e5d3 f6g4 18. a3a4
+c7f4 19. d3e5 g4h2 20. e1d2 f4e3 21. d2e3 h7h6 22. d1e2 d8c7 23. e2h5 h2f1q
+24. e3f2 d7d5 25. a1b1 h8g8 26. e5c4 f1d2 27. c1a3 g8g7 28. a3b2 c8e6 29. f2e1
+d2b3 30. c2c3 b3a1 31. h5f3 g7g6 32. c4a3 e6g8 33. c3b4 a1c2 34. a3c2 g8f7 35. g3g4
+f7e6 36. g4f5 g6g8 37. f3e3 g8g6 38. e3e6 c7b7 39. e6e5 g6c6 40. b2a3 h6h5 41. b1b3
+c6c3 42. e5b8 b7c6 43. e1f1 a8b8 44. f1f2 c3c4 45. h3h4 c6c7 46. b3h3 b8a8 47. f2e3
+c7c6 48. h3h2 a8h8 49. h4g5 h8a8 50. e3f4 h5h4 51. c2a1 c4c3 52. f5f6 a8d8 53. f4f5
+d8b8 54. h2c2 c3c2 55. a3c1 b8b5 56. f5f4 b5b4 57. f4f5 b4b3 58. f6f7 c2c5 59. c1b2
+b3h3 60. b2c3 h3f3 61. f5e5 f3e3 62. e5f5 e3c3 63. f5f4 c6b7 64. f7f8n c3d3
+65. f4f5 b7c6 66. d4c5 d3a3 67. f5e6 h4h3 68. g5g6 a3b3 69. e6e5 c6b7 70. e5f6
+b3a3 71. f6e5 b7c8 72. e5f4 d5d4 73. f4g4 a3a1 74. c5c6 a1a2 75. g6g7 a2c2 76. g4g5
+c2c5 77. g5h6 c5f5 78. f8d7 d4d3 79. g7g8r f5f8 80. d7f8q c8b8 81. f8g6 b8c7
+82. g8a8 c7d6 83. h6h7 d6d5 84. h7g7 d5c5 85. a8a7 c5d4 86. g7h7 d3d2 87. g6h4
+d4c5 88. c6c7 c5d5 89. a7a6 d2d1n 90. a6e6 d5c4 91. e6e2 c4b3 92. c7c8q h3h2
+93. c8c4 b3a3 94. c4c5 a3b3 95. e2f2 b3a4 96. a5a6 d1b2 97. c5b6 b2c4 98. f2f8
+h2h1q 99. b6b3 a4a5 100. f8f7 h1a8 101. f7a7 c4d6 102. b3a3 a5b5 103. a7b7 d6b7
+104. a3h3 b7c5 105. h3a3 a8d8 106. a3g3 d8c7 107. h7h6 c7g3 108. h4f3 b5b4 109. h6h7
+g3h3 110. f3h4 b4c4 111. h7h6 c5a6 112. h6h5 c4b5 113. h5g5 h3d7 114. h4f3 d7d2
+115. g5h5 d2g5 116. f3g5 b5c6 117. h5h4 c6b6 118. h4g3 b6a7 119. g5e4 a6b4 120. e4f6
+a7a6 121. g3g2 b4c6 122. f6h7 c6b8 123. g2f2 b8c6 124. f2e2 a6b6 125. e2d3 c6b4
+126. d3e4 b4d3 127. e4f3 d3b4 128. f3e2 b6a6 129. e2d2 b4c2 130. h7f8q a6b7
+131. f8d7 b7c8 132. d2d3 c2a1q 133. d7f6 c8b7 134. d3c3 b7c8 135. f6d5 a1c2
+136. c3c4 c8d8 137. c4b3 c2a3 138. d5b6 d8c7 139. b3a4 a3b5 140. a4b4 c7d8 141. b4a4
+b5d6 142. b6a8 d6b7 143. a4b5 b7d6 144. b5a4 d6f7 145. a8c7 f7d6 146. c7a8q
+1/2-1/2
+
+[Event "Eval Cycle 1 Game 1"]
+[White "challenger v1"]
+[Black "champion v0"]
+[Result "1/2-1/2"]
+
+1. e2e4 g8f6 2. g2g3 e7e6 3. e4e5 f6g4 4. d2d3 g4f2 5. f1h3 f2h3 6. e1d2 f7f5
+7. d1h5 g7g6 8. b2b3 f8g7 9. h5f3 h7h5 10. g3g4 h8h6 11. f3f1 f5g4 12. f1f2
+d8h4 13. f2f6 h6h7 14. g1h3 c7c6 15. b1a3 g7f8 16. f6f1 g6g5 17. f1g1 e8e7 18. g1g4
+h5g4 19. h1e1 h4h6 20. e1d1 h6h3 21. a1b1 d7d5 22. b3b4 h7f7 23. a3c4 f7f1 24. b1a1
+h3e3 25. d2c3 e3e2 26. c1d2 f1f6 27. d2e3 e2e1q 28. c3b3 b8a6 29. d1b1 f6h6
+30. c4d6 h6f6 31. b3a4 e1h1 32. e3g5 b7b5 33. a4a5 h1g2 34. h2h4 a6b4 35. h4h5
+a7a6 36. g5e3 f8g7 37. e3f4 g2h2 38. d6f5 e7f8 39. f4e3 c6c5 40. a5b6 g7h6 41. b1g1
+f8e8 42. g1e1 b4a2 43. c2c4 h2f4 44. e3d2 a8b8 45. b6c6 f4c4 46. d2c3 b8b7 47. a1b1
+b7a7 48. c3b2 a7e7 49. b2a3 e8f8 50. b1b4 f8e8 51. e1d1 e7d7 52. d1h1 a2c3 53. h1f1
+c4d4 54. f5g3 f6g6 55. f1a1 c3e4 56. b4b3 d4g1 57. a3c1 g6g8 58. c6b6 h6g5 59. a1a2
+g1g2 60. b6c6 g2f3 61. a2a1 g5e7 62. g3e4 g8g7 63. b3b5 f3e4 64. b5a5 e4c4 65. c1g5
+g7g5 66. a5b5 d5d4 67. b5b8 e7d6 68. b8b1 d6e5 69. b1d1 c4a4 70. a1a4 e5g7 71. d1g1
+g5g6 72. a4a1 d7d5 73. a1e1 g7e5 74. g1f1 d5d6 75. c6c5 e8e7 76. f1f4 e5h8 77. f4d4
+e7e8 78. d4d5 g6h6 79. e1h1 d6b6 80. h1h3 h6h5 81. d5g5 c8b7 82. h3h1 h8d4 83. c5d4
+b7f3 84. g5b5 h5h7 85. h1a1 e8e7 86. b5b2 f3h1 87. b2b1 e7d6 88. a1a3 h7e7 89. b1b6
+h1c6 90. a3a2 e7b7 91. d4e3 b7b8 92. a2h2 b8a8 93. h2b2 d6d7 94. b2b4 a8h8 95. b4b1
+h8h5 96. b1h1 c6f3 97. e3d2 h5g5 98. h1h5 g4g3 99. b6b3 e6e5 100. d2e3 f3d5
+101. b3b8 d5h1 102. h5h4 h1b7 103. e3d2 g5g6 104. b8b7 d7d8 105. b7b4 g6b6 106. d2e3
+b6h6 107. b4a4 g3g2 108. e3f3 g2g1r 109. a4a1 h6b6 110. a1c1 b6c6 111. c1c3
+d8c7 112. c3c5 g1h1 113. h4h3 c6c5 114. f3g3 c5c2 115. h3h7 c7d6 116. d3d4 h1c1
+117. h7h2 d6d5 118. h2d2 c1f1 119. g3g2 c2c4 120. g2g3 f1d1 121. g3h3 d1a1 122. h3h4
+c4c7 123. d2f2 d5d4 124. f2b2 a1f1 125. b2c2 f1d1 126. c2c5 d1f1 127. c5c7 e5e4
+128. c7h7 f1e1 129. h7a7 d4d5 130. a7g7 e1e2 131. g7g4 d5c4 132. g4g2 e4e3 133. g2g6
+e2f2 134. g6d6 c4b3 135. h4g5 f2b2 136. d6e6 b3c3 137. g5h4 c3d2 138. e6f6 b2b4
+139. f6f4 b4b5 140. f4f8 d2c1q 141. f8f7 c1d1 142. f7h7 d1d2 143. h7c7 b5b1
+144. c7c2 d2c2 145. h4g5 e3e2 146. g5f6 c2d1q 147. f6g6 b1b8 148. g6g7 d1e1
+149. g7g6 b8f8 150. g6h7 f8f4 1/2-1/2
+
+[Event "Eval Cycle 1 Game 2"]
+[White "champion v0"]
+[Black "challenger v1"]
+[Result "1/2-1/2"]
+
+1. e2e3 c7c5 2. e3e4 d8a5 3. g1h3 g7g5 4. a2a3 a5d2 5. e1d2 b7b5 6. h3g5 e8d8
+7. g5h7 b8c6 8. h7f6 e7f6 9. f1e2 h8h5 10. c2c4 h5e5 11. e2f1 f8g7 12. d2c2
+g8h6 13. c1f4 c6e7 14. f4g3 f6f5 15. d1c1 e7g8 16. g3f4 e5e6 17. c2d2 a7a6 18. f1e2
+g8e7 19. h1e1 g7f8 20. d2c3 e6e4 21. f4g5 e4c4 22. c3d2 a8b8 23. f2f4 c4c2 24. d2d1
+a6a5 25. e2c4 a5a4 26. c1d2 f8g7 27. e1e4 g7f8 28. c4d5 d8c7 29. d2c2 h6g8 30. c2a4
+e7c6 31. d5a2 c7b7 32. g2g4 f8d6 33. d1c1 d6c7 34. b2b4 c5b4 35. a4a7 b7a7 36. a2d5
+b8b7 37. e4d4 c6d4 38. d5g2 a7b6 39. c1d2 d4c2 40. a3a4 c7b8 41. g2f3 b8c7 42. h2h4
+b6c5 43. h4h5 c7a5 44. f3h1 c2a3 45. h5h6 f7f6 46. h1e4 f5g4 47. e4f5 d7d6 48. f5d3
+b7d7 49. h6h7 a5c7 50. b1a3 c8b7 51. a1a2 d7h7 52. d3e2 h7e7 53. e2f1 f6g5 54. a4a5
+c7b8 55. f4f5 e7e6 56. f1b5 b4b3 57. b5a4 b7g2 58. f5f6 b8c7 59. a4b5 g2h3 60. b5a4
+e6e3 61. f6f7 e3e4 62. a4b5 h3g2 63. b5a4 g2f3 64. f7g8r f3h1 65. a2c2 c5d5
+66. a3b5 e4e1 67. c2c4 e1e6 68. d2d3 e6e8 69. c4f4 h1g2 70. d3c3 e8a8 71. f4f7
+a8e8 72. g8e8 b3b2 73. e8a8 b2b1n 74. c3b2 b1c3 75. f7f8q c3e4 76. b5a7 d5e6
+77. a8b8 g2f1q 78. a4c2 e4f6 79. b2b1 c7b8 80. f8d8 b8c7 81. c2d3 f6d5 82. d8h8
+d5e3 83. d3a6 e6f5 84. a6d3 f5e5 85. d3h7 e5d4 86. b1a2 d4e5 87. h7g6 f1e2 88. h8e8
+e5f4 89. g6f5 d6d5 90. e8e4 d5e4 91. a7b5 f4f5 92. b5a7 e2f3 93. a2b3 e3f1 94. a7c8q
+f3e2 95. b3c2 e2a6 96. c2b2 c7g3 97. c8b6 f5e6 98. b2a3 g3h4 99. b6d7 g4g3 100. a3a4
+a6b5 101. a4b3 g5g4 102. d7b8q b5e8 103. b3a2 e8f7 104. b8c6 f1h2 105. c6a7
+f7h5 106. a2b2 h4d8 107. b2a2 h5g6 108. a2b1 d8b6 109. a5a6 e6e7 110. a7b5 e7f6
+111. b5a7 f6f5 112. b1b2 b6c7 113. b2a1 c7f4 114. a7c8q f4c7 115. a1a2 c7b8
+116. a2b2 b8d6 117. b2a2 f5g5 118. c8e7 g6f5 119. e7d5 f5c8 120. a2a1 c8b7 121. a1b1
+d6e5 122. d5e7 e5f6 123. a6a7 f6e7 124. a7a8q b7c8 125. a8c6 g5h5 126. c6a8
+e7f6 127. a8b8 f6c3 128. b8c7 h5h6 129. c7f7 c8b7 130. f7c4 h6g7 131. c4c7 g7h8
+132. c7c5 b7a6 133. c5e3 g3g2 134. e3e1 a6c4 135. b1c2 c3b2 136. e1a1 c4d5 137. a1a8
+h8h7 138. c2b2 d5c4 139. a8a1 g2g1q 140. a1b1 c4e2 141. b2a1 g1f2 142. b1b8
+e2d3 143. b8b7 h7h8 144. b7e7 f2e3 145. e7f8q h8h7 146. a1b2 e3f2 147. f8f2
+d3b1 148. f2g1 b1d3 149. g1e3 h7h8 150. b2a1 h8g7 1/2-1/2
+
+[Event "Eval Cycle 1 Game 1"]
+[White "challenger v5"]
+[Black "champion v0"]
+[Result "1/2-1/2"]
+
+1. h2h3 b8a6 2. b1a3 c7c5 3. e2e4 b7b5 4. d2d3 a6b8 5. h1h2 b5b4 6. a3b1 g7g5
+7. d1f3 e7e6 8. b1a3 d7d5 9. c1f4 f8h6 10. f3g3 d8e7 11. e1d2 e7d8 12. f4c7
+f7f5 13. c7b8q e8d7 14. c2c4 d8e8 15. a3b5 h6g7 16. b8d6 g7d4 17. a2a3 d7c6
+18. e4f5 c8a6 19. g1e2 d4g7 20. d2c2 c6b7 21. e2f4 g7f6 22. b2b3 g5f4 23. d6c5
+e6f5 24. d3d4 a8b8 25. h2h1 f6e7 26. c2d2 e7d8 27. d2d3 g8f6 28. g3g5 e8g8 29. h3h4
+f6e8 30. a1b1 d5c4 31. d3d2 h7h5 32. d2e2 b4a3 33. h1g1 b7c6 34. d4d5 c6c5 35. g5f4
+g8g2 36. f4f5 e8d6 37. b5a3 g2g5 38. g1h1 a6c8 39. f5g6 g5f4 40. g6g8 b8a8 41. g8g2
+d8h4 42. e2d1 c8h3 43. h1h3 f4d2 44. d1d2 d6b7 45. h3d3 c4b3 46. g2g4 a8c8 47. b1c1
+c5b6 48. g4a4 b7d8 49. a4b5 1/2-1/2
+
+[Event "Eval Cycle 1 Game 2"]
+[White "champion v0"]
+[Black "challenger v5"]
+[Result "1/2-1/2"]
+
+1. a2a3 c7c6 2. c2c3 c6c5 3. f2f3 e7e5 4. a3a4 b8a6 5. g2g4 c5c4 6. a1a3 d8g5
+7. h2h4 g5e3 8. a4a5 e3c3 9. a3a1 h7h5 10. g4g5 c3b4 11. e1f2 b7b6 12. e2e3
+b4c3 13. d2d3 e8e7 14. f2e2 c4d3 15. d1d3 e7e6 16. a5b6 f8b4 17. d3a6 c3c7 18. b1a3
+e6d5 19. a1a2 c7c6 20. f1g2 c8b7 21. a3c2 b4c3 22. a6a7 c6c4 23. e2d1 c4f1 24. c2e1
+f1e1 25. d1c2 e1e2 26. c2b1 d5c5 27. g1h3 c3d2 28. g5g6 e2f2 29. g6f7 b7a6 30. a7d7
+a8a7 31. b1c2 g7g6 32. d7b7 d2c3 33. h3f2 c3e1 34. f2d3 a6d3 35. c2b3 a7a6 36. h1e1
+d3e2 37. f3f4 e5f4 38. e1e2 g8h6 39. b3c2 a6a7 40. b7b8q a7a6 41. b8f8 c5b6
+42. g2f1 f4e3 43. a2a4 h8f8 44. b2b4 g6g5 45. f1h3 b6b7 46. h3f5 b7a8 47. c1a3
+a6a7 48. a4a5 h6f7 49. h4g5 f8g8 50. c2d3 g8e8 51. e2c2 e8e4 52. d3e4 f7e5 53. c2c8
+a8b7 54. c8d8 e3e2 55. f5g4 e5g4 56. a5b5 b7a6 57. g5g6 g4f2 58. e4e3 a6b5 59. a3b2
+a7g7 60. e3f4 g7g6 61. d8f8 f2g4 62. b2f6 g6g8 63. f8d8 b5b4 64. d8e8 g4h6 65. f4e4
+g8h8 66. e8b8 b4c5 67. f6b2 h8h7 68. b2a1 e2e1q 69. e4f3 c5c4 70. b8b5 e1e8
+71. b5h5 e8e2 72. f3g3 e2f3 73. g3f3 h7a7 74. a1c3 c4b3 75. h5h1 b3a3 76. f3g3
+a7h7 77. g3g2 h7e7 78. h1h2 e7e6 79. g2h1 e6f6 80. h2a2 a3a2 81. c3b2 h6g8 82. b2e5
+f6c6 83. e5a1 c6a6 84. a1c3 g8h6 85. c3e5 a2a3 86. e5a1 h6g8 87. a1b2 a3b2 88. h1h2
+a6a8 89. h2g2 b2c1q 90. g2g1 a8a4 91. g1h2 a4a5 92. h2g2 a5a1 93. g2h2 g8e7
+94. h2g3 c1d2 95. g3g2 a1b1 96. g2f2 b1f1 97. f2g3 f1f6 98. g3g2 d2d3 99. g2h1
+d3c4 100. h1h2 f6f7 101. h2g3 c4c3 102. g3h2 c3d4 103. h2h1 d4e4 104. h1h2 e4f5
+105. h2g3 e7c8 106. g3h4 c8e7 107. h4h5 f5f4 108. h5h4 e7c6 109. h4h3 f7a7 110. h3h2
+f4e3 111. h2h1 a7d7 112. h1g2 e3e4 113. g2h3 e4f3 114. h3h4 d7d1 115. h4h5 d1d8
+116. h5g5 d8d2 117. g5f5 d2d3 118. f5e6 c6a7 119. e6e7 f3f4 120. e7f8q d3f3
+121. f8f7 f3e3 122. f7g7 a7b5 123. g7h8q e3g3 124. h8h7 g3b3 125. h7g6 b5d4
+126. g6h6 f4e3 127. h6h5 b3a3 128. h5h4 e3e4 129. h4h5 e4f3 130. h5g5 a3a1 131. g5h4
+f3e4 132. h4h5 e4f3 133. h5h4 a1c1 134. h4h5 c1b1 135. h5g6 b1f1 136. g6g5 f3f2
+137. g5f6 d4f5 1/2-1/2
+
+[Event "Eval Cycle 1 Game 1"]
+[White "challenger v11"]
+[Black "champion v0"]
+[Result "1/2-1/2"]
+
+1. g1f3 h7h6 2. h2h3 e7e5 3. d2d4 f8d6 4. f3e5 g8e7 5. e5f7 d6g3 6. c1h6 e7d5
+7. e2e3 e8f8 8. b1c3 g3f2 9. e1d2 d8h4 10. f1d3 c7c5 11. d4c5 f2g3 12. d3a6
+g3f2 13. c3e4 h4g3 14. c2c4 f2e3 15. d2e2 h8h6 16. e4f2 d5e7 17. d1g1 h6h5 18. a1c1
+b8c6 19. e2d1 e3f4 20. f7d6 f4h6 21. d6f5 f8g8 22. g1f1 h6e3 23. a2a3 h5h8 24. f1e2
+g3g6 25. e2e1 d7d5 26. f5h4 e7f5 27. d1e2 g6g4 28. h4f3 g4h3 29. h1g1 d5d4 30. e1b4
+c6b4 31. c1c3 b4d3 32. g2g3 e3g5 33. f2h1 h8h7 34. a6b5 g5h4 35. c3c2 h3g2 36. h1f2
+h4f6 37. g1d1 f6d8 38. d1h1 b7b6 39. f3h2 g7g5 40. c5c6 a8b8 41. h2g4 d3b2 42. h1f1
+b2a4 43. c2d2 b8a8 44. g4f6 g8h8 45. f1e1 a7a5 46. e1c1 h7h3 47. c6c7 h3h7 48. f6g8
+g2f3 49. e2f1 f3h1 50. f2h1 c8b7 51. c1c3 a4c5 52. c7d8b h7h3 53. h1f2 h8h7
+54. d2e2 d4d3 55. b5a6 c5d7 56. c3d3 b6b5 57. e2e8 f5h6 58. g8e7 a8c8 59. f2g4
+b7f3 60. g4h6 f3h5 61. d3f3 h7g7 62. c4c5 d7e5 63. e8h8 c8c7 64. f3f2 c7d7 65. e7g8q
+d7f7 66. g8e7 f7f2 67. f1f2 h5d1 68. d8a5 d1b3 69. h8h7 g7h7 70. a5b6 b3a4 71. e7g6
+e5g4 72. f2f3 g4h2 73. f3e4 g5g4 74. e4e3 h2f1q 75. e3e2 h3h2 76. e2f1 a4b3
+77. a6b5 h2d2 78. g6e5 b3d5 79. f1g1 d2e2 80. b6c7 e2e4 81. h6g8 d5g8 82. g1f2
+h7h8 83. e5d7 e4e6 84. b5a6 e6a6 85. f2e3 a6a7 86. e3f2 g8d5 87. a3a4 a7a5 88. d7b8q
+d5e6 89. f2f1 e6d7 90. f1g1 d7e6 91. g1f2 e6c4 92. f2g1 h8h7 93. c7e5 a5a8 94. e5c3
+c4b5 95. c3e1 h7h6 96. e1a5 b5e2 97. b8a6 h6g5 98. g1h1 a8d8 99. h1g2 d8d7 100. g2f2
+d7d5 101. f2g1 g5h5 102. g1g2 e2f1q 103. g2f1 d5g5 104. f1g2 g5e5 105. a6b4
+e5c5 106. a5d8 c5c3 107. g2g1 h5h6 108. d8g5 h6g5 109. g1g2 c3d3 110. g2f1 g5g6
+111. b4a6 g6f5 112. a6c5 d3d6 113. c5d7 d6b6 114. d7c5 b6b1 115. f1e2 b1b8 116. c5e4
+b8b6 117. e4g5 b6c6 118. e2e1 c6c4 119. g5h3 c4c6 120. e1d1 f5e4 121. a4a5 c6b6
+122. d1d2 b6b1 123. h3g1 e4e5 124. d2d3 b1g1 125. d3c2 g1a1 126. c2c3 e5d5 127. c3b2
+d5c4 128. a5a6 a1a5 129. a6a7 a5a1 130. a7a8b a1a7 131. b2c1 c4d4 132. c1b2
+a7a1 133. a8c6 a1a5 134. c6b7 d4c5 135. b7a6 a5a4 136. b2b1 a4a1 137. b1c2 c5d5
+138. a6c8 a1d1 139. c2c3 d1d3 140. c3b2 d3d2 141. b2c1 d5c6 142. c8g4 d2d5 143. g4h5
+c6d7 144. c1b1 d5h5 145. b1c2 h5h8 146. g3g4 h8h1 147. c2d3 h1h5 148. g4g5 d7c8
+149. d3d2 c8b8 150. d2c3 b8c7 1/2-1/2
+
+[Event "Eval Cycle 1 Game 2"]
+[White "champion v0"]
+[Black "challenger v11"]
+[Result "1/2-1/2"]
+
+1. d2d4 f7f6 2. c1e3 a7a5 3. h2h3 a5a4 4. b1c3 b8a6 5. b2b4 g7g5 6. d4d5 h7h5
+7. e1d2 e8f7 8. c3e4 f7g6 9. d2e1 b7b5 10. e4d6 h8h7 11. e1d2 e7e5 12. d6f7
+h7g7 13. d2e1 d7d6 14. e3c5 e5e4 15. a2a3 f6f5 16. c5e3 g8e7 17. d1d3 c8d7 18. d3b3
+d7c6 19. a1d1 g7f7 20. d5c6 a4b3 21. c2b3 a8c8 22. f2f4 a6b4 23. h1h2 g5f4 24. h2h1
+c8a8 25. e3f2 d8e8 26. g2g4 e8d8 27. h3h4 b4d3 28. e2d3 f7h7 29. e1e2 g6g7 30. f2e1
+a8a6 31. g1f3 b5b4 32. d3d4 e7c6 33. a3a4 d8b8 34. a4a5 b8e8 35. f3h2 e8d8 36. d1d3
+f8e7 37. d4d5 d8h8 38. e2f2 g7f8 39. d3h3 e7d8 40. h3g3 f8f7 41. f2g2 f7f8 42. f1a6
+c6a7 43. g2g1 h8a1 44. a6b5 a1c3 45. b5d7 c3d4 46. g1f1 h7d7 47. g3g1 h5g4 48. h4h5
+a7c8 49. g1g4 c8e7 50. h1g1 d4c5 51. f1g2 c7c6 52. e1d2 c5f2 53. g2f2 d8c7 54. h5h6
+c7a5 55. g4g2 c6d5 56. d2c1 f8f7 57. h6h7 e7c8 58. g1e1 f4f3 59. e1f1 c8b6 60. g2g3
+b6a4 61. b3a4 f7f6 62. h2g4 f6f7 63. g3g1 f7e7 64. f2e3 d5d4 65. e3d4 a5b6 66. d4c4
+b4b3 67. c4b4 b6d8 68. c1a3 f5g4 69. f1f2 e7e6 70. f2d2 d7c7 71. d2d3 d8f6 72. h7h8r
+f6d8 73. d3b3 e6d5 74. b3e3 c7c8 75. h8h1 c8c2 76. h1h4 d8g5 77. h4h2 c2c7 78. h2h8
+g5f6 79. h8c8 f6c3 80. b4b5 f3f2 81. c8b8 f2f1r 82. b5a6 c3b2 83. a6a5 c7c8
+84. b8b5 d5c6 85. g1h1 c8e8 86. b5c5 c6d7 87. e3e1 e8b8 88. h1g1 b2c1q 89. c5h5
+f1f8 90. h5d5 f8c8 91. d5d1 b8b1 92. g1g2 e4e3 93. g2c2 b1b5 94. a5a6 c8c6 95. a6b5
+c6c2 96. e1e2 d7e8 97. a3b4 c2c7 98. d1d6 c7g7 99. b4c3 c1a3 100. b5a6 g7b7
+101. c3a5 b7b6 102. a5b6 e8f8 103. a6b5 a3b4 104. a4a5 b4c5 105. d6c6 c5a3 106. c6c3
+a3b2 107. b6e3 f8f7 108. e3h6 b2c3 109. b5c6 g4g3 110. c6b7 c3b4 111. e2b2 f7g8
+112. b2d2 b4c3 113. b7a8q c3e5 114. d2a2 e5h8 115. h6e3 h8e5 116. a5a6 e5g7
+117. a2b2 g3g2 118. b2b6 g7f8 119. b6d6 f8e7 120. d6d4 g8f8 121. d4e4 e7g5 122. a8b7
+g5f6 123. b7b8q f6g7 124. e3f4 g2g1r 125. f4c1 f8f7 126. e4f4 f7e7 127. b8c8
+g1g3 128. f4f2 g7a1 129. c1g5 g3g5 130. f2f6 g5g7 131. c8b7 a1f6 132. b7c6 g7g6
+133. c6b5 g6h6 134. b5a4 e7d7 135. a4a3 h6h1 136. a6a7 h1b1 137. a7a8q b1b6
+138. a8a5 d7c6 139. a5a8 c6c5 140. a8a4 f6h4 141. a4f4 b6b1 142. f4g5 c5d6 143. g5g6
+d6e5 144. g6g2 h4e7 145. a3a2 b1b4 146. g2g7 e7f6 147. g7c7 e5e6 148. c7b6 e6d5
+149. b6e3 d5c6 150. e3e4 c6b6 1/2-1/2
+
+[Event "Eval Cycle 1 Game 1"]
+[White "challenger v7"]
+[Black "champion v0"]
+[Result "1/2-1/2"]
+
+1. c2c3 b7b5 2. f2f4 h7h5 3. d1b3 g8f6 4. b3d1 a7a5 5. b1a3 a8a7 6. a1b1 c7c6
+7. e2e4 a7b7 8. e1e2 b7a7 9. e2d3 a7a8 10. d3c2 d8c7 11. f4f5 h5h4 12. g2g3
+a5a4 13. f1g2 h8h5 14. d1f1 h5h6 15. g1h3 g7g5 16. f1c4 h6h8 17. g3g4 f8g7 18. b2b3
+h8h5 19. d2d3 c7h2 20. c4f7 e8f7 21. b1a1 c6c5 22. c1f4 f6g8 23. h3g1 c8b7 24. c2d2
+f7f8 25. f4e3 b7c8 26. e3f2 a4b3 27. a1e1 g7e5 28. e1e2 a8a4 29. d2e3 h4h3 30. a3c2
+h5h4 31. e3d2 g8h6 32. g1f3 h4g4 33. f2g3 a4b4 34. g3e5 b4c4 35. c2e3 h3g2 36. e3c2
+c4a4 37. e5h8 c5c4 38. h8g7 f8e8 39. f3h2 a4a2 40. g7h8q b3c2 41. d3d4 d7d6
+42. h1f1 e8f7 43. e2f2 h6f5 44. f1e1 e7e5 45. e1h1 c8e6 46. h8e5 d6e5 47. d4d5
+c2c1r 48. d2c1 g4e4 49. f2d2 b8a6 50. d2g2 f7f8 51. h2f3 e4g4 52. h1g1 e6d5
+53. g1f1 d5b7 54. g2b2 g4h4 55. f3h4 a2b2 56. f1e1 f5d4 57. c3d4 e5e4 58. h4g2
+b2a2 59. e1d1 b7c6 60. g2f4 f8g8 61. f4g6 a2f2 62. g6e7 g8f8 63. d1g1 e4e3 64. g1g2
+g5g4 65. d4d5 f2f5 66. g2d2 c6b7 67. c1d1 f5f1 68. d1e2 f1a1 69. d2d1 f8f7 70. e7c6
+f7f8 71. c6d8 b7d5 72. d1d3 a6c5 73. d3d2 a1a3 74. d8c6 d5h1 75. d2d7 c5b7 76. c6e7
+h1g2 77. e7c8q a3c3 78. d7f7 f8f7 79. c8d6 f7g8 80. d6f7 b7c5 81. f7e5 c5b3
+82. e5g4 g2c6 83. g4e3 g8h7 84. e2f1 c6g2 85. f1f2 g2f1q 86. f2f3 b3d2 87. f3f4
+f1e2 88. e3d5 d2f3 89. f4g3 c3c2 90. g3g2 h7g6 91. d5c7 g6f7 92. c7a8q f3g5
+93. g2g1 e2h5 94. a8b6 b5b4 95. b6c8 h5d1 96. c8a7 f7g8 97. g1f1 c2h2 98. a7b5
+g8h8 99. b5a7 g5h3 100. f1e1 h2e2 101. e1f1 b4b3 102. a7c6 h8g8 103. c6a7 g8h7
+104. a7c8q h3f2 105. f1g2 e2e3 106. g2f2 d1c2 107. f2g1 c2e4 108. c8a7 e4d3
+109. g1f2 e3e5 110. f2g2 e5c5 111. g2f2 d3g6 112. a7c6 g6e4 113. f2f1 c5f5 114. f1g1
+e4g2 115. c6e7 f5c5 116. e7g8q c5g5 117. g8f6 h7g6 118. f6g8 g2b7 119. g1f2
+b7d5 120. f2e3 d5h1 121. g8h6 h1e4 122. e3e2 e4d5 123. e2d2 c4c3 124. d2d3 d5f3
+125. d3c3 g5e5 126. h6f7 g6f6 127. c3b4 b3b2 128. f7h8q f3c6 129. b4a3 e5f5
+130. a3b3 c6a4 131. b3a2 a4d7 132. a2b3 f5g5 133. b3b4 b2b1q 134. b4c4 g5a5
+135. c4c3 f6e5 136. c3d2 b1c1 137. d2d3 a5a7 138. h8g6 e5d5 139. g6h4 a7a5 140. h4g2
+d5d6 141. g2h4 c1c4 142. d3e3 a5e5 143. e3f3 e5h5 144. h4g2 c4b5 145. g2e3 b5b3
+146. f3f4 h5d5 147. e3f1 b3a4 148. f4g3 d5d1 149. g3f3 a4g4 150. f3f2 g4f4 1/2-1/2
+
+[Event "Eval Cycle 1 Game 2"]
+[White "champion v0"]
+[Black "challenger v7"]
+[Result "1/2-1/2"]
+
+1. g1h3 d7d5 2. b1c3 a7a5 3. a2a3 g8f6 4. d2d3 a5a4 5. a1a2 f6d7 6. f2f4 g7g5
+7. e2e3 d5d4 8. f4f5 d7f6 9. e3e4 c8f5 10. h3f4 g5g4 11. f4h5 f5d7 12. h2h3
+h8g8 13. b2b3 a8a6 14. c1f4 f8h6 15. e1e2 f6h5 16. e4e5 a6a8 17. c3e4 e7e6 18. c2c3
+d7b5 19. f4h6 a8a6 20. b3a4 d8e7 21. e2e1 g8g5 22. a2a1 e7d7 23. e4g5 d4c3 24. a1a2
+d7e7 25. h6f8 e8d8 26. e1f2 d8d7 27. f2e1 d7d8 28. g5e4 g4g3 29. d1f3 a6a7 30. a2f2
+e7f8 31. f2c2 c7c6 32. e4d2 a7a8 33. h1g1 h5f4 34. f3d5 f4d5 35. c2a2 f8c5 36. h3h4
+d5e7 37. d2f3 a8a6 38. d3d4 c3c2 39. f3d2 c5d4 40. h4h5 b5f1 41. a4a5 d4c5 42. a2b2
+c5a5 43. e1f1 a5b6 44. b2c2 b6e3 45. d2b1 e7g8 46. h5h6 e3g5 47. b1c3 g5c1 48. c2c1
+b7b5 49. c3d1 g8e7 50. c1c3 e7c8 51. c3c1 b5b4 52. c1c4 d8c7 53. c4c5 f7f6 54. c5d5
+a6b6 55. a3a4 c6c5 56. d5d2 f6f5 57. f1e2 b8d7 58. d2d3 c5c4 59. d3d2 d7f6 60. g1e1
+c8d6 61. d2d3 c7d8 62. e1h1 f6g4 63. d1e3 b4b3 64. d3d4 d8d7 65. h1h4 g4f2 66. h4g4
+f5g4 67. e2d2 f2d3 68. d4e4 b6b7 69. e5d6 b7b8 70. e3c4 b8c8 71. e4d4 c8a8 72. a4a5
+a8c8 73. d2e2 c8c6 74. a5a6 c6b6 75. d4d3 d7d8 76. c4e5 b6a6 77. d3g3 a6a7 78. e5f7
+d8c8 79. e2d1 a7a5 80. d6d7 c8c7 81. g3d3 a5a8 82. d3c3 c7b7 83. c3c5 a8a1 84. c5c1
+b3b2 85. d1e2 a1a5 86. d7d8b a5c5 87. d8h4 b2c1r 88. h4f6 b7c6 89. f7e5 c6d5
+90. e2d2 d5e4 91. e5c6 e6e5 92. c6b4 g4g3 93. f6h8 c1g1 94. b4c2 c5b5 95. c2d4
+g1b1 96. d4e2 b5b3 97. e2g3 e4d5 98. g3e4 d5d4 99. h8f6 b1h1 100. d2e2 d4d5
+101. g2g4 h1f1 102. e2d2 b3b7 103. f6d8 b7b6 104. d2e3 f1f6 105. d8e7 d5e6 106. e3d3
+f6f7 107. e7a3 b6b2 108. a3c5 b2b3 109. d3d2 f7b7 110. e4g3 e6f7 111. d2e2 b3b6
+112. c5e7 b7a7 113. e7b4 a7a8 114. g3f5 a8a3 115. f5g3 a3a8 116. g3h1 a8h8 117. e2d2
+f7g6 118. g4g5 b6f6 119. d2d3 f6f4 120. b4d6 f4f7 121. d6b8 f7g7 122. d3e3 h8g8
+123. e3d3 g8c8 124. b8c7 g6g5 125. h1f2 g5g6 126. f2h3 g7g8 127. h3f2 g6f5 128. d3c4
+g8g6 129. c4d5 c8g8 130. c7e5 g6d6 131. e5d6 g8a8 132. d6h2 f5g6 133. h2d6 a8b8
+134. d5c5 b8g8 135. f2d3 g6f7 136. d6e5 g8e8 137. c5b4 e8f8 138. b4a4 f8a8 139. a4b3
+a8a3 140. b3a3 f7f8 141. e5d4 f8e7 142. d3c1 e7f8 143. d4f6 f8g8 144. a3a2 g8f8
+145. f6h4 f8g8 146. c1e2 g8f8 147. a2b2 f8g8 148. e2g3 g8f8 149. h4g5 f8e8 150. b2b3
+e8f7 1/2-1/2
+
+[Event "Eval Cycle 1 Game 1"]
+[White "challenger v1"]
+[Black "champion v0"]
+[Result "1/2-1/2"]
+
+1. h2h3 d7d5 2. e2e4 g8f6 3. b2b4 f6g8 4. c1b2 h7h5 5. b2e5 b8a6 6. d1e2 b7b6
+7. e4d5 a6c5 8. e5d4 e8d7 9. d4b2 c5a4 10. e2e4 d7d6 11. a2a3 b6b5 12. b2f6
+a8b8 13. h3h4 g8h6 14. e4e7 d8e7 15. g1e2 d6d7 16. b1c3 a4b2 17. c3b1 b8a8 18. f2f3
+e7d6 19. d2d4 c7c6 20. e2g3 g7g6 21. f1d3 c6c5 22. d3c4 d7c7 23. e1e2 c8d7 24. b1d2
+a8e8 25. d2e4 c7c8 26. f6e5 d6e5 27. g3f5 c8d8 28. e2e3 b2d1q 29. a1d1 e5e7
+30. f5g3 d7c8 31. d1c1 c8a6 32. g3e2 c5d4 33. e3d2 f7f6 34. d2e1 h6f7 35. e1f2
+h8g8 36. c2c3 e7b4 37. c1c2 a6c8 38. e4c5 e8e2 39. f2g1 e2c2 40. h1h2 d4d3 41. h2h1
+c8b7 42. a3a4 c2g2 43. g1f1 b7a6 44. c3b4 g8g7 45. h1h2 g7g8 46. f3f4 g8g7 47. c5e6
+d8c8 48. h2h1 f8d6 49. h1h2 g2a2 50. e6g5 c8d7 51. h2h1 f7d8 52. c4d3 d7c8 53. g5f3
+g7h7 54. d3e2 d8e6 55. f3g5 d6e5 56. g5f7 e5b8 57. e2f3 c8b7 58. f3g2 a2c2 59. f1g1
+e6c7 60. h1h2 c2a2 61. f7h8q a2a4 62. h2h3 b7c8 63. h3h2 c7d5 64. h2h1 a4a3
+65. g2e4 a3a5 66. h1h3 h7d7 67. h3h1 b8f4 68. e4c2 a5a3 69. g1g2 a3c3 70. c2f5
+c3c6 71. g2f2 d5b6 72. f2g2 c8b8 73. f5e4 c6c8 74. e4g6 d7d1 75. g6c2 d1a1 76. c2b1
+a1b1 77. g2f2 c8c4 78. f2e2 b1b4 79. h1d1 b8b7 80. h8f7 b4b1 81. d1d7 b7c8 82. d7d5
+f4g5 83. f7d6 c8d8 84. e2f2 d8e7 85. d5d3 b1h1 86. d3e3 g5e3 87. f2e3 h1g1 88. d6b7
+g1g3 89. e3d2 b6c8 90. b7a5 g3c3 91. d2e2 c4f4 92. a5b3 e7e6 93. e2d2 e6d6 94. b3a1
+f4e4 95. d2c3 c8e7 96. a1b3 e4h4 97. b3d4 h4g4 98. c3d2 a6c8 99. d2c3 c8a6 100. d4c2
+e7c6 101. c3d3 a6b7 102. d3e3 c6e5 103. c2d4 b7a8 104. d4b5 d6c5 105. b5a7 e5d3
+106. a7b5 d3f2 107. b5d4 g4h4 108. d4c6 h4h1 109. e3f2 c5c4 110. f2g3 f6f5 111. c6b8
+a8g2 112. b8a6 g2h3 113. g3f3 c4d3 114. a6c7 h1h2 115. c7a8q h2c2 116. a8b6
+c2c5 117. b6a4 c5e5 118. a4b6 e5c5 119. b6c4 c5a5 120. c4d6 h3g4 121. f3f2 a5a7
+122. d6c4 d3d4 123. c4d6 g4f3 124. f2f3 d4e5 125. f3f2 e5f6 126. f2g3 a7a8 127. d6b7
+a8f8 128. b7d6 f8g8 129. g3h2 f6e6 130. d6b5 g8a8 131. b5c3 a8d8 132. h2g3 d8d2
+133. c3a4 d2e2 134. a4c3 e6f6 135. c3e4 f6e7 136. e4f2 e2e6 137. g3g2 e7d7 138. f2e4
+e6b6 139. e4f6 b6f6 140. g2f1 f6c6 141. f1f2 h5h4 142. f2f1 f5f4 143. f1e1 d7e8
+144. e1d1 c6c2 145. d1e1 h4h3 146. e1f1 f4f3 147. f1e1 e8f7 148. e1d1 f7g6 149. d1c2
+g6f5 150. c2b1 f5f6 1/2-1/2
+
+[Event "Eval Cycle 1 Game 2"]
+[White "champion v0"]
+[Black "challenger v1"]
+[Result "1/2-1/2"]
+
+1. g1h3 a7a6 2. e2e3 d7d5 3. f2f4 c7c5 4. f1e2 c8d7 5. a2a4 h7h5 6. e1f1 d8c7
+7. c2c3 c7c6 8. c3c4 b7b5 9. f4f5 c6h6 10. c4b5 d7c8 11. f5f6 c8b7 12. e2d3
+g7f6 13. g2g4 h6e3 14. d1f3 e3e6 15. f3g2 e6e2 16. g2e2 h8h6 17. f1f2 e8d7 18. f2f3
+c5c4 19. h1f1 c4c3 20. e2e5 b8c6 21. a4a5 d5d4 22. e5d4 d7c7 23. d4a4 f6f5 24. b2b4
+c6d8 25. f3f2 d8e6 26. b5a6 b7d5 27. c1a3 h5h4 28. f1c1 d5c4 29. a4b5 h6h5 30. d2c3
+e6f4 31. c1d1 a8e8 32. d1f1 c7c8 33. h3g1 c4d3 34. a3c1 h4h3 35. b5b6 h5g5 36. c1d2
+f7f6 37. f2e3 e7e6 38. a1a3 d3e2 39. a3a2 f8c5 40. b6c5 c8d7 41. c5d5 d7e7 42. d5d3
+e2d1q 43. g4f5 e7f8 44. f5e6 e8b8 45. e3d4 f4d3 46. f1f3 d1a4 47. d2c1 a4d7
+48. f3f4 g5g6 49. d4d5 b8d8 50. c3c4 g6g3 51. g1e2 f8g7 52. b4b5 g7g6 53. f4d4
+g3f3 54. e6e7 f6f5 55. d5d6 d3c5 56. e7e8q d8e8 57. d4g4 g6f6 58. e2c3 d7b5
+59. g4g7 b5c6 60. c3e4 f6g7 61. c1e3 e8c8 62. a2a1 c8b8 63. b1c3 g7f7 64. e3f4
+g8h6 65. d6c6 b8h8 66. f4e3 h8d8 67. c6c5 d8d7 68. e4g5 f7e7 69. g5h7 d7c7 70. c5b5
+f5f4 71. b5b6 h6g4 72. c3a2 e7d6 73. e3g1 f3c3 74. a1c1 c3f3 75. c1b1 f3d3 76. b1b4
+d3a3 77. g1c5 d6e6 78. b4b5 c7h7 79. b5b4 h7e7 80. c5g1 g4f6 81. b4b3 e7d7 82. b3e3
+e6f5 83. e3g3 d7f7 84. c4c5 a3a5 85. g3g8 f5e6 86. g8g3 f7f8 87. b6c7 f4f3 88. c7b7
+a5b5 89. b7c7 f6g8 90. g1f2 b5a5 91. f2g1 e6e5 92. g1e3 f3f2 93. g3g5 f8f5 94. c7d7
+f2f1r 95. d7e8q a5a4 96. e8d7 a4e4 97. g5g7 f1f4 98. g7g1 e5f6 99. g1d1 g8e7
+100. a2c3 f6f7 101. d1h1 e4b4 102. c3b1 b4b2 103. c5c6 e7c8 104. e3b6 f5e5 105. b6e3
+e5e3 106. b1a3 e3e2 107. h1d1 f7g7 108. d1h1 f4f3 109. d7c7 e2g2 110. a3c2 g7h6
+111. c2d4 f3c3 112. h1c1 c3g3 113. d4f3 b2b6 114. h2g3 h6g7 115. f3d2 g7g6 116. g3g4
+g2d2 117. g4g5 d2c2 118. c1b1 b6b1 119. a6a7 c8a7 120. c7d7 c2f2 121. c6c7 f2f7
+122. d7e8q b1c1 123. c7c8q a7c6 124. c8a6 f7a7 125. a6a4 c1f1 126. a4e4 g6h5
+127. e4d3 a7f7 128. d3e3 c6d4 129. e3g1 h5g6 130. g1e3 f7a7 131. e3d3 f1f5 132. d3b1
+d4c2 133. b1e1 f5e5 134. e8d8 a7a3 135. e1f2 e5e6 136. f2f3 a3a7 137. f3a3 g6h5
+138. a3a4 a7c7 139. a4c6 c2b4 140. c6c4 c7h7 141. c4b5 e6e7 142. b5b7 h7f7 143. b7b6
+f7f4 144. d8c8 f4e4 145. b6f2 e4e3 146. f2e2 e3e2 147. c8d8 h5h4 148. d8c8 e7e6
+149. c8b7 e6d6 150. b7b8q h4g4 1/2-1/2
+
+[Event "Eval Cycle 1 Game 1"]
+[White "challenger v5"]
+[Black "champion v0"]
+[Result "1/2-1/2"]
+
+1. g2g4 c7c6 2. b1a3 b8a6 3. f2f4 b7b6 4. e2e3 h7h5 5. b2b4 f7f6 6. g4g5 a6c5
+7. f1b5 c5a4 8. b5d3 a7a6 9. h2h4 a8b8 10. d1g4 d8c7 11. a3b1 c7e5 12. g4e6
+h8h6 13. e6g4 a4b2 14. g4e6 e5d6 15. e3e4 b8a8 16. e6f5 c6c5 17. g5h6 g7g5 18. f5f6
+e7e6 19. g1e2 d6c6 20. e2g1 f8e7 21. h4g5 e7f8 22. g1e2 c6d5 23. f6f7 e8d8 24. c2c3
+d5g5 25. a2a4 g8h6 26. f7g6 g5e7 27. b1a3 e7h7 28. c3c4 d8c7 29. e1f2 b2c4 30. g6g8
+h6g8 31. f2f3 h5h4 32. a3b5 c7b8 33. b5c7 c4a5 34. h1h3 g8h6 35. a1a2 a5c6 36. f4f5
+c6e7 37. a2b2 h7g6 38. e2g1 e6e5 39. h3h2 a8a7 40. b2b1 g6g7 41. h2h3 c5b4 42. a4a5
+a7b7 43. d3e2 h6f7 44. a5b6 e7g8 45. f5f6 g7g4 46. f3g4 b7a7 47. b1b2 f8g7 48. h3h4
+a6a5 49. b6a7 b8c7 50. e2d1 g7f8 51. d1a4 c8b7 52. a4d7 c7d6 53. h4h1 b7a6 54. h1h3
+a6e2 55. g4g3 d6c5 56. d7a4 f8h6 57. d2d3 h6d2 58. d3d4 c5b6 59. a4d7 e2b5 60. a7a8r
+b6c7 61. d7e8q b5a4 62. b2c2 c7b7 63. g1e2 d2g5 64. c2d2 g5e3 65. c1a3 e5d4
+66. g3g4 f7g5 67. e2g3 b4a3 68. a8c8 e3d2 69. f6f7 d2c1q 70. c8c1 a4c2 71. e8d7
+c2a4 72. f7g8n b7a6 73. c1d1 d4d3 74. d7c8q a6b6 75. d1h1 b6b5 76. c8a6 b5c6
+77. h1a1 a4d1 78. g4g5 c6b6 79. h3h2 b6c7 80. h2e2 d1c2 81. e2e3 c7c6 82. g5f5
+c2b3 83. a6d3 c6c7 84. f5f6 b3e6 85. a1e1 e6f5 86. g3h1 f5c8 87. f6g5 c8h3 88. h1g3
+c7b8 89. g3e2 a5a4 90. d3a6 h3c8 91. e3a3 c8g4 92. a3d3 g4h5 93. a6b5 h5g4 94. e2c3
+g4h3 95. d3h3 b8b7 96. g5f5 b7b6 97. h3e3 b6c5 98. c3d5 c5d4 99. f5f4 d4c5 100. b5d7
+c5d4 101. e1h1 d4c4 102. e3a3 c4d4 103. a3a4 d4c5 104. h1d1 c5d6 105. f4g5 d6e5
+106. d5f4 1/2-1/2
+
+[Event "Eval Cycle 1 Game 2"]
+[White "champion v0"]
+[Black "challenger v5"]
+[Result "1/2-1/2"]
+
+1. g2g3 b7b5 2. d2d3 d7d6 3. f1g2 d6d5 4. h2h3 c8f5 5. f2f3 a7a6 6. e1f1 c7c6
+7. c1f4 g8h6 8. a2a4 d5d4 9. f4e3 d8a5 10. f3f4 f5e6 11. g3g4 c6c5 12. d1c1
+e6g4 13. b1a3 h6g8 14. a3b1 a5a4 15. g2c6 b8c6 16. c2c3 a8c8 17. a1a4 c5c4 18. c1e1
+c6b4 19. d3c4 b4a2 20. h1h2 g4f3 21. g1f3 d4d3 22. a4a3 e8d7 23. e3d2 d7d8 24. a3b3
+a2b4 25. f1g1 b5c4 26. f3g5 d3e2 27. h2h1 g8h6 28. e1f1 e2f1n 29. g5h7 f7f6
+30. b3a3 h6f7 31. f4f5 c8a8 32. h7f6 h8h7 33. d2f4 b4d5 34. a3a5 h7h3 35. f4b8
+e7f6 36. b2b3 h3d3 37. a5a4 g7g5 38. a4b4 d3d1 39. b4b7 d1c1 40. b8c7 d8e8 41. b1d2
+f1h2 42. d2f1 c1a1 43. b7b5 f8a3 44. g1f2 a1f1 45. f2g3 f1e1 46. c7b8q f7e5
+47. g3f2 a3c1 48. b5b6 e8e7 49. b6c6 a8a7 50. c6d6 e7e8 51. b3b4 e1f1 52. f2e2
+d5e7 53. d6a6 a7a6 54. b8d6 a6a4 55. h1f1 e7g6 56. d6c5 g6e7 57. c5f2 c1e3 58. f1h1
+e7g8 59. h1g1 e5c6 60. g1f1 c6a7 61. e2e3 g8e7 62. f1a1 e7c8 63. e3d4 a4a3 64. d4e4
+e8f8 65. f2a7 a3b3 66. a1a6 b3b1 67. a6a2 b1h1 68. a7b6 h1a1 69. a2a8 h2f1q
+70. b6c7 a1e1 71. e4d5 e1a1 72. a8a1 c8e7 73. d5d4 f8f7 74. a1b1 f7f8 75. b1d1
+e7c8 76. d1b1 c8e7 77. d4e4 f8e8 78. b1b2 f1e3 79. c7b8q e8f8 80. b8a7 e7c8
+81. a7c5 f8g7 82. c5a7 e3c2 83. a7f2 c2e1q 84. f2a7 e1g2 85. b2c2 g7h8 86. a7b6
+c8e7 87. b6f2 e7g8 88. f2b6 h8h7 89. c2f2 h7h8 90. b6d8 h8g7 91. b4b5 g7h7 92. f2f1
+g8h6 93. f1e1 g5g4 94. e1b1 h7h8 95. b1d1 g4g3 96. d8b6 h6f5 97. d1d4 f5e3 98. b6a5
+f6f5 99. e4e5 e3f1 100. d4d5 h8g8 101. e5f6 f1e3 102. a5b4 g2h4 103. b4a5 e3g4
+104. f6e6 h4g2 105. d5d2 g4f6 106. d2a2 f6g4 107. a2a3 g8h7 108. e6e7 g4h6 109. e7d6
+h7g7 110. d6c6 g2h4 111. c6b7 g7h7 112. b7c8q h4g2 113. a5b6 g2f4 114. a3a6
+f4g2 115. b6d4 g2e1q 116. a6c6 e1c2 117. d4e3 h7g8 118. e3h6 c2b4 119. h6f8
+b4c2 120. c6c4 g8f8 121. c4c6 g3g2 122. c8b7 f8e8 123. b7a6 c2e1q 124. c6b6
+e1c2 125. b6b7 g2g1n 126. c3c4 e8d8 127. b7f7 f5f4 128. c4c5 g1e2 129. a6b7
+e2c1q 130. b7c6 c1d3 131. f7h7 c2a1q 132. h7h2 d8c8 133. c6d5 d3f2 134. d5d6
+f2d3 135. h2h1 c8d8 136. d6e6 d3c1 137. h1h7 a1c2 138. c5c6 c2e1q 139. h7g7
+f4f3 140. g7g1 d8c7 141. e6f6 f3f2 142. f6e5 c7c8 143. g1g3 c1e2 144. g3c3 e1c2
+145. c3h3 e2c1q 146. b5b6 c8d8 147. e5d6 c2d4 148. h3e3 d4b3 149. e3c3 b3a5
+150. c6c7 d8e8 1/2-1/2
+
