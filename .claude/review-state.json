@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "purpose": "Tracks the last commit reviewed by the scheduled bug-review routine on this branch. Next run should diff from `last_reviewed_sha` to current HEAD and review only new commits.",
+  "branch": "claude/modest-rubin-p9w0r5",
+  "last_reviewed_sha": "bde4f9b",
+  "last_reviewed_base": "68b29ef",
+  "history": [
+    {
+      "date": "2026-07-26",
+      "base": "68b29ef",
+      "head": "bde4f9b",
+      "commits": 15,
+      "files": 7,
+      "findings_severe": 1,
+      "findings_confirmed": 3,
+      "findings_plausible": 4,
+      "top_finding": "src/selfplay/champion.rs:80 — ChampionStore::promote does not swap champion InferenceBackend; champion server orphaned after first promotion"
+    }
+  ]
+}
