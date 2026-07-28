@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "last_reviewed_head": "bde4f9be00d1c59b648a4f3c8e59d63c9121d99c",
+  "last_reviewed_branch": "claude/modest-rubin-y0q8d7",
+  "last_reviewed_at": "2026-07-28",
+  "history": [
+    {
+      "reviewed_at": "2026-07-28",
+      "head": "bde4f9be00d1c59b648a4f3c8e59d63c9121d99c",
+      "range": "7b53e5d^..bde4f9b",
+      "commits": 10,
+      "topic": "elo-promotion feature",
+      "verdict": "BUGS_FOUND",
+      "bugs_high_confidence": 3,
+      "bugs_med_confidence": 1,
+      "bugs_low_confidence": 1,
+      "summary": "bootstrap-forever trap (excluded champion_version + fallback to challenger evaluator); Elo gate weakened (~52% vs old 55%) because candidate/opponent Elo reset to 1500 each cycle regardless of archive strength; version-attribution race between weight_loader and model_version_rx; env-var silent defaults on garbage/0; potential mid-batch weight swap on opponent inference server",
+      "files_of_interest": [
+        "src/selfplay/evaluation.rs",
+        "src/selfplay/champion.rs",
+        "src/selfplay/elo.rs",
+        "src/bin/selfplay.rs"
+      ]
+    }
+  ]
+}
