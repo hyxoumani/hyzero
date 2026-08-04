@@ -1,0 +1,2 @@
+# Bug-focused review log. One line per round: date, last-reviewed HEAD sha, scope.
+2026-08-04 bde4f9be00d1c59b648a4f3c8e59d63c9121d99c elo-promotion feature review (7b53e5d..bde4f9b)
