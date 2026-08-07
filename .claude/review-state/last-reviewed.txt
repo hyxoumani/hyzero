@@ -1,0 +1,3 @@
+last_reviewed_sha=bde4f9be00d1c59b648a4f3c8e59d63c9121d99c
+last_reviewed_at=2026-08-07
+scope=commits 7b53e5d..9450e38 (elo ladder feature) reviewed for bugs on 2026-08-07; higher-severity findings pushed via notification
