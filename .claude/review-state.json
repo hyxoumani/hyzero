@@ -1,0 +1,49 @@
+{
+  "schema": "hyzero-review-state/v1",
+  "purpose": "Persistent state for the scheduled bug-focused code review. Records the last SHA reviewed, per-run findings, and open questions so subsequent runs pick up from where the previous run stopped.",
+  "current_head_reviewed": "bde4f9be00d1c59b648a4f3c8e59d63c9121d99c",
+  "runs": [
+    {
+      "run_date": "2026-08-12",
+      "branch": "claude/modest-rubin-yk9xqk",
+      "reviewed_range": "7b53e5d..bde4f9b",
+      "scope_summary": "elo-promotion feature cluster (10 commits: elo math module, archive pool enumeration, opponent inference plumbing, per-opponent ladder eval task, env-var wiring, candidate_elo baseline scoring, plus fmt/doc/wiki/log commits)",
+      "focus": "bugs only (not style, not tests-missing, not docs)",
+      "findings": [
+        {
+          "id": "run1-f1",
+          "severity": "HIGH",
+          "category": "correctness",
+          "status": "CONFIRMED (adversarial second-pass verified all load-bearing details)",
+          "title": "Elo ladder cannot activate after first promotion — pool excludes just-promoted champion and bootstrap fallback matches challenger against itself",
+          "files": [
+            "src/selfplay/pool.rs:33-35",
+            "src/selfplay/evaluation.rs:246-251",
+            "src/selfplay/evaluation.rs:282",
+            "src/selfplay/evaluation.rs:543-546",
+            "src/selfplay/champion.rs:58-60",
+            "src/selfplay/champion.rs:79-83",
+            "src/bin/selfplay.rs:454",
+            "src/bin/selfplay.rs:495",
+            "src/bin/selfplay.rs:521-529",
+            "scripts/run_baseline.sh:120-122"
+          ],
+          "failure_scenario": "Fresh baseline run cleans best_v*.pt. Cycle 1: pool empty, bootstrap path plays challenger vs. frozen best.pt (resume checkpoint), challenger wins, promote() writes best_v{V1}.pt and stores challenger_evaluator.clone() as champion. Cycle 2+: pool = {V1} \\ {exclude=V1} = empty; bootstrap uses champion_store.champion() which is the challenger's own evaluator handle routed through the same inference_tx channel → challenger-vs-itself on live training weights → win_rate ≈ 0.5, rarely crosses promotion_threshold=0.55. Log signature: PROMOTIONS=1 with LAST_CANDIDATE_ELO=1500.0 for many cycles, 'pool_size=0 opponents=none' in every [eval] ladder_match line despite best_v*.pt archives existing on disk. Ladder self-heals only after a second lucky bootstrap promotion.",
+          "dead_code_note": "src/bin/selfplay.rs:521-529 wires a SwappableBackend champion_backend, but self.champion_backend (set at evaluation.rs:148) is never read anywhere; the _swappable binding is dropped immediately in the non-resume branch (bin/selfplay.rs:359).",
+          "minimal_fixes": [
+            "(a) Pass sentinel 0 (or None) instead of champion_version at src/selfplay/evaluation.rs:249 so the just-promoted archive stays in the pool. Opponent server reloads weights per pool member (with_opponent's load_weights loop), so serving the same version the challenger is compared to is fine (snapshot vs. live-evolving challenger).",
+            "(b) Wire champion_backend for real: on promote, swap it to a fresh PyO3Backend loaded from the checkpoint src so champion_store.champion() routes through an independent inference server whose weights lag the challenger."
+          ],
+          "open_design_question": "Should the pool be 'past champions including current-snapshot' (fix a) or 'strictly older past champions with independent inference server' (fix b)? Author decision required."
+        }
+      ],
+      "clean_areas_this_run": [
+        "src/selfplay/elo.rs — expected_score and update formulas match canonical FIDE (1/(1+10^((r_b-r_a)/400)); r + k*(s - E)); f32 test values hand-verifiable.",
+        "src/selfplay/pool.rs parser — handles missing/non-matching/bad-UTF8 filenames safely.",
+        "scripts/run_baseline.sh awk extractor — correctly defaults candidate_elo=1500.0 for pre-feature logs.",
+        "std::sync::Mutex around Py<PyAny> for opp_handle — serialization correct via GIL because Python::attach is on both paths.",
+        "Archive-pruning invariant in champion.rs — unchanged in this range; preserves latest_archive_versions' newest-first assumption."
+      ]
+    }
+  ]
+}
