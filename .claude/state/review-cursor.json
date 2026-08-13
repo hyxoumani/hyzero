@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "last_reviewed_sha": "bde4f9be00d1c59b648a4f3c8e59d63c9121d99c",
+  "last_reviewed_short": "bde4f9b",
+  "reviewed_range": "7b53e5d..bde4f9b",
+  "reviewed_at": "2026-08-13",
+  "reviewer": "scheduled bug-review",
+  "branch_at_review": "claude/modest-rubin-fzaptl",
+  "findings_summary": {
+    "bugs": 1,
+    "risks": 3,
+    "test_gaps": 2,
+    "top_finding": "scripts/run_baseline.sh:251 hardcodes 1500.0 initial Elo; ignores HYZERO_OPPONENT_INITIAL_ELO override, silently inflates baseline SCORE."
+  },
+  "notes": "First run — no prior cursor. Next scheduled run should review commits reachable from the branch tip but not from this sha."
+}
