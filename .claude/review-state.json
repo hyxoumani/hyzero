@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "purpose": "Marker for the scheduled bug-review routine. Next run should diff `reviews[-1].reviewed_sha`..HEAD to find unreviewed commits.",
+  "reviews": [
+    {
+      "date": "2026-08-15",
+      "reviewed_sha": "bde4f9be00d1c59b648a4f3c8e59d63c9121d99c",
+      "branch": "claude/modest-rubin-edy7gi",
+      "scope": "elo-promotion feature (commits 7b53e5d..bde4f9b) + tuning commits (7b5dd87, aff97fb)",
+      "findings": {
+        "high": 2,
+        "medium": 1,
+        "low": 3
+      },
+      "notes": "See push-notification body for detail. Top items: evaluation.rs:543 champion pool bootstrap collapses to challenger-vs-self; run_baseline.sh:129-132 unconditionally exports HYZERO_* knobs and clobbers overrides; run_baseline.sh:218-219 LAST_CANDIDATE_ELO defaults to 0 when awk pass is empty, injecting -75 into score."
+    }
+  ]
+}
