@@ -1,0 +1,40 @@
+{
+  "schema": 1,
+  "last_reviewed_sha": "bde4f9be00d1c59b648a4f3c8e59d63c9121d99c",
+  "last_reviewed_date": "2026-08-18",
+  "branch": "claude/modest-rubin-bgrluv",
+  "commit_range": "7b53e5d^..bde4f9b",
+  "reviewer": "scheduled-code-review",
+  "confirmed_findings": [
+    {
+      "id": "elo-pool-excludes-champion",
+      "severity": "critical",
+      "file": "src/selfplay/evaluation.rs",
+      "line": 249,
+      "summary": "latest_archive_versions is passed champion_version as exclude_version; the current champion is dropped from the Elo pool, so the challenger is graded only against older archives. A regression can be promoted."
+    },
+    {
+      "id": "partial-ladder-promotes",
+      "severity": "high",
+      "file": "src/selfplay/evaluation.rs",
+      "line": 383,
+      "summary": "continue 'pool_loop on read/load_weights failure skips a rung silently; the promotion gate at ~line 530 fires on the partial candidate_elo with no completeness guard, and the cooldown counter resets."
+    },
+    {
+      "id": "baseline-script-hardcodes-1500",
+      "severity": "high",
+      "file": "scripts/run_baseline.sh",
+      "line": 251,
+      "summary": "Elo score bonus subtracts a literal 1500.0 while runtime opponent_initial_elo is env-configurable via HYZERO_OPPONENT_INITIAL_ELO. A non-1500 baseline penalizes improvement."
+    }
+  ],
+  "other_flagged": [
+    "LAST_CANDIDATE_ELO polluted by bootstrap/skip cycles (scripts/run_baseline.sh:210-218)",
+    "candidate_elo resets each cycle so cross-run comparisons are apples-to-oranges (src/selfplay/evaluation.rs:264)",
+    "PGN round-tag collisions across pool opponents (src/selfplay/evaluation.rs:422-427,460-465)",
+    "Bootstrap promoted-line prints fabricated candidate_elo=1500.0 (src/selfplay/evaluation.rs:550-556)",
+    "opp_handle mutex .unwrap() poisons hard-crash the eval loop (src/selfplay/evaluation.rs:397)",
+    "Promotion gate uses `>=` in bootstrap vs. `>` in pool branch (src/selfplay/evaluation.rs:530-534)"
+  ],
+  "verification": "top 3 findings independently verified by adversarial analyst pass — all confirmed"
+}
