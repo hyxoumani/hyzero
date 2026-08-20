@@ -1,0 +1,14 @@
+# Scheduled bug-review watermark. Updated after each successful review.
+# Format: KEY=VALUE lines. Next run should review commits after `sha`.
+
+sha=bde4f9be00d1c59b648a4f3c8e59d63c9121d99c
+short_sha=bde4f9b
+date=2026-08-20
+range_reviewed=7b53e5d..bde4f9b
+commits_reviewed=8
+files_reviewed=6
+
+# Findings from this run (2 confirmed, both operator-UX warnings in elo-promotion):
+# 1. src/selfplay/evaluation.rs:277 — spurious "archive deletion" WARN on every fresh baseline
+# 2. src/bin/selfplay.rs:174   — HYZERO_PROMOTION_THRESHOLD notice always prints (run_baseline.sh always exports the var)
+# Elo math and pool enumeration verified clean.
