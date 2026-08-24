@@ -1,0 +1,8 @@
+{
+  "purpose": "Tracks the newest commit SHA the scheduled bug-review routine has already covered. Next run should review commits strictly newer than last_reviewed_sha.",
+  "last_reviewed_sha": "bde4f9be00d1c59b648a4f3c8e59d63c9121d99c",
+  "last_reviewed_short": "bde4f9b",
+  "last_reviewed_at": "2026-08-24",
+  "scope": "elo-promotion feature (commit range 0ab40d4..bde4f9b, 13 commits, 5 code files)",
+  "verdict": "no real bugs"
+}
