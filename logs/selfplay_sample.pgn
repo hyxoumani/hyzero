@@ -64,3 +64,16 @@ e1d2 138. e6d5 d1e3 139. d5a2 b6b7 140. h1h2 b7c8 141. a2c4 d2e1q 142. c4b3
 e3g2 143. h2g2 c8b8 144. b3f7 e1g3 145. f7d5 g3f2 146. g2h1 b8a7 147. d5b7 a7b8
 148. h1g2 f2b6 149. b7f3 b6c7 150. g2f2 c7h2 1/2-1/2
 
+[Event "Selfplay model_v1"]
+[White "selfplay_white"]
+[Black "selfplay_black"]
+[Result "1/2-1/2"]
+
+1. b1c3 g8h6 2. c3b5 h8g8 3. f2f4 d7d6 4. h2h3 b8a6 5. c2c4 e7e5 6. e2e3 c8d7
+7. g1f3 d7c6 8. a2a3 d6d5 9. e1e2 d8d7 10. e2d3 h6g4 11. d1a4 h7h5 12. g2g3
+f7f5 13. a4d1 g7g5 14. f3g5 a6c5 15. d3c3 g8g5 16. a1b1 e5e4 17. c3d4 a7a6 18. h1g1
+c6b5 19. b2b3 e8f7 20. c4b5 d7e8 21. d4c3 c5a4 22. b3a4 a8a7 23. d1e1 f8c5 24. a4a5
+e8g8 25. f1c4 c5d6 26. b5b6 f7f6 27. a3a4 d6b4 28. c3d4 c7c6 29. c4d5 g4e5 30. b1a1
+e5c4 31. d5c4 g8h8 32. e1f2 b4c5 33. d4c5 h8c8 34. g3g4 c8g8 35. g4h5 g5g2 36. c1b2
+f6e7 37. a1a2 g8b8 38. g1a1 b8d6 1/2-1/2
+
