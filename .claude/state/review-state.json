@@ -1,0 +1,39 @@
+{
+  "purpose": "Tracks the last commit reviewed by the scheduled bug-review routine. Update `last_reviewed_sha` to the current HEAD after each review pass; the next run reviews only commits in `last_reviewed_sha..HEAD`.",
+  "last_reviewed_sha": "bde4f9b",
+  "last_reviewed_at": "2026-08-25",
+  "reviewed_range": "7b53e5d..bde4f9b",
+  "reviewed_feature": "elo-promotion ladder",
+  "findings": {
+    "confirmed": [
+      {
+        "file": "src/selfplay/evaluation.rs",
+        "lines": [424, 462],
+        "summary": "write_pgn_game emits colliding game numbers across pool opponents in the same cycle — with pool_size=3, gps=4, cycle=5, three PGN entries share header 'Eval Cycle 5 Game 1', three share 'Game 2', etc.; downstream tools indexing by (cycle, game_num) see ambiguous entries."
+      },
+      {
+        "file": "scripts/run_baseline.sh",
+        "lines": [251],
+        "summary": "SCORE formula hardcodes '- 1500.0' while training's baseline is the configurable HYZERO_OPPONENT_INITIAL_ELO — setting the env var to 1400 makes a matched candidate score (1400-1500)*0.05 = -5.0 (spurious regression)."
+      }
+    ],
+    "suspicious": [
+      {
+        "file": "src/selfplay/evaluation.rs",
+        "lines": [246, 270],
+        "summary": "After first promotion, pool excludes champion_version and the only archive is best_v001.pt, so pool is empty and cycle 2 re-enters bootstrap emitting misleading 'unexpected archive deletion' WARN; Elo path only activates after the second promotion."
+      },
+      {
+        "file": "src/bin/selfplay.rs",
+        "lines": [144, 159],
+        "summary": "Four new HYZERO_* env vars use .parse().ok().unwrap_or(default), silently reverting to defaults on typos; startup banner prints resolved value so no baseline notice would flag it."
+      },
+      {
+        "file": "src/selfplay/evaluation.rs",
+        "lines": [264],
+        "summary": "candidate_elo accumulates across all pool members treating each as rating=1500; with large pool_size a genuinely stronger candidate may asymptote just under 1500 + promotion_elo_delta — check whether the gate needs to scale with pool_size."
+      }
+    ]
+  },
+  "notes_for_next_run": "On next run, review commits in bde4f9b..HEAD; update last_reviewed_sha to the new HEAD after finishing. Do NOT re-review confirmed/suspicious findings above unless they were addressed by a fix commit in the new range."
+}
