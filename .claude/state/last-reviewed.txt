@@ -1,0 +1,3 @@
+sha: bde4f9be00d1c59b648a4f3c8e59d63c9121d99c
+date: 2026-08-26
+scope: elo-ladder promotion feature (7b5dd87..bde4f9b), no bugs found
