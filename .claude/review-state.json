@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "last_reviewed_sha": "bde4f9be00d1c59b648a4f3c8e59d63c9121d99c",
+  "last_reviewed_at": "2026-08-30",
+  "branch": "claude/modest-rubin-y7u7zd",
+  "findings_summary": {
+    "confirmed": 0,
+    "plausible": 5,
+    "notes": [
+      "src/mcts/tree.rs simulate_with_root_action: raw-pointer aliasing with a subsequent &mut self call — under stacked borrows this is UB; run_simulations_puct pattern avoids it by hoisting the mut-borrow.",
+      "src/selfplay/evaluation.rs pool loop: PGN entries write duplicate (cycle, game_idx) tuples per opponent; only distinguished by pool tag in header. Breaks tools assuming uniqueness.",
+      "src/selfplay/evaluation.rs pool loop: candidate_elo carries across opponents; terminal elo is order-sensitive when opponents differ. Commit msg claims intentional but worth double-check.",
+      "src/mcts/tree.rs:511 gumbel_top_k=1 edge case: no exploration if sole candidate is terminal-only branch. Unlikely in chess.",
+      "scripts/run_baseline.sh candidate_elo awk fallback is doubled — currently safe, fragile to future changes."
+    ]
+  }
+}
