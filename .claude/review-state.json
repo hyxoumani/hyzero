@@ -1,0 +1,15 @@
+{
+  "last_reviewed_head": "bde4f9be00d1c59b648a4f3c8e59d63c9121d99c",
+  "last_reviewed_at": "2026-08-31",
+  "branch": "claude/modest-rubin-6whske",
+  "reviews": [
+    {
+      "date": "2026-08-31",
+      "range": "aff97fb..bde4f9be00d1c59b648a4f3c8e59d63c9121d99c",
+      "commits": 13,
+      "focus": "bugs",
+      "report": "docs/reviews/2026-08-31-elo-ladder.md",
+      "findings": { "HIGH": 0, "MED": 3, "LOW": 3 }
+    }
+  ]
+}
