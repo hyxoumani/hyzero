@@ -1,0 +1,15 @@
+{
+  "last_reviewed_sha": "bde4f9b",
+  "last_reviewed_branch": "main",
+  "reviewed_at": "2026-09-01",
+  "scope": "10 commits from 5f30ea8..bde4f9b — Gumbel-Top-K MCTS + elo-promotion series",
+  "verdict": "0 confirmed bugs, 6 plausible/latent (all in new Gumbel + eval-ladder code)",
+  "findings_summary": [
+    "game_task.rs:19-25 — env-var truthiness parses 'false'/'no'/'off' as ON",
+    "gumbel.rs:44 — sigma_q uses multiplication where Danihelka paper uses exponentiation (masked by default c_scale=1.0)",
+    "tree.rs run_simulations_gumbel — halving can drop visited candidates when num_simulations < num_rounds * k_initial",
+    "tree.rs run_simulations_gumbel — non-power-of-two K skews visit distribution used as training target",
+    "evaluation.rs — lock().unwrap() panics on poisoned mutex, kills subsequent eval cycles",
+    "evaluation.rs — no drain/barrier before load_weights; latent race if eval is parallelized"
+  ]
+}
