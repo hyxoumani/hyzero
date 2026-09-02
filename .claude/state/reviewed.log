@@ -1,0 +1,20 @@
+# Scheduled bug-review log
+# Each entry: date, reviewer session, commit range covered, findings summary.
+# Newest entry at the bottom.
+
+2026-09-02  session=session_01EQLuYoWYpUE1Aq6Nua6GHr  range=0ab40d4..bde4f9b  scope=elo-promotion feature (~1062 LOC, src/bin/selfplay.rs, src/selfplay/{elo,pool,evaluation,mod}.rs, scripts/run_baseline.sh)
+  Bugs found: 1
+    - [low, latent] src/selfplay/evaluation.rs:527  cooldown_ok can stick if opponent_server_handle is ever None
+      The pool-nonempty / opponent-handle-unset fallback path (evaluation.rs:346-376) logs a ladder_match line and `continue`s WITHOUT
+      incrementing total_games_since_last_promotion. Today src/bin/selfplay.rs:530 always sets the handle, so this is dormant.
+      Failure scenario: with HYZERO_PROMOTION_COOLDOWN>0, a nonempty best_v*.pt pool, and opponent_server_handle=None (would require
+      a future refactor to reach), every cycle hits the skip path, the counter stays at 0, and promotion never fires even after the
+      challenger crosses promotion_elo_delta.
+      Fix suggestion (if/when reached): increment total_games_since_last_promotion on the skip path too, or gate the
+      cooldown_ok check on whether ladder games actually ran this cycle.
+  Nothing else surfaced. Verified: elo formulas match standard Elo (elo.rs unit tests), White/Black sign flip at
+  evaluation.rs:468 matches DualGameOutcome convention, pool exclusion of the current champion is intentional, awk
+  candidate_elo= extractor defaults to 1500.0 on missing field and is guarded by EVAL_CYCLES>0, opponent-server/batcher
+  lifecycle is dedicated (no shared state with self-play), Python::attach under GIL correctly serializes load_weights
+  vs batcher inference, win_rate denominator uses scored_games.len() so failed-load opponents don't inflate it,
+  cycle-boundary reset of candidate_elo matches the documented "post-cycle Elo" semantics.
