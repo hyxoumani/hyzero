@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "description": "Tracks commits reviewed by the scheduled bug-review routine. last_reviewed_sha is the newest commit that has been reviewed; future runs should look for commits after this SHA (excluding commits that only modify this file).",
+  "last_reviewed_sha": "bde4f9be00d1c59b648a4f3c8e59d63c9121d99c",
+  "reviews": [
+    {
+      "date": "2026-09-04",
+      "range": "0ab40d4..bde4f9b",
+      "topic": "elo-promotion feature (elo math, archive pool helper, per-opponent ladder eval task, opponent inference server, env-var wiring, baseline candidate_elo extraction, cargo fmt, log artifacts, wiki restructure)",
+      "commit_count": 13
+    }
+  ]
+}
