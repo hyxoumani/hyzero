@@ -1,0 +1,14 @@
+# Scheduled bug-review checkpoint.
+# Updated by the scheduled routine after each review pass.
+# Each entry records: the HEAD sha at review time, the diff base it was reviewed from,
+# the review focus, when it ran, and a one-line result summary.
+last_reviewed_head: bde4f9be00d1c59b648a4f3c8e59d63c9121d99c
+last_reviewed_base: aff97fbd5429d8908c900563d3c3983b516ad9a9
+focus: bugs
+history:
+  - head: bde4f9be00d1c59b648a4f3c8e59d63c9121d99c
+    base: aff97fbd5429d8908c900563d3c3983b516ad9a9
+    date: 2026-09-08
+    focus: bugs
+    scope: "elo-promotion series (13 commits: 7b53e5d..bde4f9b)"
+    findings: "5 (1 HIGH, 1 MED, 3 LOW); notification sent"
