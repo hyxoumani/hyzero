@@ -1,0 +1,17 @@
+{
+  "last_reviewed_sha": "bde4f9be00d1c59b648a4f3c8e59d63c9121d99c",
+  "last_reviewed_at": "2026-09-22",
+  "reviewer": "scheduled-bug-review",
+  "reviewed_commits": [
+    "9450e38", "0c35f8f", "a93b077", "2a38e77", "9ddee3a",
+    "7b53e5d", "aff97fb", "7b5dd87", "5f30ea8"
+  ],
+  "confirmed_bugs": [],
+  "worth_a_look": [
+    "src/mcts/tree.rs:640-682 — raw *const MCTSNode across await, fragile if refactored",
+    "scripts/run_baseline.sh:250 — hard-coded 1500.0 Elo baseline, drifts if HYZERO_OPPONENT_INITIAL_ELO retuned",
+    "src/selfplay/pool.rs:22-45 — latest_archive_versions excludes live champion; confirm intended",
+    "src/selfplay/evaluation.rs — all-pool-load-failure yields elo=1500 (0-contrib to composite) instead of skipping cycle",
+    "src/mcts/gumbel.rs:78-123 — improved_policy computed but unused; training target is raw visit counts"
+  ]
+}
