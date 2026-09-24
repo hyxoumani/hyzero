@@ -1,0 +1,7 @@
+{
+  "last_reviewed_sha": "bde4f9be00d1c59b648a4f3c8e59d63c9121d99c",
+  "last_reviewed_at": "2026-09-24T00:00:00Z",
+  "branch": "claude/modest-rubin-tos66x",
+  "notes": "Initial baseline for scheduled bug-review routine. HEAD == origin/main at baseline; nothing new to review yet. Future runs diff HEAD against last_reviewed_sha and append per-window findings to findings_history.",
+  "findings_history": []
+}
