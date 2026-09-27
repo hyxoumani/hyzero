@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "purpose": "Tracks how far the scheduled bug-focused review routine has read the branch. Future runs compare origin/HEAD to last_reviewed_sha and review only new commits.",
+  "last_reviewed_sha": "bde4f9be00d1c59b648a4f3c8e59d63c9121d99c",
+  "last_reviewed_at": "2026-09-27T00:00:00Z",
+  "scope_this_pass": {
+    "range": "aff97fbd5429d8908c900563d3c3983b516ad9a9..bde4f9be00d1c59b648a4f3c8e59d63c9121d99c",
+    "focus": "elo-promotion feature (bugs)",
+    "confirmed_findings": [
+      {
+        "severity": "critical",
+        "file": "src/selfplay/pool.rs",
+        "line": 33,
+        "summary": "latest_archive_versions excludes champion_version, so after first promotion the pool is always empty and eval falls into the bootstrap branch which plays mirror games (challenger vs. challenger_evaluator.clone())"
+      },
+      {
+        "severity": "latent",
+        "file": "src/selfplay/evaluation.rs",
+        "line": 344,
+        "summary": "(None,_) match arm continues after last_evaluated_version was advanced; if a caller ever omits .with_opponent(...) while pool is nonempty, versions are silently dropped. No live caller today."
+      }
+    ],
+    "design_flag": {
+      "file": "src/selfplay/evaluation.rs",
+      "line": 264,
+      "summary": "candidate_elo resets to opponent_initial_elo each cycle; slow gains (<promotion_elo_delta per cycle) never cross the gate. Defensible since each cycles net is freshly trained."
+    },
+    "unverified_findings_count": 12
+  }
+}
