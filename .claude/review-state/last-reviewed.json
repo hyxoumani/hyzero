@@ -1,0 +1,7 @@
+{
+  "reviewed_head": "bde4f9be00d1c59b648a4f3c8e59d63c9121d99c",
+  "reviewed_branch": "claude/modest-rubin-tgog21",
+  "reviewed_at": "2026-09-27",
+  "reviewer": "scheduled bug-focused review routine",
+  "notes": "Reviewed elo-promotion series (7b53e5d..bde4f9b). 2 MEDIUM + 3 LOW findings surfaced via push notification; see session transcript. Next run: review commits after this sha."
+}
