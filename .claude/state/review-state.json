@@ -1,0 +1,99 @@
+{
+  "schema_version": 1,
+  "routine": "bug-review",
+  "branch": "claude/modest-rubin-j1oqmn",
+  "reviewed_at": "2026-09-30T16:30:46Z",
+  "base_ref": "origin/main",
+  "head_reviewed": "bde4f9b",
+  "commits_reviewed": [
+    "7b53e5d",
+    "9ddee3a",
+    "2a38e77",
+    "a93b077",
+    "0c35f8f",
+    "9450e38"
+  ],
+  "commits_skipped": {
+    "924f6be": "cargo fmt only",
+    "df794b3": "docs only"
+  },
+  "files_inspected": [
+    "src/selfplay/elo.rs",
+    "src/selfplay/pool.rs",
+    "src/selfplay/evaluation.rs",
+    "src/selfplay/champion.rs",
+    "src/bin/selfplay.rs",
+    "scripts/run_baseline.sh"
+  ],
+  "findings": [
+    {
+      "id": 1,
+      "severity": "high",
+      "verdict": "CONFIRMED",
+      "file": "src/selfplay/evaluation.rs",
+      "lines": "383-488",
+      "summary": "If every pool member's load_weights fails, ladder silently logs 0 games and promotion stalls forever with no error signal."
+    },
+    {
+      "id": 2,
+      "severity": "high",
+      "verdict": "CONFIRMED",
+      "file": "src/selfplay/evaluation.rs + src/bin/selfplay.rs",
+      "lines": "543 + 529",
+      "summary": "promote() swaps champion_store Arc to the same challenger ChannelEvaluator on the live-training tx; champion_backend_handle is never load_weights'd. Combined with the pool filter that excludes current champion_version, after first promotion pool goes empty → bootstrap → champion == challenger → self-play noise. Only escapes with ≥2 archives, but filter blocks getting there."
+    },
+    {
+      "id": 3,
+      "severity": "medium",
+      "verdict": "CONFIRMED",
+      "file": "src/selfplay/evaluation.rs",
+      "lines": "783,837",
+      "summary": "Two eval tests use ..EvaluationConfig::default() so checkpoints_dir='checkpoints' relative; developers running cargo test after a real training run will fail assert_eq!(store_ref.version(), 5)."
+    },
+    {
+      "id": 4,
+      "severity": "low",
+      "verdict": "CONFIRMED",
+      "file": "src/selfplay/evaluation.rs",
+      "lines": "422-428, 460-466",
+      "summary": "PGN game numbering restarts per opponent inside the pool loop, producing duplicate 'Eval Cycle N Game K' labels within a cycle."
+    },
+    {
+      "id": 5,
+      "severity": "low",
+      "verdict": "PLAUSIBLE",
+      "file": "src/bin/selfplay.rs",
+      "lines": "104-160",
+      "summary": "All 5 new HYZERO_* env parses use .ok().and_then(parse).ok().unwrap_or(default); malformed values silently revert to defaults with no warning line."
+    },
+    {
+      "id": 6,
+      "severity": "low",
+      "verdict": "CONFIRMED",
+      "file": "src/selfplay/evaluation.rs + scripts/run_baseline.sh",
+      "lines": "264-268 + 251",
+      "summary": "run_baseline.sh awk formula hard-codes '- 1500.0'; operator override of HYZERO_OPPONENT_INITIAL_ELO desyncs baseline composite from runtime gate."
+    },
+    {
+      "id": 7,
+      "severity": "low",
+      "verdict": "CONFIRMED",
+      "file": "scripts/run_baseline.sh",
+      "lines": "210-219",
+      "summary": "LAST_CANDIDATE_ELO fallback string is dead code; a NaN/inf candidate_elo would silently coerce to 0 in awk, dropping SCORE by ~75."
+    },
+    {
+      "id": 8,
+      "severity": "low",
+      "verdict": "CONFIRMED",
+      "file": "src/selfplay/evaluation.rs",
+      "lines": "526-534",
+      "summary": "total_games_since_last_promotion not incremented in 'opp handle unset' continue branch (346-376), so cooldown fires later than intended when opponent setup skips."
+    }
+  ],
+  "notes": [
+    "Later commits on sibling branches (b1a4065 'keep champion batcher alive across promotion', 99c73fa 'surface POOL_DEAD') appear to fix findings #1 and #2 — worth checking if they have landed to main or are still stranded.",
+    "No todo!/unimplemented! in mainline paths. No mutex-across-await. Elo math and pool enumeration verified arithmetically sound.",
+    "Open question: is pool_size=0 a supported operator knob or an error? Currently silently → bootstrap forever."
+  ]
+}
