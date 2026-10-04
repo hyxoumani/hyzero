@@ -1,0 +1,4 @@
+# Scheduled bug-focused code review cursor.
+# Each row is one review run (newest first).
+# Columns: cursor-sha<TAB>iso-date<TAB>range<TAB>bugs-found<TAB>notes
+bde4f9b	2026-10-04	7b53e5d..bde4f9b	1	MED: evaluation.rs champion_backend plumbed but never used in run() — elo ladder neutered after first promotion
