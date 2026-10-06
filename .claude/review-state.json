@@ -1,0 +1,19 @@
+{
+  "last_reviewed_sha": "bde4f9be00d1c59b648a4f3c8e59d63c9121d99c",
+  "reviewed_at": "2026-10-06",
+  "window": "5f30ea8..bde4f9b",
+  "commits_reviewed": 19,
+  "bugs_found": 0,
+  "notes": [
+    "Design question (not a bug): Elo pool excludes the current champion, so a candidate that beats older archives but loses to the most-recent champion could still cross the Elo gate now that candidate_elo weights into the composite baseline score. Worth confirming intent before the next tuning sweep. See docs/wiki/champion-pool-promotion.md:50-56."
+  ],
+  "history": [
+    {
+      "sha": "bde4f9be00d1c59b648a4f3c8e59d63c9121d99c",
+      "date": "2026-10-06",
+      "window": "5f30ea8..bde4f9b",
+      "commits": 19,
+      "bugs": 0
+    }
+  ]
+}
