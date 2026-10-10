@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "last_reviewed_commit": "bde4f9be00d1c59b648a4f3c8e59d63c9121d99c",
+  "reviews": [
+    {
+      "date": "2026-10-10",
+      "head_at_review": "bde4f9be00d1c59b648a4f3c8e59d63c9121d99c",
+      "range": "7b53e5d..924f6be",
+      "scope": "Elo-promotion / per-opponent Elo ladder feature series",
+      "findings_file": ".claude/state/reviews/2026-10-10-elo-promotion.md",
+      "findings_count": 4,
+      "severity_breakdown": {
+        "high": 0,
+        "medium": 1,
+        "low_medium": 1,
+        "low": 2
+      }
+    }
+  ]
+}
