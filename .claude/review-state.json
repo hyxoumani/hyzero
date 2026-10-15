@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "routine": "claude code review",
+  "last_run_utc": "2026-10-15T16:18:14Z",
+  "main_tip_reviewed": "bde4f9b",
+  "reviewed_commits": [
+    "7b53e5d",
+    "9ddee3a",
+    "2a38e77",
+    "a93b077",
+    "0c35f8f",
+    "9450e38",
+    "68b29ef"
+  ],
+  "bugs_confirmed": 0,
+  "ruled_out_non_bugs": [
+    "env dump placement in scripts/run_baseline.sh (prints before prefix-assignment exec, misleading only)",
+    "warning at src/selfplay/evaluation.rs:277-281 fires on normal post-promotion empty pool",
+    "HYZERO_POOL_SIZE=0 silently accepted (bootstrap-forever footgun)",
+    "HYZERO_POOL_SIZE / HYZERO_PROMOTION_ELO_DELTA / HYZERO_ELO_K_FACTOR / HYZERO_OPPONENT_INITIAL_ELO not re-forwarded on run_baseline.sh exec line"
+  ],
+  "notes": "First routine run; no prior marker. ELO ladder / per-opponent eval refactor reviewed end-to-end. Elo math, score orientation, candidate_elo reset, pool enumeration, opponent inference-server plumbing, and env-var wiring all verified against concrete failure scenarios. The ignored test opponent_load_weights_changes_root_setup_output cannot be validated statically."
+}
