@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "description": "Tracks the last git SHA reviewed by the scheduled bug-review routine. Each run reviews commits in (last_reviewed_sha .. current HEAD] and updates this file. Edit only via that routine.",
+  "last_reviewed_sha": "bde4f9be00d1c59b648a4f3c8e59d63c9121d99c",
+  "last_reviewed_sha_short": "bde4f9b",
+  "last_reviewed_at": "2026-10-16T00:00:00Z",
+  "last_range_summary": "7b53e5d..bde4f9b — ELO ladder evaluation feature cluster (elo math, archive pool enumeration, per-opponent ladder match, candidate_elo scoring, env-var wiring, opponent inference server plumbing, integration tests). Analyst review found 0 bugs; math and concurrency verified sound. Design-concerns (not bugs) noted: HYZERO_ELO_K_FACTOR accepts negative; HYZERO_POOL_SIZE=0 silently bootstraps forever; env-var parse failures fall back silently."
+}
