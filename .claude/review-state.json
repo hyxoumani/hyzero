@@ -1,0 +1,29 @@
+{
+  "schema_version": 1,
+  "last_reviewed_sha": "bde4f9be00d1c59b648a4f3c8e59d63c9121d99c",
+  "last_reviewed_branch": "claude/modest-rubin-2pdp92",
+  "last_reviewed_date": "2026-10-19",
+  "reviews": [
+    {
+      "date": "2026-10-19",
+      "range": "8511b99..bde4f9b",
+      "scope": "elo-ladder / elo-promotion feature set (commits 7b53e5d..9450e38 plus follow-ups 924f6be, df794b3, 06e6129, bde4f9b)",
+      "findings_count": 1,
+      "findings": [
+        {
+          "id": "2026-10-19-01",
+          "severity": "high",
+          "confidence": "CONFIRMED",
+          "category": "test-regression",
+          "file": "src/selfplay/evaluation.rs",
+          "line_range": "836-886",
+          "test_name": "test_evaluation_task_promotes_when_threshold_zero",
+          "summary": "Test uses ..EvaluationConfig::default() which inherits the new checkpoints_dir=PathBuf::from(\"checkpoints\") field; with no .with_opponent(...), a leftover ./checkpoints/best_v*.pt from a prior selfplay run drops execution into the Elo-gate fallback branch (evaluation.rs:341-376) that logs a WARN and continues, skipping the promotion-gate at 530-557. The final assert_eq!(store_ref.version(), 5, ...) then fails.",
+          "repro": "cargo test test_evaluation_task_promotes_when_threshold_zero in a workspace where ./checkpoints/best_v001.pt exists",
+          "fix_sketch": "Point checkpoints_dir at a tmpdir like sibling tests bootstrap_path_uses_win_rate_gate (638) and bootstrap_path_blocks_when_threshold_unreachable (692), or wire .with_opponent(...) to populate opponent_evaluator and opponent_server_handle."
+        }
+      ],
+      "coverage_gap_note": "Full per-opponent Elo-gate promotion path is only exercised by the #[ignore]'d opponent_load_weights_changes_root_setup_output test, so this regression is not caught on CI."
+    }
+  ]
+}
