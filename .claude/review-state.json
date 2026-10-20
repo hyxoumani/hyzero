@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "last_reviewed_sha": "bde4f9b",
+  "last_reviewed_at": "2026-10-20",
+  "scope_description": "~15 commits introducing elo-promotion / elo-ladder feature + entropy regularization + cosine LR re-apply",
+  "runs": [
+    {
+      "run_at": "2026-10-20",
+      "head_sha": "bde4f9b",
+      "scope": "last ~15 commits on main (elo-promotion feature set, HEAD=bde4f9b)",
+      "focus": "bugs",
+      "hard_bugs_found": 0,
+      "minor_concerns": 3,
+      "report_file": ".claude/reviews/2026-10-20-bde4f9b.md"
+    }
+  ]
+}
