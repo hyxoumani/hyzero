@@ -1,0 +1,3 @@
+commit: bde4f9b
+reviewed_at: 2026-10-21
+notes: scheduled bug review; 2 findings surfaced on selfplay restart paths (see session_01GrrmZWSUa5xJUAeQgF6HET)
