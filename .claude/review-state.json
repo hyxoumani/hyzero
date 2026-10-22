@@ -1,0 +1,7 @@
+{
+  "last_reviewed_commit": "bde4f9be00d1c59b648a4f3c8e59d63c9121d99c",
+  "last_reviewed_at": "2026-10-22",
+  "commits_reviewed_this_run": 10,
+  "bugs_found_this_run": 0,
+  "notes": "First run of scheduled review-changes routine. Scope was last 10 commits on branch. Analyst deep-read src/selfplay/{elo.rs,pool.rs,evaluation.rs} and bin/selfplay.rs. One low-sev latent design note (run_baseline.sh:251 hardcodes 1500.0 as Elo zero-point for score term)."
+}
