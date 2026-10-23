@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "purpose": "Tracks what the scheduled bug-review routine has already reviewed. Future firings should review commits newer than last_reviewed_sha.",
+  "last_reviewed_sha": "bde4f9be00d1c59b648a4f3c8e59d63c9121d99c",
+  "last_reviewed_short": "bde4f9b",
+  "last_reviewed_at": "2026-10-23",
+  "reviews": [
+    {
+      "range": "7b53e5d..bde4f9b",
+      "at": "2026-10-23",
+      "scope": "elo-promotion / elo-ladder feature + follow-ups",
+      "findings_high": 0,
+      "findings_med": 0,
+      "findings_low": 4,
+      "notes": "No HIGH bugs. 4 LOW findings surfaced to user: PGN label collisions, scary 'pool empty' warning on first-run resume, misconfig fallback inflates cycle count, dead `champion_backend` field → challenger-vs-itself in bootstrap pool-empty path after first promotion."
+    }
+  ]
+}
