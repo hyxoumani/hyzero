@@ -1,0 +1,12 @@
+{
+  "last_reviewed_sha": "bde4f9be00d1c59b648a4f3c8e59d63c9121d99c",
+  "reviews": [
+    {
+      "reviewed_at": "2026-10-25",
+      "range": "origin/main..bde4f9be00d1c59b648a4f3c8e59d63c9121d99c",
+      "verdict": "NOTHING_NEW",
+      "bugs_found": 0,
+      "note": "First run; branch has no commits ahead of origin/main. Baseline recorded."
+    }
+  ]
+}
