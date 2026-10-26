@@ -1,0 +1,28 @@
+{
+  "schema": 1,
+  "last_reviewed_sha": "bde4f9be00d1c59b648a4f3c8e59d63c9121d99c",
+  "last_reviewed_at": "2026-10-26T16:19:15Z",
+  "history": [
+    {
+      "range": "0ab40d4..bde4f9b",
+      "head_sha": "bde4f9be00d1c59b648a4f3c8e59d63c9121d99c",
+      "at": "2026-10-26T16:19:15Z",
+      "scope": "elo-promotion feature (13 commits, *.rs and *.py only)",
+      "findings_count": 2,
+      "findings": [
+        {
+          "severity": "bug",
+          "file": "src/selfplay/evaluation.rs",
+          "lines": "340-376, 837",
+          "summary": "test_evaluation_task_promotes_when_threshold_zero fails deterministically on any dev machine where ./checkpoints/best_v*.pt exists; EvaluationConfig::default() sets checkpoints_dir='checkpoints', and the pool-is-nonempty-but-no-opponent arm skips the promotion gate (continue at line 530). Expected version=5, actual version=0."
+        },
+        {
+          "severity": "noise",
+          "file": "src/selfplay/evaluation.rs",
+          "lines": "277-281",
+          "summary": "Bootstrap-fallback WARN condition `if champion_version > 0` fires a false alarm when the only archive on disk is best_v{champion_version}.pt itself (pool.rs excludes current champion from the returned list)."
+        }
+      ]
+    }
+  ]
+}
