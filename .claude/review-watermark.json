@@ -1,0 +1,9 @@
+{
+  "last_reviewed_sha": "bde4f9be00d1c59b648a4f3c8e59d63c9121d99c",
+  "last_reviewed_short": "bde4f9b",
+  "last_reviewed_at": "2026-10-28T16:15:00Z",
+  "trigger_id": "trig_01MjanyHZiHiUrjHn5UE9URg",
+  "scope": "last 15 commits — elo-promotion chain + policy entropy + cosine LR",
+  "findings_count": 1,
+  "note": "Scheduled-review watermark. Next run should review commits newer than last_reviewed_sha."
+}
