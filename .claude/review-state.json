@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "last_reviewed_sha": "9450e38",
+  "last_reviewed_subject": "baseline: extract candidate_elo from ladder_match and add to score",
+  "last_review_date": "2026-10-30",
+  "scope_reviewed": "7b53e5d..9450e38 (elo-promotion / per-opponent Elo ladder series)",
+  "focus": "bugs",
+  "findings_count": 6,
+  "high_severity_findings": [
+    {
+      "ref": "src/selfplay/evaluation.rs:247-251 + src/selfplay/pool.rs:33-34",
+      "summary": "Elo gate takes TWO promotions to activate — latest_archive_versions filters out the just-written best_v{N}.pt via exclude_version, so cycle 2 pool is empty and bootstrap fires again. In short baselines (0-1 promotions), candidate_elo stays at 1500 and the whole feature is a no-op."
+    },
+    {
+      "ref": "src/selfplay/evaluation.rs:537-546 → src/selfplay/champion.rs:86-108",
+      "summary": "First promotion silently writes no archive when training has not yet called save_checkpoint — ChampionStore::promote(.., None) bumps version but skips persist_champion_checkpoint. Combined with finding #1, can wedge the ladder in bootstrap mode indefinitely."
+    }
+  ],
+  "medium_severity_findings": [
+    {
+      "ref": "src/selfplay/evaluation.rs:347-376",
+      "summary": "pool-nonempty + opponent-unset path skips the promotion gate (continue bypasses :526-557). Not reachable from the shipped binary but a trap for alternate wiring."
+    },
+    {
+      "ref": "src/selfplay/evaluation.rs:383-410 → :506-521",
+      "summary": "all-pool-members-fail-to-load emits a misleading success-shaped ladder_match log with candidate_elo=1500 — baseline script treats it as a normal cycle."
+    }
+  ],
+  "low_severity_findings": [
+    {
+      "ref": "src/selfplay/evaluation.rs:424 and :462",
+      "summary": "PGN game-number collisions across opponents in a single cycle — same `[Event \"... Game N\"]` header appears pool_size times."
+    },
+    {
+      "ref": "src/selfplay/evaluation.rs:397",
+      "summary": "opp_handle.lock().unwrap() panics on mutex poisoning — any Python panic (unlikely but possible via KeyboardInterrupt) wedges every subsequent eval cycle."
+    }
+  ],
+  "test_gap": "No test covers the second-cycle-after-first-promotion transition from bootstrap→Elo (would seed tempdir with best_v001.pt, set champion_version==1, run a cycle). Such a test would have caught finding #1.",
+  "not_bugs_verified": [
+    "elo math (expected_score / update_rating signs and K-factor)",
+    "-outcome.game_outcome sign flip for black-side scoring",
+    "env-var parsing defaults + serial test lock",
+    "candidate_elo regex extraction in scripts/run_baseline.sh:210-219",
+    "opponent inference server lifetime (single-threaded owner, no deadlock)"
+  ]
+}
