@@ -1,0 +1,8 @@
+{
+  "last_reviewed_sha": "bde4f9be00d1c59b648a4f3c8e59d63c9121d99c",
+  "last_reviewed_at": "2026-11-04T16:17:15Z",
+  "scope_this_run": "7b53e5d^..bde4f9b (elo-ladder / elo-promotion)",
+  "findings": { "high": 0, "medium": 0, "low": 0 },
+  "verdict": "clean",
+  "routine": "claude code review"
+}
