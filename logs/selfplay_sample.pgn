@@ -96,3 +96,36 @@ c7d8 128. b5b4 c6d6 129. b4a4 d8c7 130. a4b4 c7b6 131. b4c3 b6c7 132. c3b3 d6d8
 c7d8 139. c4d5 c8c1 140. d5e4 c1c5 141. e4f4 d8e8 142. f4f3 c5b5 143. f3g4 b5a5
 144. g4h4 a5h5 145. h4g3 h5h3 146. g3h3 1/2-1/2
 
+[Event "Selfplay model_v1"]
+[White "selfplay_white"]
+[Black "selfplay_black"]
+[Result "1/2-1/2"]
+
+1. h2h3 f7f5 2. a2a4 f5f4 3. e2e4 a7a5 4. f2f3 g7g6 5. c2c3 f8g7 6. b1a3 g7f8
+7. d1b3 h7h5 8. e1e2 d7d5 9. a1a2 e8f7 10. b3d5 f7f6 11. e2f2 d8d6 12. f1d3
+c8d7 13. c3c4 d6a6 14. d3e2 h8h6 15. d5g8 h6h8 16. e2f1 a6c6 17. g8e6 f6g5 18. f1e2
+a8a6 19. e6d6 c7d6 20. e2f1 a6b6 21. f1d3 f8h6 22. d3c2 h6f8 23. d2d3 f8g7 24. g2g3
+c6c5 25. f2e1 h8g8 26. g3f4 g5f6 27. a3b1 g8d8 28. g1e2 d8f8 29. e1d1 c5e5 30. b2b3
+f6f7 31. c1e3 f7e6 32. d1e1 b6b3 33. e2c3 f8d8 34. c3d5 g7h8 35. e1f2 b8c6 36. d5b6
+e5b5 37. a2b2 b5c4 38. b6d5 c6e5 39. f4f5 e6f7 40. c2b3 d7e6 41. f2g3 g6f5 42. b2c2
+e5d3 43. c2h2 h8g7 44. b1a3 d8c8 45. d5f4 c4b3 46. h2a2 b3b4 47. e3c5 e6d7 48. a2b2
+g7d4 49. f4g6 d7b5 50. a3b1 b5e8 51. g6h8 f7f6 52. c5d6 c8c7 53. b2c2 e7e5 54. f3f4
+c7c2 55. d6b8 b4b2 56. h8f7 b7b5 57. f7h6 c2c8 58. b8a7 b2a3 59. h6g8 f6g6 60. a4b5
+c8c2 61. g8h6 c2a2 62. b1d2 d4f2 63. g3h2 f2a7 64. h1f1 a3a4 65. e4f5 g6g7 66. f5f6
+g7f8 67. h2h1 a4d4 68. f1f2 e8d7 69. f2e2 d3f4 70. h6f7 a7b8 71. f7g5 d4b4 72. e2g2
+a2b2 73. d2c4 b4d6 74. c4d6 d7c8 75. h1h2 c8f5 76. d6e8 f4e6 77. h3h4 f5c2 78. g2d2
+f8e8 79. d2d3 b2b4 80. d3g3 c2h7 81. g5f3 b8d6 82. g3h3 h7b1 83. f3d2 d6c5 84. h3b3
+b4a4 85. b3g3 e8f8 86. b5b6 a4h4 87. h2g2 c5e3 88. g3f3 h4h3 89. g2f1 e6d4 90. d2b1
+e3c1 91. f3e3 h3h1 92. f1f2 f8f7 93. b1a3 f7f8 94. e3c3 d4e6 95. a3c4 e6d8 96. f6f7
+h1h3 97. f2g2 h3h4 98. c4e3 f8g7 99. e3f1 e5e4 100. g2g3 a5a4 101. c3c7 g7g6
+102. f7f8n g6h6 103. f8d7 c1f4 104. g3h4 d8e6 105. f1g3 f4d6 106. g3h1 e6d8
+107. d7e5 d6a3 108. b6b7 a3e7 109. c7e7 a4a3 110. e7c7 d8f7 111. e5f7 h6g7 112. h4h3
+g7h7 113. h3g2 h7g7 114. c7d7 g7f6 115. d7d8q f6e6 116. g2g1 e6f7 117. g1f1
+e4e3 118. b7b8n f7f6 119. f1g2 h5h4 120. d8e8 f6g5 121. g2f1 h4h3 122. e8e6
+g5g4 123. e6c6 g4g5 124. c6e6 g5f4 125. e6c6 a3a2 126. c6h6 a2a1q 127. f1e2
+a1a2 128. e2f1 h3h2 129. b8a6 a2a5 130. f1g2 f4e4 131. h6h4 e4d3 132. h1g3 a5b6
+133. g3f1 b6b3 134. f1d2 b3a3 135. g2g3 d3c2 136. d2f3 a3b3 137. h4a4 b3c4 138. f3d4
+c2b1q 139. d4e2 c4f7 140. a6b4 f7b3 141. b4c2 b1c2 142. a4e4 b3b4 143. g3f4
+c2d2 144. f4g5 b4d4 145. g5h6 d2d1q 146. e2g1 d4d5 147. h6g7 d5g8 148. g7f6
+h2g1q 149. e4b4 g8c4 150. f6e5 c4f7 1/2-1/2
+
