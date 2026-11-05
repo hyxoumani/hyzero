@@ -1,0 +1,7 @@
+# Scheduled code-review task cursor.
+# Format: SHA of the last commit reviewed (inclusive). Next run reviews cursor..HEAD.
+# Updated after each successful review run.
+SHA=bde4f9be00d1c59b648a4f3c8e59d63c9121d99c
+BRANCH=main
+REVIEWED_AT=2026-11-05
+NOTES=Initial review covered the ELO-ladder feature series (7b53e5d..bde4f9b, 10 commits).
