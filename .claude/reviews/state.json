@@ -1,0 +1,7 @@
+{
+  "last_reviewed_sha": "bde4f9b",
+  "last_reviewed_at": "2026-11-06T16:17:22Z",
+  "reviewer": "scheduled-routine:claude-code-review",
+  "scope": "7b53e5d^..bde4f9b (Elo-ladder evaluation + candidate promotion code commits; docs/log-refresh/fmt commits excluded)",
+  "verdict": "no high-confidence bugs; 3 weak findings"
+}
