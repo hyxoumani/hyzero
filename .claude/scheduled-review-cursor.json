@@ -1,0 +1,10 @@
+{
+  "schema": 1,
+  "task": "scheduled-review-for-bugs",
+  "last_reviewed_commit": "bde4f9be00d1c59b648a4f3c8e59d63c9121d99c",
+  "last_reviewed_at": "2026-11-12",
+  "range": "7b53e5d..bde4f9b",
+  "commits_reviewed": 5,
+  "bugs_found": 0,
+  "notes": "Elo-promotion series (elo math, archive pool, per-opponent ladder, env wiring, baseline scorer). Clean."
+}
