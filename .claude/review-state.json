@@ -1,0 +1,5 @@
+{
+  "last_reviewed_sha": "bde4f9be00d1c59b648a4f3c8e59d63c9121d99c",
+  "last_reviewed_at": "2026-11-23",
+  "notes": "Scheduled bug-review routine. On each run, review commits in `<last_reviewed_sha>..HEAD`. Update this file + push after each run. Skip docs-only and formatting-only commits."
+}
