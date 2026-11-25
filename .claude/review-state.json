@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "purpose": "Tracks the HEAD SHA of the most recent scheduled bug review so later runs can scope their diff to only new commits.",
+  "last_reviewed_sha": "bde4f9be00d1c59b648a4f3c8e59d63c9121d99c",
+  "last_reviewed_at": "2026-11-25T16:24:20Z",
+  "history": [
+    {
+      "reviewed_at": "2026-11-25T16:24:20Z",
+      "head_sha": "bde4f9be00d1c59b648a4f3c8e59d63c9121d99c",
+      "range": "aff97fb..bde4f9b",
+      "commits_reviewed": 13,
+      "topic": "elo-promotion",
+      "findings": {
+        "confirmed_bugs": 1,
+        "plausible_bugs": 1,
+        "notes": "scripts/run_baseline.sh:251 hardcodes 1500 Elo reference; evaluation.rs PGN Event tag collisions within a cycle."
+      }
+    }
+  ]
+}
